@@ -114,10 +114,10 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 ## Tool catalog (~50 tools)
 
 ### Read (always safe)
-- `list_resources(kind, namespace?, label_selector?)` — list any built-in Kind
-- `get_resource(kind, name, namespace?)` — full JSON object
-- `get_resource_yaml(kind, name, namespace?, reveal_secrets=False)` — YAML manifest; Secrets are masked by default
-- `describe_resource(kind, name, namespace?)` — kubectl-describe-style summary
+- `list_resources(kind, namespace?, label_selector?, api_version=None)` — list any Kind; **CRDs supported** (pass `api_version='cert-manager.io/v1'` etc.; required when the same Kind exists in multiple groups)
+- `get_resource(kind, name, namespace?, api_version=None)` — full JSON object (CRD-aware)
+- `get_resource_yaml(kind, name, namespace?, reveal_secrets=False, api_version=None)` — YAML manifest; Secrets are masked by default (CRD-aware)
+- `describe_resource(kind, name, namespace?, api_version=None)` — kubectl-describe-style summary (CRD-aware)
 - `get_resource_jsonpath(kind, path, name?, namespace?, label_selector?)` — extract one field
 - `diff_resource(yaml_content)` — preview what apply_yaml would change (CREATE vs UPDATE, top-level field changes)
 - `list_pods(namespace?, label_selector?, field_selector?, include_all=False)`
@@ -139,6 +139,7 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `rollout_history(kind, name, namespace)` — list ControllerRevisions; pass revision to rollout_undo(to_revision=)
 - `get_api_resources(prefix=None)` — list cluster kinds (CRDs included)
 - `explain_resource(kind, field_path?, api_version?)` — `kubectl explain` over the OpenAPI schema
+- `get_certificate_expiry()` — aggregate cluster-certificate expiry report. **The apiserver's own serving cert isn't queryable via the K8s API**, but the 4 sources the MCP server can see (`K8S_MCP_API_CA_CERT` / in-cluster SA bundle / kubeconfig CA / kubeconfig client cert — last one only when the kubeconfig uses cert auth) are read in one shot. Each row gives Subject / Issuer / NotBefore / NotAfter / days-left / status (✅ valid / ⚠️<30d / ❌<7d / ❌EXPIRED). Sorted ascending by days-left, with an "Action needed" block highlighting anything not yet expiring safely. **Local parse — no apiserver calls.**
 
 ### Write (subject to read-only and namespace-allowlist)
 - `apply_yaml(yaml_content)` — apply single or multi-doc manifest

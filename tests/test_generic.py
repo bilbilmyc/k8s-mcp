@@ -8,6 +8,10 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from kubernetes.dynamic.exceptions import (
+    ResourceNotFoundError,
+    ResourceNotUniqueError,
+)
 
 from k8s_mcp.config import Settings, reset_settings_cache
 from k8s_mcp.tools import generic
@@ -89,6 +93,242 @@ def test_apply_yaml_raises_for_unknown_kind(monkeypatch):
             generic.apply_yaml("apiVersion: v1\nkind: WeirdKind\nmetadata:\n  name: x\n")
 
 
+# =============================================================================
+# CRD support — api_version parameter + auto-discovery
+# =============================================================================
+
+
+def _make_fake_dc_with_crd(name="Certificate", group_version="cert-manager.io/v1"):
+    """Fake DynamicClient that has a CRD registered at the given api_version.
+
+    Mimics how DynamicClient.search() enumerates resources when api_version
+    is unknown — returns a single-resource list when the kind is unique.
+    """
+    fake_resource = _FakeResource()
+
+    class _CrdResources(_FakeResources):
+        # Override get() so it returns the CRD on no-api-version lookup too,
+        # mirroring what DynamicClient actually does.
+        def get(self, api_version=None, kind=None):
+            # When api_version is None (auto-discovery), match by kind only.
+            if kind == name and api_version in (None, group_version):
+                return fake_resource
+            raise ResourceNotFoundError(f"nope {api_version}/{kind}")
+
+        def search(self, kind=None, **kwargs):
+            # Single unique match: the CRD.
+            if kind == name:
+                return [_FakeMatch(group_version=group_version, name=name)]
+            return []
+
+    return _FakeDynClient(resources={name: fake_resource, "__crd": _CrdResources})
+
+
+class _FakeMatch:
+    """Mimics a ResourceList returned by discovery.search()."""
+
+    def __init__(self, group_version, name):
+        self.group_version = group_version
+        self.name = name
+
+
+def test_list_resources_with_explicit_api_version_finds_crd(monkeypatch):
+    """Pass api_version explicitly → uses that, no discovery needed."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+    fake = _make_fake_dc_with_crd()
+
+    # Override the _FakeResources.get to support api_version-based lookup
+    fake_resource = fake._resources["Certificate"]
+    fake._resources["Certificate"] = fake_resource  # already there
+
+    # Extend the fake to handle api_version-aware get
+    class _CrdAwareResources(_FakeResources):
+        def get(self, api_version=None, kind=None):
+            if kind == "Certificate" and api_version == "cert-manager.io/v1":
+                return fake_resource
+            if kind == "Certificate":
+                # discovery path: search returns one match → return it
+                return fake_resource
+            raise ResourceNotFoundError(f"nope {api_version}/{kind}")
+
+        def search(self, kind=None, **kwargs):
+            if kind == "Certificate":
+                return [_FakeMatch("cert-manager.io/v1", "Certificate")]
+            return []
+
+    class _CrdAwareDyn:
+        @property
+        def resources(self):
+            return _CrdAwareResources({"Certificate": fake_resource})
+
+    with patch.object(generic, "_dyn_client", return_value=_CrdAwareDyn()):
+        out = generic.list_resources(
+            "Certificate",
+            namespace="cert-manager",
+            api_version="cert-manager.io/v1",
+        )
+    # The fake FakeResource.get returns the resource — table row populated.
+    assert isinstance(out, str)
+
+
+def test_list_resources_auto_discovers_crd_kind(monkeypatch):
+    """Without api_version, _resource_for_kind falls back to discovery."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    fake_resource = _FakeResource()
+
+    class _CrdOnlyResources(_FakeResources):
+        def get(self, api_version=None, kind=None):
+            # Discovery path — match by kind alone.
+            if kind == "Certificate":
+                return fake_resource
+            raise ResourceNotFoundError(f"nope {kind}")
+
+        def search(self, kind=None, **kwargs):
+            if kind == "Certificate":
+                return [_FakeMatch("cert-manager.io/v1", "Certificate")]
+            return []
+
+    class _CrdOnlyDyn:
+        @property
+        def resources(self):
+            return _CrdOnlyResources({"Certificate": fake_resource})
+
+    with patch.object(generic, "_dyn_client", return_value=_CrdOnlyDyn()):
+        # No api_version passed — must auto-resolve via discovery.
+        out = generic.list_resources("Certificate", namespace="default")
+    assert isinstance(out, str)
+
+
+def test_resource_for_kind_raises_on_ambiguous_kind(monkeypatch):
+    """If search() returns 2+ matches (same kind in multiple groups),
+    _resource_for_kind must raise ValueError pointing at the options."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    class _AmbiguousResources(_FakeResources):
+        def get(self, api_version=None, kind=None):
+            # Both matches succeed under any api_version — triggers NotUniqueError.
+            if kind == "Deployment":
+                return _FakeResource()
+            raise ResourceNotFoundError(f"nope {kind}")
+
+        def search(self, kind=None, **kwargs):
+            if kind == "Deployment":
+                return [
+                    _FakeMatch("apps/v1", "Deployment"),
+                    _FakeMatch("custom.io/v1alpha1", "Deployment"),
+                ]
+            return []
+
+    class _AmbiguousDyn:
+        @property
+        def resources(self):
+            return _AmbiguousResources({})
+
+    # Wrap raise of ResourceNotUniqueError — emulate DynamicClient.
+
+    class _AmbResources2(_AmbiguousResources):
+        def get(self, api_version=None, kind=None):
+            if kind == "Deployment":
+                raise ResourceNotUniqueError(
+                    "Multiple matches found for {'kind': 'Deployment'}"
+                )
+            raise ResourceNotFoundError(f"nope {kind}")
+
+    class _AmbDyn2:
+        @property
+        def resources(self):
+            return _AmbResources2({})
+
+    with patch.object(generic, "_dyn_client", return_value=_AmbDyn2()):
+        with pytest.raises(ValueError, match="Ambiguous kind 'Deployment'") as ei:
+            generic.get_resource("Deployment", name="x")
+        # The error message must list both api_versions so the agent can pick.
+        assert "apps/v1" in str(ei.value)
+        assert "custom.io/v1alpha1" in str(ei.value)
+
+
+def test_resource_for_kind_raises_with_clear_message_when_kind_unknown(monkeypatch):
+    """Helpful error pointing the agent at get_api_resources()."""
+    reset_settings_cache()
+
+    class _EmptyResources(_FakeResources):
+        def get(self, api_version=None, kind=None):
+            raise ResourceNotFoundError(f"nope {kind}")
+
+        def search(self, kind=None, **kwargs):
+            return []
+
+    class _EmptyDyn:
+        @property
+        def resources(self):
+            return _EmptyResources({})
+
+    with patch.object(generic, "_dyn_client", return_value=_EmptyDyn()):
+        with pytest.raises(ValueError) as ei:
+            generic.get_resource("NotAKind", name="x")
+        msg = str(ei.value)
+        assert "NotAKind" in msg
+        assert "get_api_resources" in msg
+
+
+def test_resource_for_kind_with_explicit_api_version_falls_through_cleanly(monkeypatch):
+    """Explicit api_version: if the resource exists there, return it."""
+    reset_settings_cache()
+    fake_resource = _FakeResource()
+
+    class _CrdResources(_FakeResources):
+        def get(self, api_version=None, kind=None):
+            if kind == "Certificate" and api_version == "cert-manager.io/v1":
+                return fake_resource
+            raise ResourceNotFoundError(f"nope {api_version}/{kind}")
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _CrdResources({"Certificate": fake_resource})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        obj = generic.get_resource(
+            "Certificate",
+            name="my-cert",
+            namespace="default",
+            api_version="cert-manager.io/v1",
+        )
+    # FakeResource.get returns _FakeApplied; _to_dict → {"metadata": {"name": "my-cert"}}
+    assert obj["metadata"]["name"] == "my-cert"
+
+
+def test_resource_for_kind_explicit_api_version_with_wrong_version_errors(monkeypatch):
+    """When api_version is explicit and resource doesn't match there,
+    error must mention the api_version (don't silently fall to discovery)."""
+    reset_settings_cache()
+
+    class _CrdResources(_FakeResources):
+        def get(self, api_version=None, kind=None):
+            raise ResourceNotFoundError(f"nope {api_version}/{kind}")
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _CrdResources({})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        with pytest.raises(ValueError) as ei:
+            generic.get_resource(
+                "Certificate",
+                name="x",
+                api_version="wrong.io/v1",
+            )
+        msg = str(ei.value)
+        assert "wrong.io/v1" in msg
+        # Should NOT silently try discovery when caller was explicit.
+        assert "Ambiguous" not in msg
+
+
 # ---- fakes --------------------------------------------------------------------
 
 
@@ -96,8 +336,11 @@ class _FakeResource:
     def apply(self, body, namespace=None):
         return _FakeApplied(body["metadata"]["name"])
 
-    def get(self, name, namespace=None, **kwargs):
+    def get(self, name=None, namespace=None, **kwargs):
         from kubernetes.dynamic.exceptions import NotFoundError
+        # List-style call (no `name`): return a tiny list envelope.
+        if name is None:
+            return _FakeResourceList()
         if name == "__missing__":
             raise NotFoundError("not found")
         return _FakeApplied(name)
@@ -110,6 +353,21 @@ class _FakeResource:
 
     def delete(self, name, namespace=None, **kwargs):
         return None
+
+
+class _FakeResourceList:
+    """Minimal stand-in for a list response — `.items` is empty."""
+
+    def __init__(self):
+        self.items = []
+
+
+class _FakeApplied:
+    def __init__(self, name):
+        self._name = name
+
+    def to_dict(self):
+        return {"metadata": {"name": self._name}}
 
 
 class _FakeApplied:

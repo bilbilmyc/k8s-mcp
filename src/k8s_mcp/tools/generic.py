@@ -21,7 +21,7 @@ from typing import Any
 import yaml
 from kubernetes import dynamic
 from kubernetes.client.rest import ApiException
-from kubernetes.dynamic.exceptions import ResourceNotFoundError
+from kubernetes.dynamic.exceptions import ResourceNotFoundError, ResourceNotUniqueError
 
 from ..client import get_api_client
 from ..config import get_settings
@@ -73,6 +73,67 @@ def _api_version_for(kind: str) -> str | None:
     }.get(kind)
 
 
+def _resource_for_kind(
+    dc: dynamic.DynamicClient,
+    kind: str,
+    api_version: str | None = None,
+):
+    """Resolve a Kind to a DynamicClient Resource handle, with CRD support.
+
+    Resolution order:
+
+      1. **Explicit api_version** (caller-supplied, e.g. `"cert-manager.io/v1"`
+         for a CRD). Used directly; if the cluster doesn't have it, raises
+         a clear `ValueError`. This is the unambiguous path CRDs should use.
+
+      2. **Hardcoded built-in dict** for the ~30 common built-in kinds
+         (Pod, Deployment, Service, ...). Fast path that avoids a discovery
+         scan on every read.
+
+      3. **DynamicClient auto-discovery** — calls
+         `dc.resources.get(kind=kind)` which searches every API group
+         registered in the cluster. If exactly one kind matches (the
+         normal case for a CRD like `Certificate`), returns it. If none
+         matches, raises ValueError. If 2+ groups define a kind with the
+         same name (rare; e.g. both `apps/v1` and a CRD operator named
+         `Deployment`), raises ValueError pointing the caller at the
+         matching api_versions — the caller passes one explicitly.
+    """
+    if api_version:
+        try:
+            return dc.resources.get(api_version=api_version, kind=kind)
+        except ResourceNotFoundError as e:
+            raise ValueError(
+                f"Kind '{kind}' not found in api_version={api_version!r}. "
+                "Check that the CRD is installed and the version is correct."
+            ) from e
+
+    # Fast path — built-in kinds. Fall through to discovery on miss OR
+    # ambiguity (a CRD can shadow a built-in kind name in another group).
+    builtin_av = _api_version_for(kind)
+    if builtin_av is not None:
+        try:
+            return dc.resources.get(api_version=builtin_av, kind=kind)
+        except (ResourceNotFoundError, ResourceNotUniqueError):
+            pass  # fall through to discovery
+
+    # Discovery path — scan all groups for a unique match.
+    try:
+        return dc.resources.get(kind=kind)
+    except ResourceNotUniqueError as e:
+        matches = list(dc.resources.search(kind=kind))
+        options = sorted({m.group_version for m in matches})
+        raise ValueError(
+            f"Ambiguous kind '{kind}' — matched in {len(options)} API groups: "
+            f"{options}. Pass api_version explicitly (e.g. 'apps/v1')."
+        ) from e
+    except ResourceNotFoundError as e:
+        raise ValueError(
+            f"Unknown kind '{kind}'. Use `get_api_resources()` to list the "
+            "kinds available in this cluster (it includes installed CRDs)."
+        ) from e
+
+
 # ---------- list / get / get_yaml / describe -----------------------------------
 
 
@@ -80,22 +141,27 @@ def list_resources(
     kind: str,
     namespace: str | None = None,
     label_selector: str | None = None,
+    api_version: str | None = None,
 ) -> str:
-    """List Kubernetes resources by Kind.
+    """List Kubernetes resources by Kind. CRDs are supported — pass `api_version`
+    explicitly (`"cert-manager.io/v1"` etc.) or rely on auto-discovery when
+    the kind name is unique across API groups.
 
     Args:
-        kind: e.g. "Pod", "Deployment", "Service", "Ingress", "ConfigMap".
-              Cluster-scoped kinds (Node, Namespace, PersistentVolume) ignore namespace.
+        kind: e.g. "Pod", "Deployment", "Service", "Ingress", "ConfigMap",
+            "Certificate" (cert-manager CRD), "Elasticsearch" (ECK CRD), etc.
         namespace: namespace to list in. None = all namespaces.
+            Cluster-scoped kinds (Node, Namespace, PersistentVolume) ignore it.
         label_selector: e.g. "app=nginx,tier=frontend".
+        api_version: full apiVersion, e.g. `"apps/v1"` for built-ins or
+            `"cert-manager.io/v1"` for CRDs. Omit for built-in kinds —
+            auto-resolved via the hardcoded dictionary. Required only when
+            the same Kind name exists in multiple API groups (rare).
 
     Returns a compact NAME / NAMESPACE / STATUS / AGE table.
     """
     dc = _dyn_client()
-    try:
-        resource = dc.resources.get(api_version=_api_version_for(kind), kind=kind)
-    except ResourceNotFoundError as e:
-        raise ValueError(f"Unknown kind: {kind}") from e
+    resource = _resource_for_kind(dc, kind, api_version=api_version)
 
     get_kwargs = {"label_selector": label_selector} if label_selector else {}
     if namespace:
@@ -119,9 +185,17 @@ def list_resources(
     return short_table(rows, ["NAME", "NAMESPACE", "STATUS", "AGE"])
 
 
-def get_resource(kind: str, name: str, namespace: str | None = None) -> dict:
-    """Fetch a resource as a JSON-serializable dict (apiVersion/kind/metadata/spec/status)."""
-    return _fetch(kind, name, namespace)
+def get_resource(
+    kind: str,
+    name: str,
+    namespace: str | None = None,
+    api_version: str | None = None,
+) -> dict:
+    """Fetch a resource as a JSON-serializable dict (apiVersion/kind/metadata/spec/status).
+
+    Supports CRDs — pass `api_version` explicitly or rely on auto-discovery.
+    """
+    return _fetch(kind, name, namespace, api_version=api_version)
 
 
 def get_resource_yaml(
@@ -129,26 +203,33 @@ def get_resource_yaml(
     name: str,
     namespace: str | None = None,
     reveal_secrets: bool = False,
+    api_version: str | None = None,
 ) -> str:
-    """Fetch a resource as a YAML manifest.
+    """Fetch a resource as a YAML manifest. Supports CRDs.
 
     Args:
         kind, name, namespace: resource identity.
         reveal_secrets: by default, Secret data and stringData values are masked
             with '***'. Set to True to print actual values; the caller is
             responsible for confirming with the user first.
+        api_version: optional, e.g. `"cert-manager.io/v1"` for a CRD.
 
     Returns YAML text.
     """
-    obj = _fetch(kind, name, namespace)
+    obj = _fetch(kind, name, namespace, api_version=api_version)
     if kind.lower() == "secret" and not reveal_secrets:
         obj = mask_secret_data(obj)
     return to_yaml(obj)
 
 
-def describe_resource(kind: str, name: str, namespace: str | None = None) -> str:
-    """Return a kubectl-describe-style text summary."""
-    obj = _fetch(kind, name, namespace)
+def describe_resource(
+    kind: str,
+    name: str,
+    namespace: str | None = None,
+    api_version: str | None = None,
+) -> str:
+    """Return a kubectl-describe-style text summary. Supports CRDs."""
+    obj = _fetch(kind, name, namespace, api_version=api_version)
     return describe_fmt(obj)
 
 
@@ -401,12 +482,14 @@ def apply_yaml(yaml_content: str) -> str:
 # ---------- helpers ------------------------------------------------------------
 
 
-def _fetch(kind: str, name: str, namespace: str | None) -> dict:
+def _fetch(
+    kind: str,
+    name: str,
+    namespace: str | None,
+    api_version: str | None = None,
+) -> dict:
     dc = _dyn_client()
-    try:
-        resource = dc.resources.get(api_version=_api_version_for(kind), kind=kind)
-    except ResourceNotFoundError as e:
-        raise ValueError(f"Unknown kind: {kind}") from e
+    resource = _resource_for_kind(dc, kind, api_version=api_version)
 
     try:
         item = resource.get(name=name, namespace=namespace) if namespace else resource.get(name=name)

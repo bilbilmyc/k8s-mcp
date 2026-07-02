@@ -643,6 +643,7 @@ name = "k8s-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "kubernetes" },
     { name = "mcp", extra = ["cli"] },
     { name = "pydantic" },
@@ -659,6 +660,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "kubernetes", specifier = ">=29.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.0" },
     { name = "pydantic", specifier = ">=2.0" },

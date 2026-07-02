@@ -121,10 +121,10 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 
 ### 读（始终安全）
 
-- `list_resources(kind, namespace?, label_selector?)` — 列出任意内置 Kind
-- `get_resource(kind, name, namespace?)` — 完整 JSON 对象
-- `get_resource_yaml(kind, name, namespace?, reveal_secrets=False)` — YAML 清单；Secret 默认脱敏
-- `describe_resource(kind, name, namespace?)` — kubectl-describe 风格摘要
+- `list_resources(kind, namespace?, label_selector?, api_version=None)` — 列出任意 Kind；**支持 CRD**（传 `api_version='cert-manager.io/v1'` 等；同名 kind 在多个 group 时**必须**显式传）
+- `get_resource(kind, name, namespace?, api_version=None)` — 完整 JSON 对象（支持 CRD）
+- `get_resource_yaml(kind, name, namespace?, reveal_secrets=False, api_version=None)` — YAML 清单；Secret 默认脱敏（支持 CRD）
+- `describe_resource(kind, name, namespace?, api_version=None)` — kubectl-describe 风格摘要（支持 CRD）
 - `get_resource_jsonpath(kind, path, name?, namespace?, label_selector?)` — 提取单个字段
 - `diff_resource(yaml_content)` — 预览 apply_yaml 会改什么（CREATE vs UPDATE、顶层字段变化）
 - `list_pods(namespace?, label_selector?, field_selector?, include_all=False)`
@@ -146,6 +146,7 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `rollout_history(kind, name, namespace)` — 列出 ControllerRevisions；传给 `rollout_undo(to_revision=)`
 - `get_api_resources(prefix=None)` — 列出集群所有 kind（含 CRD）
 - `explain_resource(kind, field_path?, api_version?)` — 通过 OpenAPI schema 做 `kubectl explain`
+- `get_certificate_expiry()` — 聚合查证书过期时间。**apiserver 自己的 serving cert 无法通过 K8s API 查**，但 MCP server 看得见的 4 个源都打包读：`K8S_MCP_API_CA_CERT` / in-cluster SA bundle / kubeconfig CA / kubeconfig client cert（最后那个仅当 kubeconfig 用证书认证时存在）。每个证书给出 Subject / Issuer / NotBefore / NotAfter / 剩余天数 / 状态（✅ valid / ⚠️<30d / ❌<7d / ❌EXPIRED），按天数升序排，最近的过期先显示，并自动追加 "Action needed" 段落提醒。**不靠 apiserver 也不发请求**——纯本地解析。
 
 ### 写（受 read-only 和 namespace-allowlist 限制）
 
@@ -191,6 +192,33 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `since_time` / `until_time` 支持 RFC3339 绝对时间窗口（"两点到四点"），
   K8s API 仅支持下界，`until_time` 客户端过滤；`strict_time=True` 丢弃
   没有 RFC3339 时间戳的行。
+
+**CRD 读取**：内置 `list_resources` / `get_resource` / `get_resource_yaml`
+/ `describe_resource` 都接受 `api_version` 参数。不传时按硬编码字典
+快路径（Pod / Deployment 等）解析；找不到就 fallback 到 DynamicClient
+扫所有 API group 找唯一匹配。**什么时候必须显式传**：
+  - kind 名在两个 group 里都有（极少见，但 `Deployment` 被重写过的话会撞）→ 错误信息会列出所有候选
+  - Agent 想百分百确定是某个 CRD（避免任何一个 layer 误解析）→ 在
+    `get_api_resources()` 输出里复制 `apiVersion` 字段直接传
+**什么时候不用传**：内置 kind + 标准 CRD 唯一匹配。Agent 拿到报错
+`Ambiguous kind 'X' — found in: [...]` 后再加。
+
+**`get_certificate_expiry`** 一次性给 Agent 当前 MCP server 看见的全部
+证书的过期情况：
+
+- 解析 4 个源（哪个有就填哪个，都空就告诉你"啥都没看见"+ 排查提示）：
+  1. `K8S_MCP_API_CA_CERT`（模式 A 显式 CA）
+  2. in-cluster SA bundle（`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`，模式 C）
+  3. kubeconfig 当前的 `clusters[].cluster.certificate-authority-data`（模式 B）
+  4. kubeconfig 当前的 `users[].user.client-certificate-data`（仅当 kubeconfig 用证书认证）
+- 输出表 `SOURCE / SUBJECT / ISSUER / NOT_BEFORE / NOT_AFTER / DAYS_LEFT / STATUS`，
+  按 `DAYS_LEFT` 升序排——最快的过期先露出来。
+- 状态：`✅ valid` / `⚠️ expires in N d (<30d)` / `❌ <7d` / `❌ EXPIRED`。
+- 自动追加 `Action needed:` 段落高亮非 `✅ valid` 的行。
+- **K8s apiserver 自己的 serving cert 查不到**——apiserver 不会通过 API 暴露
+  自己证书的 notAfter；想查那个需要 SSH 进 master 节点看 `/etc/kubernetes/pki/apiserver.crt`。
+  这块的功能是让 Agent 在对话中**主动**发现过期苗头（"你的 kubeconfig 客户端证书
+  还有 14 天过期"），不是替代 OS-level 巡检。
 
 **`delete_resource`** 强制走两步流程：
 
@@ -356,7 +384,8 @@ src/k8s_mcp/
     ├── serviceaccount.py # create_serviceaccount
     ├── networkpolicy.py # create_networkpolicy
     ├── storage.py    # create_pvc
-    └── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
+    ├── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
+    └── certs.py      # get_certificate_expiry（CRD + 内置 kind 都用 DynamicClient）
 ```
 
 `generic.py` 还额外暴露 `replace_resource`（PUT 带 ResourceVersion）和

@@ -26,6 +26,7 @@ import atexit
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import signal
@@ -1004,6 +1005,365 @@ def _stop_all_port_forwards_on_exit() -> None:
                 pass
 
 
+# =============================================================================
+# NodePort bridge — externally-reachable clone of a ClusterIP Service
+# =============================================================================
+#
+# Why: ClusterIP Services (`10.96.x.x`) are unroutable from outside the
+# cluster. We *could* lean on `kubectl port-forward` for everything, but
+# that needs `kubectl` on PATH and a long-lived subprocess — fragile.
+#
+# A NodePort Service is a K8s primitive: kube-proxy binds the NodePort on
+# every Node, traffic reaches the same backing Pods via the existing
+# selector. If the cluster's Node IPs are network-reachable from the MCP
+# client (typical for VPCs / private networks / corporate clusters), the
+# Prometheus tools can hit `http://<node-ip>:<node_port>` directly — no
+# extra processes, no extra binaries, and the URL works for every other
+# tool the user has too.
+#
+# This tool creates a *parallel* Service of type=NodePort that points at
+# the same Pods as the original ClusterIP Service. The original is left
+# alone — in-cluster consumers keep using it, just like before.
+# =============================================================================
+
+
+# Random selection here is a deliberate alternative to K8s's built-in
+# auto-assignment: the apiserver picks deterministically when nodePort is
+# omitted, which can lead to "I tried twice in this cluster and got the
+# same port" confusion. Randomizing locally gives us independent picks
+# across calls and makes idempotent retries safer.
+_NODEPORT_MIN = 30000
+_NODEPORT_MAX = 32767
+_NODEPORT_RETRY_LIMIT = 10
+
+
+def _pick_nodeport_free(core: client.CoreV1Api, namespace: str) -> int:
+    """Pick a NodePort (30000-32767) not already in use anywhere on the cluster.
+
+    Rather than relying on the apiserver's own auto-pick (which is
+    deterministic per-namespace and can collide across rapid retries), we
+    scan current Service nodePorts cluster-wide and pick a non-conflict.
+    """
+    used: set[int] = set()
+    for ns in [s.metadata.name for s in core.list_namespace().items]:
+        for svc in core.list_namespaced_service(namespace=ns).items:
+            if svc.spec and svc.spec.ports:
+                for p in svc.spec.ports:
+                    if p.node_port:
+                        used.add(p.node_port)
+    while True:
+        candidate = random.randint(_NODEPORT_MIN, _NODEPORT_MAX)
+        if candidate not in used:
+            return candidate
+
+
+def _ensure_prometheus_write_allowed(namespace: str) -> None:
+    """Mirror the safety guards other write tools perform.
+
+    Reuses `Settings.ns_allowed` (which folds read-only + namespace
+    allowlist into one call) so the invariants stay aligned with the rest
+    of the codebase. Cluster-scoped writes (no namespace) would have been
+    rejected by the allowlist check anyway.
+    """
+    settings = get_settings()
+    if settings.read_only:
+        raise PermissionError(
+            "Server is in read-only mode (K8S_MCP_READ_ONLY=true); "
+            "creating a NodePort Service requires write access."
+        )
+    if not settings.ns_allowed(namespace):
+        raise PermissionError(
+            f"Namespace '{namespace}' is not in K8S_MCP_NAMESPACE_ALLOWLIST; "
+            "creating a NodePort Service there is refused."
+        )
+
+
+def _service_selector_matches(orig: client.V1Service, candidate: client.V1Service) -> bool:
+    """Return True iff candidate points at exactly the same Pods as orig.
+
+    Selector dict equality is sufficient for K8s label selectors (it's
+    just equality-based matching, no set operators). Same-selector
+    means same endpoints.
+    """
+    orig_sel = (orig.spec.selector or {}) if orig.spec else {}
+    cand_sel = (candidate.spec.selector or {}) if candidate.spec else {}
+    return orig_sel == cand_sel
+
+
+def _port_spec_for_nodeport(orig_ports: list[client.V1ServicePort] | None) -> list[client.V1ServicePort]:
+    """Build V1ServicePort list for the NodePort clone.
+
+    nodePort is omitted — let the apiserver pick from the random range we
+    channelled via `_pick_nodeport_free`. All other port fields are
+    copied verbatim.
+    """
+    out: list[client.V1ServicePort] = []
+    for p in orig_ports or []:
+        out.append(
+            client.V1ServicePort(
+                name=p.name,
+                port=p.port,
+                target_port=p.target_port,
+                protocol=p.protocol,
+                # Deliberately no `node_port` — we set it ourselves below
+                # after `_pick_nodeport_free`.
+            )
+        )
+    return out
+
+
+def expose_prometheus_as_nodeport(
+    namespace: str,
+    service_name: str,
+    name_suffix: str = "-np",
+    max_attempts: int = _NODEPORT_RETRY_LIMIT,
+) -> str:
+    """Create a parallel NodePort Service so the MCP client can reach it directly.
+
+    Most Prometheus installs expose the API on a `ClusterIP` Service —
+    a virtual IP only routable from inside the cluster. This tool
+    creates a *parallel* `NodePort` Service with the **same selector and
+    ports** as the original, so the backing Pods stay accessible in
+    two ways (in-cluster via the original ClusterIP; externally via the
+    new NodePort). The original Service is never modified — in-cluster
+    consumers keep working unchanged.
+
+    If the original Service is already `NodePort` / `LoadBalancer` /
+    `ExternalName`, this tool short-circuits and just returns the existing
+    URL — no creation needed.
+
+    Args:
+        namespace: where the Prometheus Service lives.
+        service_name: the existing Service name (use
+            `find_prometheus_service()` to find this).
+        name_suffix: suffix for the new Service name. Default `-np`.
+            Pass `""` to overwrite an in-place conversion (rare; you
+            usually want the original left alone, so keep the suffix).
+        max_attempts: how many nodePort-pick retries before giving up.
+
+    Returns:
+        A formatted summary table (SOURCE / TARGET / TYPE / NODE_PORT /
+        URL), plus:
+
+          - the chosen URL template `http://<node-ip>:<node_port>`
+            (the agent must substitute a real Node IP — fetch via
+            `list_resources(kind=Node)` or `get_resource_jsonpath`)
+          - the new Service name (so the agent can clean up via
+            `delete_resource(kind=Service, name=<new>)`)
+
+    Errors:
+        PermissionError if read-only or namespace allowlist denies writes.
+        ValueError on invalid inputs (missing selector, no ports, headless
+        service).
+        ApiException on cluster-level failures (RBAC, quota, etc.).
+
+    Clean-up: delete the new Service with
+    `delete_resource(kind="Service", name=<new>)`. The original is
+    untouched.
+    """
+    _validate_k8s_name(namespace, "namespace")
+    _validate_k8s_name(service_name, "service_name")
+    if not name_suffix:
+        raise ValueError(
+            "name_suffix must not be empty — refusing to overwrite the "
+            "original Service in place. Pass a suffix like '-np'."
+        )
+
+    # Write-side guard. Throws PermissionError on read-only or
+    # namespace-allowlist failures, matching every other write tool.
+    _ensure_prometheus_write_allowed(namespace)
+
+    core = client.CoreV1Api()
+
+    # 1. Read the original Service (the existing ClusterIP one).
+    try:
+        orig = core.read_namespaced_service(name=service_name, namespace=namespace)
+    except ApiException as e:
+        if e.status == 404:
+            raise ValueError(
+                f"Service {namespace}/{service_name} not found. "
+                "Run find_prometheus_service() first to confirm the name."
+            ) from e
+        raise
+
+    if not orig.spec:
+        raise ValueError(f"Service {namespace}/{service_name} has no spec.")
+
+    orig_type = orig.spec.type or "ClusterIP"
+    orig_ports = orig.spec.ports or []
+    orig_selector = orig.spec.selector or {}
+
+    # 2. Short-circuit: if the original is already externally reachable,
+    #    return its URL instead of creating anything.
+    if orig_type in {"NodePort", "LoadBalancer", "ExternalName"}:
+        node_port = None
+        for p in orig_ports:
+            if p.node_port:
+                node_port = p.node_port
+                break
+        url_hint = _service_url(orig)
+        rows = [{
+            "NAMESPACE": namespace,
+            "NAME": service_name,
+            "TYPE": orig_type,
+            "NODE_PORT": str(node_port) if node_port else "(managed)",
+            "URL": url_hint,
+        }]
+        return (
+            f"Service {namespace}/{service_name} is already type={orig_type}; "
+            "no new Service was created.\n"
+            + short_table(rows, ["NAMESPACE", "NAME", "TYPE", "NODE_PORT", "URL"])
+            + "\nUse this URL as `prometheus_url=` — if it still fails, the cluster "
+            "Node IPs are unreachable from this process; fall back to "
+            "`start_prometheus_port_forward()`."
+        )
+
+    # 3. ClusterIP path: refuse Headless services (no selector → no Pods).
+    if orig.spec.cluster_ip in (None, "None", ""):
+        raise ValueError(
+            f"Service {namespace}/{service_name} is Headless (no ClusterIP); "
+            "can't clone it as NodePort — Prometheus needs a stable virtual IP."
+        )
+    if not orig_selector:
+        raise ValueError(
+            f"Service {namespace}/{service_name} has no selector. A NodePort "
+            "clone would have nothing to forward to."
+        )
+    if not orig_ports:
+        raise ValueError(
+            f"Service {namespace}/{service_name} has no ports. Nothing to clone."
+        )
+
+    # 4. Idempotency: if a previous call already created the clone and
+    #    its selector still matches, reuse instead of duplicating.
+    new_name = f"{service_name}{name_suffix}"
+    try:
+        existing = core.read_namespaced_service(name=new_name, namespace=namespace)
+    except ApiException as e:
+        if e.status != 404:
+            raise
+        existing = None
+
+    if existing and existing.spec and _service_selector_matches(orig, existing):
+        # Same Pods — return the existing URL.
+        node_port = None
+        for p in existing.spec.ports or []:
+            if p.node_port:
+                node_port = p.node_port
+                break
+        if node_port is None:
+            # Rare: someone changed type back. Force a re-create by deleting.
+            existing = None
+        else:
+            rows = [
+                {
+                    "NAMESPACE": namespace,
+                    "SOURCE": f"{service_name} (kept)",
+                    "TARGET": f"{new_name} (existing)",
+                    "TYPE": existing.spec.type,
+                    "NODE_PORT": str(node_port),
+                    "URL": f"http://<node-ip>:{node_port}",
+                }
+            ]
+            return (
+                f"NodePort clone already exists: {namespace}/{new_name} "
+                f"(type={existing.spec.type}, nodePort={node_port}).\n"
+                + short_table(rows, ["NAMESPACE", "SOURCE", "TARGET",
+                                     "TYPE", "NODE_PORT", "URL"])
+                + "\nNo new Service was created. Use the URL above with "
+                "`prometheus_url=`, or delete the clone with "
+                f"`delete_resource(kind='Service', name={new_name!r})` "
+                "and re-call to get a fresh port."
+            )
+
+    # 5. Create the new NodePort Service. Pick a port that's free
+    #    cluster-wide; if the apiserver still rejects (race), retry a
+    #    few times before giving up.
+    body = client.V1Service(
+        metadata=client.V1ObjectMeta(
+            name=new_name,
+            namespace=namespace,
+            labels={
+                **(orig.metadata.labels or {}),
+                "app.kubernetes.io/managed-by": "k8s-mcp",
+                "k8s-mcp/based-on": service_name,
+            },
+            annotations={
+                "k8s-mcp/created-by": "expose_prometheus_as_nodeport",
+            },
+        ),
+        spec=client.V1ServiceSpec(
+            type="NodePort",
+            selector=orig_selector,
+            ports=_port_spec_for_nodeport(orig_ports),
+        ),
+    )
+
+    last_err: ApiException | None = None
+    for attempt in range(max_attempts):
+        # Re-pick on every attempt so retries don't keep choosing a port
+        # the apiserver already told us is taken.
+        chosen_port = _pick_nodeport_free(core, namespace)
+        assert body.spec is not None
+        body.spec.ports = [
+            client.V1ServicePort(
+                name=p.name,
+                port=p.port,
+                target_port=p.target_port,
+                protocol=p.protocol,
+                node_port=chosen_port,
+            )
+            for p in (body.spec.ports or [])
+        ]
+        try:
+            created = core.create_namespaced_service(
+                namespace=namespace, body=body
+            )
+            break
+        except ApiException as e:
+            last_err = e
+            logger.debug("NodePort %d attempt %d failed: %s", chosen_port, attempt, e)
+            continue
+    else:
+        # Exhausted retries.
+        raise RuntimeError(
+            f"Failed to create NodePort Service {namespace}/{new_name} after "
+            f"{max_attempts} attempts (last error: {last_err})"
+        ) from last_err
+
+    # 6. Return a useful summary. URL is a template — the agent needs to
+    #    pick a Node IP via `list_resources(kind=Node)`.
+    actual_port = None
+    if created.spec and created.spec.ports:
+        for p in created.spec.ports:
+            if p.node_port:
+                actual_port = p.node_port
+                break
+
+    rows = [
+        {
+            "NAMESPACE": namespace,
+            "SOURCE": f"{service_name} (kept — ClusterIP)",
+            "TARGET": f"{new_name} (NodePort)",
+            "TYPE": "NodePort",
+            "NODE_PORT": str(actual_port) if actual_port else "?",
+            "URL": f"http://<node-ip>:{actual_port}" if actual_port else "?",
+        },
+    ]
+    return (
+        f"Created NodePort clone: {namespace}/{new_name}\n"
+        "Original Service (ClusterIP) is unchanged — in-cluster traffic still flows there.\n"
+        + short_table(rows, ["NAMESPACE", "SOURCE", "TARGET",
+                             "TYPE", "NODE_PORT", "URL"])
+        + "\nNext steps:\n"
+        f"  1. Get a Node IP: list_resources(kind='Node') or "
+        f"get_resource_jsonpath(kind='Node', path='items[*].status.addresses[?(@.type==\"InternalIP\")].address').\n"
+        f"  2. Then: prometheus_query(<your PromQL>, "
+        f"prometheus_url='http://<node-ip>:{actual_port}').\n"
+        f"To tear down: delete_resource(kind='Service', name={new_name!r})."
+    )
+
+
 def register(mcp) -> None:
     mcp.tool()(prometheus_query)
     mcp.tool()(prometheus_query_range)
@@ -1012,3 +1372,4 @@ def register(mcp) -> None:
     mcp.tool()(start_prometheus_port_forward)
     mcp.tool()(list_port_forwards)
     mcp.tool()(stop_port_forward)
+    mcp.tool()(expose_prometheus_as_nodeport)

@@ -132,7 +132,8 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `prometheus_query_range(promql, start, end, step="30s", prometheus_url?)` — Prometheus range query
 - `pod_metrics(pod_name, namespace, metric="cpu|memory|network_rx|network_tx|fs_reads|fs_writes", range="5m", prometheus_url?)` — common cAdvisor-derived container metrics for a Pod (CPU / memory / network / fs IO)
 - `find_prometheus_service(namespace=None)` — scans all (or one) namespace(s) for Services whose name looks like Prometheus; returns a NAMESPACE/NAME/CLUSTER_IP/PORT/URL table — the agent picks a URL and threads it into the three tools above
-- `start_prometheus_port_forward(namespace, service_name, service_port=9090, local_port=None)` — **the bridge**: Prometheus Services are usually `ClusterIP` (`10.96.x.x`), only routable from inside the cluster. The MCP server runs *outside*, so hits get TCP RST. This tool launches a managed `kubectl port-forward` and returns a `127.0.0.1` URL the agent can use.
+- `start_prometheus_port_forward(namespace, service_name, service_port=9090, local_port=None)` — **kubectl bridge**: Prometheus Services are usually `ClusterIP` (`10.96.x.x`), only routable from inside the cluster. The MCP server runs *outside*, so hits get TCP RST. This tool launches a managed `kubectl port-forward` and returns a `127.0.0.1` URL the agent can use. **Requires `kubectl` on PATH.**
+- `expose_prometheus_as_nodeport(namespace, service_name, name_suffix="-np")` — **NodePort clone**: **no `kubectl` needed**; creates a *parallel* `NodePort` Service (named `<original>-np`, with the same selector / ports / labels as the original). The original ClusterIP Service is untouched — in-cluster traffic still flows through it; the new NodePort covers traffic from cluster nodes when they're network-reachable from the MCP client (typical for VPC / corp networks / local dev clusters).
 - `list_port_forwards()` / `stop_port_forward(forward_id)` — list / terminate active forwards
 - `rollout_status(kind, name, namespace, timeout_seconds=60, watch=False)` — polls until rollout completes
 - `rollout_history(kind, name, namespace)` — list ControllerRevisions; pass revision to rollout_undo(to_revision=)
@@ -221,29 +222,48 @@ namespaces). k8s-mcp exposes a three-step protocol:
    (`prometheus` / `prometheus-operated` /
    `kube-prometheus-stack-prometheus` / `prometheus-server` / etc.) and
    returns a NAMESPACE / NAME / CLUSTER_IP / PORT / URL table.
-2. **If the URL is a `ClusterIP` (the default!), the agent knows to
-   port-forward first** — ClusterIPs (`10.96.x.x`) are virtual IPs only
-   routable from inside the cluster; the MCP server runs *outside*, so
-   hits get TCP RST. The agent calls
-   `start_prometheus_port_forward(namespace, service_name)` to start a
-   managed `kubectl port-forward` and get a local `http://127.0.0.1:<port>`
-   URL back. (If your Prometheus is already a NodePort / LoadBalancer /
-   external, you can skip this step.)
+2. **Look at the URL type and pick a bridge:**
+
+   - If the Service is already `NodePort` / `LoadBalancer` / `ExternalName`,
+     the URL works directly — skip to step 3.
+   - If it's `ClusterIP` (the default), pick a bridge based on whether
+     the cluster Nodes are network-reachable from this MCP client:
+       - **Node IPs reachable** (typical: same VPC, corp network,
+         `minikube`/`kind`, on-prem) →
+         `expose_prometheus_as_nodeport(namespace, service_name)` creates
+         a parallel NodePort Service (named `<svc>-np`) with the same
+         selector and ports — kube-proxy binds the NodePort on every
+         Node automatically. **No `kubectl` required.** The agent
+         fetches a Node IP via `list_resources(kind=Node)` and uses
+         `http://<node-ip>:<node_port>`.
+       - **Node IPs not reachable** (remote cluster, strict firewall,
+         multi-hop NAT) →
+         `start_prometheus_port_forward(namespace, service_name)` starts
+         a managed `kubectl port-forward` and returns a local
+         `http://127.0.0.1:<port>` URL. **Requires `kubectl` on PATH.**
+
 3. **Pass that URL to the Prometheus tools** —
    `prometheus_query(promql, prometheus_url=<that URL>)` /
    `prometheus_query_range(..., prometheus_url=<URL>)` /
    `pod_metrics(..., prometheus_url=<URL>)`.
+
+| Bridge | External deps | Long-lived process | Lifetime | Cleanup |
+| --- | --- | --- | --- | --- |
+| `expose_prometheus_as_nodeport` | none | no (K8s-native) | lives in the cluster until deleted | `delete_resource(kind="Service", name=<new>)` |
+| `start_prometheus_port_forward` | `kubectl` binary | yes (subprocess) | dies with MCP server | `stop_port_forward(...)` |
 
 If `K8S_MCP_PROMETHEUS_URL` is set, the tools use it directly and skip
 discovery. There's also a small built-in fallback list of common
 (namespace, Service) pairs; if even those fail, the tools return a
 friendly "ask the user" message.
 
-**Lifecycle note**: the `kubectl` subprocesses are reaped when the MCP
-server exits (via an `atexit` hook). When Cherry Studio's MCP entry
-restarts, every active forward is killed — re-running
-`start_prometheus_port_forward` is part of the standard first-call flow
-after restart.
+**Important constraints:**
+  - `expose_prometheus_as_nodeport` is a write — it's refused in
+    `K8S_MCP_READ_ONLY=true` mode and respects
+    `K8S_MCP_NAMESPACE_ALLOWLIST`.
+  - `start_prometheus_port_forward` only needs the apiserver, so it
+    works even in read-only; it still honors the namespace allowlist
+    (forwarding *into* a blocked namespace is rejected).
 
 ## End-to-end example (Claude session)
 

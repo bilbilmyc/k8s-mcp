@@ -1101,8 +1101,12 @@ def test_nodeport_loadbalancer_also_short_circuits(monkeypatch):
 
 
 def test_nodeport_clusterip_creates_clone(monkeypatch):
-    """ClusterIP → a new NodePort clone appears with a random port."""
-    monkeypatch.setattr(prometheus.random, "randint", lambda a, b: 31245)
+    """ClusterIP → a new NodePort clone is created; apiserver picks nodePort.
+
+    We stub the apiserver's auto-allocation by making `create_namespaced_service`
+    fill in nodePort=31402 on the way back — that's exactly what the real
+    apiserver would do, just deterministic for the test.
+    """
     fake = _FakeCoreForNodeport({
         "monitoring": [_make_service(
             "monitoring", "prometheus",
@@ -1110,24 +1114,164 @@ def test_nodeport_clusterip_creates_clone(monkeypatch):
             selector={"app": "prom"},
             ports=[{"name": "http", "port": 9090, "target_port": 9090}],
         )],
-        # Empty extra namespaces to keep the cluster scan cheap
     }, namespaces=["monitoring"])
 
+    def simulate_apiserver_allocate(namespace, body):
+        # Pretend the apiserver picked a free port and stamped it onto the
+        # returned object. Our code is responsible for *not* having set one.
+        body.spec.ports[0].node_port = 31402
+        fake._services_by_ns.setdefault(namespace, []).append(body)
+        return body
+
+    fake._on_create = simulate_apiserver_allocate
     monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
     out = prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
-    # A new Service object was submitted with type=NodePort and node_port
     assert "Created NodePort clone" in out
     assert "monitoring/prometheus-np" in out
-    assert "31245" in out
-    # The fake registry should now have the clone
+    assert "31402" in out
     created = fake._services_by_ns["monitoring"][-1]
     assert created.spec.type == "NodePort"
     assert created.spec.selector == {"app": "prom"}
 
 
+def test_nodeport_does_not_set_node_port_in_request(monkeypatch):
+    """The body sent to the apiserver must NOT carry a node_port.
+
+    This is the whole point of the apiserver-auto-allocate fix: passing
+    a numeric node_port creates a TOCTOU race. The apiserver is the only
+    piece that holds the in-use set and can allocate atomically.
+    """
+    captured: dict = {}
+
+    class _Core:
+        def read_namespaced_service(self, name, namespace):
+            return _make_service(
+                "monitoring", "prometheus",
+                type_="ClusterIP", selector={"app": "prom"},
+                ports=[{"name": "http", "port": 9090, "target_port": 9090}],
+            )
+
+        def create_namespaced_service(self, namespace, body):
+            # Snapshot what's actually being sent — before the apiserver
+            # layer of the test fixture fills in an allocated port.
+            captured["sent_node_port"] = body.spec.ports[0].node_port
+            body.spec.ports[0].node_port = 31200
+            return body
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
+    # The body we hand to the apiserver carries no node_port — the
+    # apiserver fills it in atomically (single-leader, in-memory set).
+    assert captured["sent_node_port"] is None, (
+        "Tool sent an explicit node_port; this is the TOCTOU race "
+        "we deliberately avoid."
+    )
+
+
+def test_nodeport_targets_http_port_only(monkeypatch):
+    """Multi-port Service (http + reloader-web): only http is cloned.
+
+    kube-prometheus-stack adds ports like `reloader-web` to the same
+    Service; cloning all of them wastes NodePort slots and confuses the
+    caller with multiple URLs.
+    """
+    fake = _FakeCoreForNodeport({
+        "monitoring": [_make_service(
+            "monitoring", "prometheus",
+            type_="ClusterIP", ip="10.96.10.20",
+            selector={"app": "prom"},
+            ports=[
+                {"name": "reloader-web", "port": 9090, "target_port": 9090},
+                {"name": "http", "port": 9090, "target_port": 9090},
+            ],
+        )],
+    }, namespaces=["monitoring"])
+
+    captured = {}
+
+    def grab_body(namespace, body):
+        captured["body"] = body
+        body.spec.ports[0].node_port = 31200
+        return body
+
+    fake._on_create = grab_body
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
+    sent_ports = captured["body"].spec.ports
+    # Only one port; it's the `http` one
+    assert len(sent_ports) == 1
+    assert sent_ports[0].name == "http"
+
+
+def test_nodeport_targets_web_when_no_http(monkeypatch):
+    """If the user's Service names its port `web`, we still pick it up."""
+    fake = _FakeCoreForNodeport({
+        "monitoring": [_make_service(
+            "monitoring", "prometheus",
+            type_="ClusterIP", selector={"app": "prom"},
+            ports=[{"name": "web", "port": 9090, "target_port": 9090}],
+        )],
+    }, namespaces=["monitoring"])
+
+    captured = {}
+
+    def grab_body(namespace, body):
+        captured["body"] = body
+        body.spec.ports[0].node_port = 31200
+        return body
+
+    fake._on_create = grab_body
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
+    assert captured["body"].spec.ports[0].name == "web"
+
+
+def test_nodeport_targets_first_port_for_unusual_names(monkeypatch):
+    """If no port matches the well-known names, fall back to ports[0]."""
+    fake = _FakeCoreForNodeport({
+        "monitoring": [_make_service(
+            "monitoring", "prometheus",
+            type_="ClusterIP", selector={"app": "prom"},
+            ports=[{"name": "my-custom-port", "port": 9090, "target_port": 9090}],
+        )],
+    }, namespaces=["monitoring"])
+
+    captured = {}
+
+    def grab_body(namespace, body):
+        captured["body"] = body
+        body.spec.ports[0].node_port = 31200
+        return body
+
+    fake._on_create = grab_body
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
+    assert captured["body"].spec.ports[0].name == "my-custom-port"
+
+
+def test_nodeport_apiserver_error_wrapped(monkeypatch):
+    """If the apiserver rejects the create (e.g. quota, RBAC, 422),
+    surface a helpful RuntimeError — not a raw 422."""
+    class _Core:
+        def read_namespaced_service(self, name, namespace):
+            return _make_service(
+                "monitoring", "prometheus",
+                type_="ClusterIP", selector={"app": "prom"},
+                ports=[{"name": "http", "port": 9090, "target_port": 9090}],
+            )
+
+        def create_namespaced_service(self, namespace, body):
+            err = ApiException(status=422, reason="Unprocessable Entity")
+            err.body = b'{"message":"forbidden"}'
+            raise err
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    with pytest.raises(RuntimeError, match="HTTP 422"):
+        prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
+
+
 def test_nodeport_idempotent_reuses_existing_clone(monkeypatch):
     """If a previous call already created the NodePort clone, reuse it."""
-    monkeypatch.setattr(prometheus.random, "randint", lambda a, b: 31245)
     fake = _FakeCoreForNodeport({
         "monitoring": [
             _make_service("monitoring", "prometheus",
@@ -1216,43 +1360,42 @@ def test_nodeport_validates_inputs(monkeypatch):
         prometheus.expose_prometheus_as_nodeport("monitoring", "prom", name_suffix="")
 
 
-def test_nodeport_retries_on_conflict_then_succeeds(monkeypatch):
-    """If the apiserver rejects port allocation once, retry — don't bubble up."""
-    monkeypatch.setattr(prometheus.random, "randint", lambda a, b: 31245)
-    # First attempt says "Port already allocated" (409), second succeeds.
-    attempts = {"n": 0}
+def test_nodeport_no_retry_loop(monkeypatch):
+    """Sanity: the tool submits the create ONCE. No retry — apiserver owns atomicity."""
+    calls = {"n": 0}
 
-    def flaky_create(namespace, body):
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            err = ApiException(status=409, reason="Port already allocated")
-            raise err
+    def counting_create(namespace, body):
+        calls["n"] += 1
+        body.spec.ports[0].node_port = 31402
         return body
 
     fake = _FakeCoreForNodeport({
         "monitoring": [_make_service(
             "monitoring", "prometheus",
             type_="ClusterIP", ip="10.96.10.20", selector={"app": "prom"},
+            ports=[{"name": "http", "port": 9090, "target_port": 9090}],
         )],
-    }, namespaces=["monitoring"], on_create=flaky_create)
+    }, namespaces=["monitoring"])
+    fake._on_create = counting_create
     monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
-    out = prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
-    assert "Created NodePort clone" in out
-    assert attempts["n"] == 2
+    prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
+    assert calls["n"] == 1  # exactly one apiserver roundtrip
 
 
-def test_nodeport_exhausts_retries_and_surfaces_error(monkeypatch):
-    """If every retry fails, surface a clear error (not just the last 409)."""
-    monkeypatch.setattr(prometheus.random, "randint", lambda a, b: 31245)
-    fake = _FakeCoreForNodeport({
-        "monitoring": [_make_service(
-            "monitoring", "prometheus",
-            type_="ClusterIP", ip="10.96.10.20", selector={"app": "prom"},
-        )],
-    }, namespaces=["monitoring"], on_create=lambda ns, body: (
-        (_ for _ in ()).throw(ApiException(status=500, reason="server boom"))
-    ))
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
-    monkeypatch.setattr(prometheus, "_NODEPORT_RETRY_LIMIT", 3)
-    with pytest.raises(RuntimeError, match="Failed to create NodePort Service"):
-        prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
+def test_nodeport_no_random_module_used(monkeypatch):
+    """Defence-in-depth: no `random.randint` calls. If someone re-introduces
+    client-side port picking, the test fails fast."""
+    import random as _real_random
+    used = {"calls": 0}
+    real_randint = _real_random.randint
+    def noisy_randint(a, b):
+        used["calls"] += 1
+        return real_randint(a, b)
+    monkeypatch.setattr(_real_random, "randint", noisy_randint)
+    # Probe: make sure `prometheus.random` exists (it shouldn't anymore)
+    # If it does, the test below will catch any port-picking logic.
+    has_random = getattr(prometheus, "random", None) is not None
+    assert has_random is False, (
+        "prometheus module still imports 'random' — re-introduced "
+        "client-side port picking, which is racy."
+    )

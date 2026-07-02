@@ -26,7 +26,6 @@ import atexit
 import json
 import logging
 import os
-import random
 import re
 import shutil
 import signal
@@ -1027,34 +1026,32 @@ def _stop_all_port_forwards_on_exit() -> None:
 # =============================================================================
 
 
-# Random selection here is a deliberate alternative to K8s's built-in
-# auto-assignment: the apiserver picks deterministically when nodePort is
-# omitted, which can lead to "I tried twice in this cluster and got the
-# same port" confusion. Randomizing locally gives us independent picks
-# across calls and makes idempotent retries safer.
-_NODEPORT_MIN = 30000
-_NODEPORT_MAX = 32767
-_NODEPORT_RETRY_LIMIT = 10
+# kube-prometheus-stack's Prometheus Service typically carries multiple
+# ports on its spec (e.g. `http` + `reloader-web`, both forwarding to
+# 9090 but with different names). Only the one named for the actual
+# Prometheus HTTP API is useful to external callers — cloning every port
+# wastes NodePort slots and gives the agent an ambiguous multi-port URL
+# to deal with. So we pick exactly one ServicePort and let the
+# apiserver allocate a single NodePort for it.
+_PROMETHEUS_PORT_NAME_PREFERENCES: tuple[str, ...] = (
+    "http", "web", "prometheus", "https",
+)
 
 
-def _pick_nodeport_free(core: client.CoreV1Api, namespace: str) -> int:
-    """Pick a NodePort (30000-32767) not already in use anywhere on the cluster.
+def _pick_prometheus_target_port(
+    ports: list[client.V1ServicePort],
+) -> client.V1ServicePort | None:
+    """Return the V1ServicePort that fronts the Prometheus HTTP API.
 
-    Rather than relying on the apiserver's own auto-pick (which is
-    deterministic per-namespace and can collide across rapid retries), we
-    scan current Service nodePorts cluster-wide and pick a non-conflict.
+    Tries well-known names first (`http`, `web`, ...); falls back to the
+    first port if no name matches (the user's own installs may use
+    anything).
     """
-    used: set[int] = set()
-    for ns in [s.metadata.name for s in core.list_namespace().items]:
-        for svc in core.list_namespaced_service(namespace=ns).items:
-            if svc.spec and svc.spec.ports:
-                for p in svc.spec.ports:
-                    if p.node_port:
-                        used.add(p.node_port)
-    while True:
-        candidate = random.randint(_NODEPORT_MIN, _NODEPORT_MAX)
-        if candidate not in used:
-            return candidate
+    for pref in _PROMETHEUS_PORT_NAME_PREFERENCES:
+        for p in ports or []:
+            if (p.name or "").lower() == pref:
+                return p
+    return ports[0] if ports else None
 
 
 def _ensure_prometheus_write_allowed(namespace: str) -> None:
@@ -1090,47 +1087,50 @@ def _service_selector_matches(orig: client.V1Service, candidate: client.V1Servic
     return orig_sel == cand_sel
 
 
-def _port_spec_for_nodeport(orig_ports: list[client.V1ServicePort] | None) -> list[client.V1ServicePort]:
-    """Build V1ServicePort list for the NodePort clone.
+def _build_prometheus_port_spec(p: client.V1ServicePort) -> client.V1ServicePort:
+    """Build a V1ServicePort for the clone.
 
-    nodePort is omitted — let the apiserver pick from the random range we
-    channelled via `_pick_nodeport_free`. All other port fields are
-    copied verbatim.
+    `node_port` is *intentionally omitted*. The K8s apiserver is a single
+    leader that serializes NodePort allocation against a global in-use
+    set — passing an explicit value creates a TOCTOU race (we scan, we
+    pick, we submit, *somebody else has just grabbed the same port*).
+    Letting the apiserver pick guarantees uniqueness without any
+    client-side coordination.
     """
-    out: list[client.V1ServicePort] = []
-    for p in orig_ports or []:
-        out.append(
-            client.V1ServicePort(
-                name=p.name,
-                port=p.port,
-                target_port=p.target_port,
-                protocol=p.protocol,
-                # Deliberately no `node_port` — we set it ourselves below
-                # after `_pick_nodeport_free`.
-            )
-        )
-    return out
+    return client.V1ServicePort(
+        name=p.name,
+        port=p.port,
+        target_port=p.target_port,
+        protocol=p.protocol,
+        # No node_port — apiserver allocates from 30000-32767.
+    )
 
 
 def expose_prometheus_as_nodeport(
     namespace: str,
     service_name: str,
     name_suffix: str = "-np",
-    max_attempts: int = _NODEPORT_RETRY_LIMIT,
 ) -> str:
     """Create a parallel NodePort Service so the MCP client can reach it directly.
 
     Most Prometheus installs expose the API on a `ClusterIP` Service —
     a virtual IP only routable from inside the cluster. This tool
-    creates a *parallel* `NodePort` Service with the **same selector and
-    ports** as the original, so the backing Pods stay accessible in
-    two ways (in-cluster via the original ClusterIP; externally via the
-    new NodePort). The original Service is never modified — in-cluster
-    consumers keep working unchanged.
+    creates a *parallel* `NodePort` Service with the **same selector** as
+    the original, plus the **single port** that fronts the Prometheus
+    HTTP API. The backing Pods stay accessible in two ways (in-cluster
+    via the original ClusterIP; externally via the new NodePort). The
+    original Service is never modified — in-cluster consumers keep
+    working unchanged.
 
     If the original Service is already `NodePort` / `LoadBalancer` /
     `ExternalName`, this tool short-circuits and just returns the existing
     URL — no creation needed.
+
+    **Why no explicit `node_port`**: passing a numeric value would create
+    a scan-then-create race (TOCTOU) against other clients. The K8s
+    apiserver is a single leader that serializes port allocation
+    internally against a global in-use set; *not* setting `node_port`
+    lets it allocate itself, which is guaranteed-unique.
 
     Args:
         namespace: where the Prometheus Service lives.
@@ -1139,11 +1139,10 @@ def expose_prometheus_as_nodeport(
         name_suffix: suffix for the new Service name. Default `-np`.
             Pass `""` to overwrite an in-place conversion (rare; you
             usually want the original left alone, so keep the suffix).
-        max_attempts: how many nodePort-pick retries before giving up.
 
     Returns:
-        A formatted summary table (SOURCE / TARGET / TYPE / NODE_PORT /
-        URL), plus:
+        A formatted summary table (NAMESPACE / SOURCE / TARGET / TYPE /
+        NODE_PORT / URL), plus:
 
           - the chosen URL template `http://<node-ip>:<node_port>`
             (the agent must substitute a real Node IP — fetch via
@@ -1234,6 +1233,16 @@ def expose_prometheus_as_nodeport(
             f"Service {namespace}/{service_name} has no ports. Nothing to clone."
         )
 
+    # Pick the single port that fronts the Prometheus HTTP API; cloning
+    # every port on the original Service wastes NodePort slots and gives
+    # an ambiguous multi-URL answer.
+    target_port = _pick_prometheus_target_port(orig_ports)
+    if target_port is None:
+        raise ValueError(
+            f"Service {namespace}/{service_name} has no usable port. "
+            "Refusing to create an empty NodePort Service."
+        )
+
     # 4. Idempotency: if a previous call already created the clone and
     #    its selector still matches, reuse instead of duplicating.
     new_name = f"{service_name}{name_suffix}"
@@ -1276,9 +1285,10 @@ def expose_prometheus_as_nodeport(
                 "and re-call to get a fresh port."
             )
 
-    # 5. Create the new NodePort Service. Pick a port that's free
-    #    cluster-wide; if the apiserver still rejects (race), retry a
-    #    few times before giving up.
+    # 5. Create the new NodePort Service with NO explicit node_port. The
+    #    apiserver will allocate one from the 30000-32767 range
+    #    atomically against the global in-use set, so no client-side
+    #    coordination is needed.
     body = client.V1Service(
         metadata=client.V1ObjectMeta(
             name=new_name,
@@ -1295,44 +1305,23 @@ def expose_prometheus_as_nodeport(
         spec=client.V1ServiceSpec(
             type="NodePort",
             selector=orig_selector,
-            ports=_port_spec_for_nodeport(orig_ports),
+            ports=[_build_prometheus_port_spec(target_port)],
         ),
     )
 
-    last_err: ApiException | None = None
-    for attempt in range(max_attempts):
-        # Re-pick on every attempt so retries don't keep choosing a port
-        # the apiserver already told us is taken.
-        chosen_port = _pick_nodeport_free(core, namespace)
-        assert body.spec is not None
-        body.spec.ports = [
-            client.V1ServicePort(
-                name=p.name,
-                port=p.port,
-                target_port=p.target_port,
-                protocol=p.protocol,
-                node_port=chosen_port,
-            )
-            for p in (body.spec.ports or [])
-        ]
-        try:
-            created = core.create_namespaced_service(
-                namespace=namespace, body=body
-            )
-            break
-        except ApiException as e:
-            last_err = e
-            logger.debug("NodePort %d attempt %d failed: %s", chosen_port, attempt, e)
-            continue
-    else:
-        # Exhausted retries.
+    try:
+        created = core.create_namespaced_service(namespace=namespace, body=body)
+    except ApiException as e:
+        # Surface a clean message; re-raise wrapped so upstream tracebacks
+        # still have the original ApiException attached.
+        logger.debug("create NodePort Service failed: %s", e)
         raise RuntimeError(
-            f"Failed to create NodePort Service {namespace}/{new_name} after "
-            f"{max_attempts} attempts (last error: {last_err})"
-        ) from last_err
+            f"Apiserver rejected NodePort Service {namespace}/{new_name} "
+            f"(HTTP {e.status}): {(e.body or b'').decode('utf-8', errors='replace')}"
+        ) from e
 
-    # 6. Return a useful summary. URL is a template — the agent needs to
-    #    pick a Node IP via `list_resources(kind=Node)`.
+    # 6. Read back the apiserver-assigned nodePort from the returned
+    #    object. We picked a single port so we expect a single number.
     actual_port = None
     if created.spec and created.spec.ports:
         for p in created.spec.ports:
@@ -1352,6 +1341,8 @@ def expose_prometheus_as_nodeport(
     ]
     return (
         f"Created NodePort clone: {namespace}/{new_name}\n"
+        f"Port: apiserver allocated nodePort={actual_port} "
+        f"(internal port {target_port.port}, target {target_port.target_port}).\n"
         "Original Service (ClusterIP) is unchanged — in-cluster traffic still flows there.\n"
         + short_table(rows, ["NAMESPACE", "SOURCE", "TARGET",
                              "TYPE", "NODE_PORT", "URL"])

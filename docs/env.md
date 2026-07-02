@@ -102,7 +102,8 @@ find_prometheus_service(namespace=None)
 > Studio 客户端内），从外面访问 10.x 在路由层就 RST。两条桥接路：
 > - `expose_prometheus_as_nodeport()` — 创建 K8s 一等公民 NodePort，原
 >   ClusterIP Service 保持不动；适合节点 IP 内网可达的环境（VPC /
->   on-prem / dev box）。**不依赖任何外部命令**。
+>   on-prem / dev box）。**nodePort 由 apiserver atomic 分配，不会冲突**。
+>   **不依赖任何外部命令**。
 > - `start_prometheus_port_forward()` — 起 `kubectl port-forward`，返
 >   回 127.0.0.1 URL；适合节点 IP 不可达的环境。**要求 `kubectl` 在 PATH**。
 

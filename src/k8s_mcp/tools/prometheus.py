@@ -198,21 +198,39 @@ def find_prometheus_service(namespace: str | None = None) -> str:
 
     Returns:
         A formatted table of candidate Services. Each row has
-        NAMESPACE, NAME, CLUSTER_IP, PORT, URL. The agent should pick the
-        row that looks like Prometheus and pass `url=<URL>` to
-        `prometheus_query` / `prometheus_query_range` / `pod_metrics`.
+        **NAMESPACE, NAME, TYPE, RECOMMENDED, URL**. The **RECOMMENDED**
+        column tells the agent exactly what to call next:
 
-        Empty result returns a "no Prometheus Services found" notice with
-        suggestions (install kube-prometheus-stack; or set
+          - NodePort / LoadBalancer → already externally reachable;
+            pass `prometheus_url=<URL>` to `prometheus_query` after
+            substituting a real Node / LB IP (fetch via
+            `list_resources(kind="Node")` or
+            `get_resource_jsonpath(..., path="items[*].status.addresses...")`).
+          - ClusterIP → call
+            `expose_prometheus_as_nodeport(namespace=<ns>, service_name=<name>)`
+            on this row. **This is the recommended path** — the apiserver
+            auto-allocates the nodePort, so no TOCTOU race. The original
+            Service (and all in-cluster consumers) stay untouched.
+
+        Avoid `start_prometheus_port_forward()` unless your cluster's Node
+        IPs are unreachable from the MCP client: it requires `kubectl` on
+        PATH and has known macOS / sandbox binding issues (user has hit
+        `[Errno 61] Connection refused` after a successful port-forward
+        on macOS in past reports).
+
+        Empty result returns a "no Prometheus-looking Services found"
+        notice with suggestions (install kube-prometheus-stack; or set
         `K8S_MCP_PROMETHEUS_URL`).
 
     Errors:
         ApiException on cluster-level API errors (RBAC, apiserver down).
 
-    This is the **first step** of the recommended flow:
+    This is the **first step** of the recommended flow::
 
-        find_prometheus_service()  →  pick a URL from the table
-        prometheus_query(..., prometheus_url=<that URL>)
+        find_prometheus_service()  →  read the RECOMMENDED column
+        expose_prometheus_as_nodeport(<ns>, <name>)     # if ClusterIP
+        list_resources(kind="Node")                     # get a Node IP
+        prometheus_query(..., prometheus_url='http://<node-ip>:<nodePort>')
     """
     core = client.CoreV1Api()
 
@@ -243,20 +261,50 @@ def find_prometheus_service(namespace: str | None = None) -> str:
         if not any(hint in lname for hint in _PROM_NAME_HINTS):
             continue
 
+        svc_type = (
+            svc.spec.type if svc.spec and getattr(svc.spec, "type", None)
+            else "ClusterIP"
+        )
+        port = (
+            svc.spec.ports[0].port if svc.spec and svc.spec.ports else 9090
+        )
         try:
             url = _service_url(svc)
         except Exception as e:  # noqa: BLE001 — defensive
             logger.debug("find_prometheus_service: skip %s/%s: %s", ns_name, name, e)
             continue
 
-        port = (svc.spec.ports[0].port if svc.spec and svc.spec.ports else 9090)
+        if svc_type == "ClusterIP":
+            recommended = (
+                f"expose_prometheus_as_nodeport("
+                f"namespace='{ns_name}', service_name='{name}')"
+            )
+            url_cell = f"{url} (cluster-internal — NOT reachable from MCP client)"
+        elif svc_type == "NodePort":
+            recommended = (
+                "✅ direct (substitute <node-ip> from list_resources(kind=Node))"
+            )
+            url_cell = f"http://<node-ip>:{port}"
+        elif svc_type == "LoadBalancer":
+            recommended = (
+                "✅ direct (substitute LB ingress from Service.status)"
+            )
+            url_cell = f"http://<lb-ip>:{port}"
+        else:
+            # ExternalName / unknown — leave to the agent.
+            recommended = (
+                f"unsupported type={svc_type}; "
+                "ask user for URL or set K8S_MCP_PROMETHEUS_URL"
+            )
+            url_cell = url
+
         rows.append(
             {
                 "NAMESPACE": ns_name,
                 "NAME": name,
-                "CLUSTER_IP": svc.spec.cluster_ip if svc.spec else "",
-                "PORT": str(port),
-                "URL": url,
+                "TYPE": svc_type,
+                "RECOMMENDED": recommended,
+                "URL": url_cell,
             }
         )
 
@@ -273,9 +321,29 @@ def find_prometheus_service(namespace: str | None = None) -> str:
             "block to skip discovery."
         )
 
-    return short_table(
-        rows, ["NAMESPACE", "NAME", "CLUSTER_IP", "PORT", "URL"]
+    table = short_table(
+        rows, ["NAMESPACE", "NAME", "TYPE", "RECOMMENDED", "URL"]
     )
+    has_clusterip = any(r["TYPE"] == "ClusterIP" for r in rows)
+    guidance = (
+        "\nGuidance:\n"
+        "  - TYPE=NodePort / LoadBalancer → pass the URL above to "
+        "`prometheus_query(..., prometheus_url=...)` after substituting "
+        "a real Node / LB IP.\n"
+        "  - TYPE=ClusterIP → the URL is NOT reachable from this MCP "
+        "client. **RECOMMENDED:** call "
+        "`expose_prometheus_as_nodeport(namespace, service_name)` on the "
+        "matching row. The apiserver allocates the nodePort atomically "
+        "(no race), the original ClusterIP Service is left untouched, and "
+        "no `kubectl` binary is needed.\n"
+    )
+    if has_clusterip:
+        guidance += (
+            "  - Avoid `start_prometheus_port_forward()` unless Node IPs "
+            "are unreachable: it requires `kubectl` on PATH and has known "
+            "macOS / sandbox issues (TCP RST, IPv6 binding).\n"
+        )
+    return table + guidance
 
 
 # =============================================================================
@@ -767,13 +835,29 @@ def start_prometheus_port_forward(
 ) -> str:
     """Bridge an in-cluster Prometheus Service to 127.0.0.1 via port-forward.
 
-    Most Prometheus installs expose the API on a `ClusterIP` Service — a
-    virtual IP (typically `10.96.x.x`) that's only routable from inside the
-    cluster. The MCP server runs *outside* the cluster, so even with the
-    right IP and port, TCP packets get dropped. This tool starts a managed
-    `kubectl port-forward` that uses the apiserver's SPDY endpoint to
-    terminate the connection for you, and returns the local URL to thread
-    into the Prometheus tools.
+    **NOT recommended** — prefer `expose_prometheus_as_nodeport()` for
+    ClusterIP Prometheus. This tool is a fallback for clusters whose Node
+    IPs are unreachable from the MCP client (e.g. a remote cluster with
+    private Node IPs and no inbound LB). It depends on `kubectl` on PATH
+    and has known reliability issues:
+
+      - **macOS sandbox / IPv6 binding** — `kubectl port-forward` binds
+        on a dual-stack listener that some macOS sandboxes (and a few
+        shells) only see as IPv6. Result: `kubectl` reports success, but
+        `http://127.0.0.1:<port>` returns `[Errno 61] Connection refused`.
+        Workaround is `lsof -iTCP:PORT` + manual kill.
+      - **`kubectl` not installed** — common in MCP clients that ship
+        only the MCP server binary. The tool then raises immediately.
+      - **Lifecycle bound to the MCP process** — restarting Cherry Studio
+        kills all running forwards; re-call this tool after each restart.
+
+    Most Prometheus installs expose the API on a `ClusterIP` Service —
+    a virtual IP (typically `10.96.x.x`) that's only routable from inside
+    the cluster. The MCP server runs *outside* the cluster, so even with
+    the right IP and port, TCP packets get dropped. This tool starts a
+    managed `kubectl port-forward` that uses the apiserver's SPDY
+    endpoint to terminate the connection for you, and returns the local
+    URL to thread into the Prometheus tools.
 
     Args:
         namespace: where the Prometheus Service lives (use
@@ -789,7 +873,7 @@ def start_prometheus_port_forward(
                             Prometheus query tools
           - pid           — for debugging
 
-    Example flow::
+    Example flow (only when NodePort is genuinely impossible)::
 
         find_prometheus_service() → pick row "monitoring/prometheus"
         start_prometheus_port_forward("monitoring", "prometheus")
@@ -1111,16 +1195,32 @@ def expose_prometheus_as_nodeport(
     service_name: str,
     name_suffix: str = "-np",
 ) -> str:
-    """Create a parallel NodePort Service so the MCP client can reach it directly.
+    """**RECOMMENDED for ClusterIP Prometheus.** Create a parallel NodePort
+    Service so the MCP client can reach it directly.
 
     Most Prometheus installs expose the API on a `ClusterIP` Service —
-    a virtual IP only routable from inside the cluster. This tool
-    creates a *parallel* `NodePort` Service with the **same selector** as
-    the original, plus the **single port** that fronts the Prometheus
-    HTTP API. The backing Pods stay accessible in two ways (in-cluster
-    via the original ClusterIP; externally via the new NodePort). The
-    original Service is never modified — in-cluster consumers keep
+    a virtual IP (typically `10.96.x.x`) that is only routable from
+    *inside* the cluster. The MCP server runs on the user's machine
+    (Cherry Studio / Claude Desktop), where packets to `10.96.x.x` are
+    dropped at the routing layer. This tool is the **preferred bridge**:
+    it creates a parallel `NodePort` Service in the cluster with the same
+    selector as the original, plus the single port that fronts the
+    Prometheus HTTP API. The backing Pods stay accessible in two ways
+    (in-cluster via the original ClusterIP; externally via the new
+    NodePort). The original Service is never modified — in-cluster
+    consumers (Prometheus itself, alertmanager, Grafana sidecars) keep
     working unchanged.
+
+    Prefer this tool over `start_prometheus_port_forward()`. Reasoning:
+      - **No external binary required.** Works on machines without
+        `kubectl` on PATH (this MCP server has no other use for it).
+      - **No TOCTOU race on the nodePort.** The K8s apiserver is a single
+        leader that serializes port allocation against a global in-use
+        set; passing `node_port=None` lets it auto-allocate atomically.
+      - **No macOS / sandbox binding issues.** Port-forward spawns a
+        subprocess that sometimes lands on an IPv6-bound localhost and
+        the agent gets `[Errno 61] Connection refused` even though
+        `kubectl` reports success.
 
     If the original Service is already `NodePort` / `LoadBalancer` /
     `ExternalName`, this tool short-circuits and just returns the existing

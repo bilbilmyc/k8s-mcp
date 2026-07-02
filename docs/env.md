@@ -76,36 +76,48 @@ Agent 工作流推荐（**两套 ClusterIP 桥接，按场景选**）：
 
 ```
 find_prometheus_service(namespace=None)
-  ↓ 拿到 Service 表（SERVICE + ClusterIP/NodePort）
+  ↓ 拿到 NAMESPACE / NAME / TYPE / RECOMMENDED / URL 表
+  ↓ RECOMMENDED 列直接是下一步的字面调用签名，Agent 照抄即可
   ↓
-  ├── Service 已是 NodePort/LoadBalancer/External?
-  │      ↓ 直接用
-  │   prometheus_query(promql, prometheus_url=<它>)
+  ├── TYPE=NodePort / LoadBalancer?
+  │      ↓ RECOMMENDED 列是 "✅ direct ..."
+  │   prometheus_query(promql, prometheus_url=<URL>)
+  │      （URL 里的 <node-ip> / <lb-ip> 通过 list_resources(kind=Node)
+  │       或 Service.status.loadBalancer.ingress 替换）
   │
-  ├── 节点 IP 可路由到 MCP 客户端？
-  │      ↓ 无 kubectl 依赖
+  ├── TYPE=ClusterIP，节点 IP 可路由到 MCP 客户端？（⭐ 推荐）
+  │      ↓ RECOMMENDED 列是
+  │      ↓   expose_prometheus_as_nodeport(namespace='<ns>',
+  │      ↓                              service_name='<name>')
+  │      ↓ 直接照抄
   │   expose_prometheus_as_nodeport(namespace, service_name)
   │      ↓ 返回 nodePort 数字
   │   list_resources(kind='Node') 拿节点 IP
   │      ↓
   │   prometheus_query(promql, prometheus_url='http://<node-ip>:<nodePort>')
   │
-  └── 节点 IP 不可路由？
-         ↓ 依赖 PATH 上的 kubectl
+  └── TYPE=ClusterIP，节点 IP 不可路由？（兜底）
+         ↓ 依赖 PATH 上的 kubectl；macOS 沙箱下偶尔出
+         ↓ "[Errno 61] Connection refused"（IPv6 绑定问题）
       start_prometheus_port_forward(namespace, service_name)
          ↓ 返回 http://127.0.0.1:<port>
       prometheus_query(promql, prometheus_url='http://127.0.0.1:<port>')
 ```
 
-> ⚠️ `find_prometheus_service()` 默认返回 ClusterIP（`10.96.x.x`），
-> 这种虚拟 IP **只能在集群 pod 内路由**。MCP server 跑在用户机器（Cherry
-> Studio 客户端内），从外面访问 10.x 在路由层就 RST。两条桥接路：
-> - `expose_prometheus_as_nodeport()` — 创建 K8s 一等公民 NodePort，原
->   ClusterIP Service 保持不动；适合节点 IP 内网可达的环境（VPC /
->   on-prem / dev box）。**nodePort 由 apiserver atomic 分配，不会冲突**。
->   **不依赖任何外部命令**。
+> ⚠️ `find_prometheus_service()` 的 ClusterIP 行 URL 列里会标注
+> "cluster-internal — NOT reachable from MCP client"，目的是**阻断
+> Agent 直接拿 `http://10.96.x.x:9090` 去查**——这种虚拟 IP 只能在集
+> 群 pod 内路由，MCP server 跑在用户机器（Cherry Studio 客户端内），
+> 从外面访问 10.x 在路由层就 RST。两条桥接路：
+> - ⭐ `expose_prometheus_as_nodeport()` — 创建 K8s 一等公民 NodePort，
+>   原 ClusterIP Service 保持不动；适合节点 IP 内网可达的环境（VPC /
+>   on-prem / dev box / minikube / kind）。**nodePort 由 apiserver
+>   atomic 分配，不会冲突**（避免客户端 scan-then-create 的 TOCTOU
+>   race）。**不依赖任何外部命令**。
 > - `start_prometheus_port_forward()` — 起 `kubectl port-forward`，返
->   回 127.0.0.1 URL；适合节点 IP 不可达的环境。**要求 `kubectl` 在 PATH**。
+>   回 127.0.0.1 URL；适合节点 IP 不可达的环境。**要求 `kubectl` 在 PATH**，
+>   macOS 沙箱下偶尔出 `[Errno 61] Connection refused`（IPv6 绑定问题），
+>   看到错误时考虑重启 MCP server 或换 NodePort。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |

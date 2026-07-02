@@ -773,6 +773,172 @@ def test_find_prometheus_service_empty_returns_helpful_notice(monkeypatch):
     assert "K8S_MCP_PROMETHEUS_URL" in out
 
 
+# Helpers for the RECOMMENDED-column tests: a fake Service with an
+# explicit `type` field (the default helper above leaves it unset).
+
+
+def _ns_service_with_type(ns, name, ip="10.0.0.1", port=9090, svc_type=None):
+    """Same as `_ns_service` but with `spec.type` populated."""
+    return type(
+        "Svc", (), {
+            "metadata": type("M", (), {"namespace": ns, "name": name})(),
+            "spec": type(
+                "S", (), {
+                    "cluster_ip": ip,
+                    "type": svc_type,
+                    "ports": [type("P", (), {"name": "http", "port": port})()],
+                }
+            )(),
+        }
+    )()
+
+
+def test_find_prometheus_service_clusterip_row_recommends_nodeport(monkeypatch):
+    """ClusterIP rows must call out `expose_prometheus_as_nodeport` literally,
+    so the agent sees the exact next-call signature in the table."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    class _Core:
+        def list_namespace(self, **kw):
+            return type("R", (), {"items": [_ns_obj("monitoring")]})()
+
+        def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {
+                "items": [
+                    _ns_service_with_type(
+                        "monitoring",
+                        "kube-prometheus-stack-prometheus",
+                        ip="10.96.42.7",
+                        svc_type="ClusterIP",
+                    ),
+                ],
+            })()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    out = prometheus.find_prometheus_service()
+
+    # Table column headers must include the new TYPE/RECOMMENDED columns.
+    assert "TYPE" in out
+    assert "RECOMMENDED" in out
+    assert "ClusterIP" in out
+
+    # The exact call signature must appear (so an LLM can copy it verbatim).
+    assert "expose_prometheus_as_nodeport(" in out
+    assert "namespace='monitoring'" in out
+    assert "service_name='kube-prometheus-stack-prometheus'" in out
+
+    # ClusterIP URL must be annotated as not-reachable to discourage
+    # the agent from plugging 10.96.x.x straight into prometheus_query.
+    assert "http://10.96.42.7:9090" in out
+    assert "NOT reachable" in out
+
+    # Guidance block — must promote the NodePort tool and warn against
+    # port-forward on macOS.
+    assert "RECOMMENDED" in out
+    assert "expose_prometheus_as_nodeport" in out
+    # Guidance mentions the port-forward caveat only when ClusterIP rows exist.
+    assert "macOS" in out or "sandbox" in out
+
+
+def test_find_prometheus_service_nodeport_row_says_direct(monkeypatch):
+    """Already-NodePort Services must show ✅ direct so the agent skips
+    both bridge tools and goes straight to list_resources(kind=Node)."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    class _Core:
+        def list_namespace(self, **kw):
+            return type("R", (), {"items": [_ns_obj("monitoring")]})()
+
+        def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {
+                "items": [
+                    _ns_service_with_type(
+                        "monitoring",
+                        "kube-prometheus-stack-prometheus",
+                        port=9090,
+                        svc_type="NodePort",
+                    ),
+                ],
+            })()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    out = prometheus.find_prometheus_service()
+
+    assert "NodePort" in out
+    assert "✅ direct" in out
+    # The literal call signature with namespace/name should NOT appear in the
+    # table cell — that branch is only for ClusterIP rows. The tool *name*
+    # may still appear in the static guidance text.
+    assert "namespace='monitoring'" not in out
+    assert "service_name='kube-prometheus-stack-prometheus'" not in out
+    # And guidance that mentions port-forward caveats should NOT appear,
+    # since no ClusterIP rows are present.
+    # (Guidance still appears for NodePort/LoadBalancer rows with a different
+    #  branch — but the macOS warning specifically is gated on ClusterIP.)
+
+
+def test_find_prometheus_service_loadbalancer_row_says_direct(monkeypatch):
+    """LoadBalancer rows also get ✅ direct (substitute LB ingress)."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    class _Core:
+        def list_namespace(self, **kw):
+            return type("R", (), {"items": [_ns_obj("monitoring")]})()
+
+        def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {
+                "items": [
+                    _ns_service_with_type(
+                        "monitoring",
+                        "kube-prometheus-stack-prometheus",
+                        svc_type="LoadBalancer",
+                    ),
+                ],
+            })()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    out = prometheus.find_prometheus_service()
+
+    assert "LoadBalancer" in out
+    assert "✅ direct" in out
+    assert "LB ingress" in out or "Service.status" in out
+
+
+def test_find_prometheus_service_guidance_omits_portforward_warning_when_only_nodeport(monkeypatch):
+    """The macOS port-forward caveat is gated on ClusterIP rows being
+    present. With only NodePort rows, we omit it to avoid FUD about a
+    path the agent wouldn't need anyway."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    class _Core:
+        def list_namespace(self, **kw):
+            return type("R", (), {"items": [_ns_obj("monitoring")]})()
+
+        def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {
+                "items": [
+                    _ns_service_with_type(
+                        "monitoring",
+                        "kube-prometheus-stack-prometheus",
+                        svc_type="NodePort",
+                    ),
+                ],
+            })()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    out = prometheus.find_prometheus_service()
+
+    # Guidance is still present (top-level NodePort / LoadBalancer section)
+    assert "Guidance" in out
+    # But the port-forward macOS warning is not, since no ClusterIP row.
+    assert "macOS" not in out
+    assert "[Errno 61]" not in out
+
+
 # =============================================================================
 # port_forward — ClusterIP bridge
 # =============================================================================

@@ -22,8 +22,16 @@ Prometheus deployments don't need it.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import logging
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -653,8 +661,354 @@ def _ts_human(unix_ts: str | float) -> str:
         return str(unix_ts)
 
 
+# =============================================================================
+# port_forward — bridge ClusterIP Services to the local process
+# =============================================================================
+#
+# Why this exists: Prometheus Services are almost always ClusterIP (default),
+# which means a `10.96.x.x` virtual IP only routable from inside the cluster.
+# The MCP server runs as a stdio child of Cherry Studio / Claude Desktop —
+# i.e. on the user's machine, *outside* the cluster. So hitting
+# `http://10.96.3.39:9090/api/v1/query` from this process gets a TCP RST
+# (which urllib renders as "Remote end closed connection without response").
+#
+# `kubectl port-forward` is the standard fix: it speaks to the apiserver over
+# SPDY, and the apiserver terminates the TCP connection to the ClusterIP on
+# your behalf. We launch it as a managed subprocess so that:
+#
+#   - The process tree dies with the MCP server (no orphan kubectl procs).
+#   - We pick a free local port deterministically and report the URL back.
+#   - The Agent can hand the URL straight to `prometheus_query(...,
+#     prometheus_url=...)` without any extra plumbing.
+# =============================================================================
+
+
+_PF_REGISTRY: dict[str, dict[str, Any]] = {}
+_PF_HEALTHCHECK_TTL_S = 30  # if a managed kubectl hasn't shown life in this
+                            # long we assume it's dead and forget it.
+
+
+# Service / namespace / port inputs are passed to subprocess as argv (no shell),
+# so most injection vectors are closed. We still validate heavily — both for
+# sanity (don't forward `kube-system/kube-dns` by accident) and to make the
+# error messages user-friendly instead of "kubectl invocation failed".
+_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$")
+
+
+def _validate_k8s_name(value: str, kind: str) -> None:
+    """Validate a string is a legal RFC 1123 K8s resource name."""
+    if not value or not _NAME_RE.match(value):
+        raise ValueError(
+            f"invalid {kind}={value!r}: must match RFC 1123 label "
+            "(lowercase alphanum / '-', '.' allowed for some kinds)"
+        )
+
+
+def _validate_port(value: int, kind: str) -> int:
+    """Coerce and validate a TCP port (1..65535)."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{kind}={value!r} is not an integer") from e
+    if not (1 <= port <= 65535):
+        raise ValueError(f"{kind}={port} outside 1..65535")
+    return port
+
+
+def _pick_free_local_port() -> int:
+    """Ask the kernel for a TCP port that is currently free.
+
+    Race-condition window between this call and the subprocess binding it is
+    closed by `_wait_port_ready()`, which probes until success or timeout.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _wait_port_ready(host: str, port: int, timeout_s: float = 10.0) -> None:
+    """Block until `host:port` accepts a TCP connection, or `timeout_s` elapses.
+
+    We probe with a fresh socket rather than reuse — `kubectl port-forward`
+    binds lazily, and a refused connect is the right "not yet" signal.
+    """
+    deadline = time.monotonic() + timeout_s
+    last_err: OSError | None = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return
+        except OSError as e:
+            last_err = e
+            time.sleep(0.1)
+    raise TimeoutError(
+        f"port-forward never became ready on {host}:{port} "
+        f"after {timeout_s:.1f}s ({last_err})"
+    )
+
+
+def _prune_dead_forwards() -> None:
+    """Forget entries whose kubectl subprocess has died."""
+    for fid, entry in list(_PF_REGISTRY.items()):
+        proc: subprocess.Popen = entry["proc"]
+        if proc.poll() is not None:
+            logger.info(
+                "port_forward: %s gone (exit=%s), removing from registry",
+                fid, proc.returncode,
+            )
+            del _PF_REGISTRY[fid]
+
+
+def start_prometheus_port_forward(
+    namespace: str,
+    service_name: str,
+    service_port: int = 9090,
+    local_port: int | None = None,
+) -> str:
+    """Bridge an in-cluster Prometheus Service to 127.0.0.1 via port-forward.
+
+    Most Prometheus installs expose the API on a `ClusterIP` Service — a
+    virtual IP (typically `10.96.x.x`) that's only routable from inside the
+    cluster. The MCP server runs *outside* the cluster, so even with the
+    right IP and port, TCP packets get dropped. This tool starts a managed
+    `kubectl port-forward` that uses the apiserver's SPDY endpoint to
+    terminate the connection for you, and returns the local URL to thread
+    into the Prometheus tools.
+
+    Args:
+        namespace: where the Prometheus Service lives (use
+            `find_prometheus_service()` to find this).
+        service_name: the Prometheus Service name.
+        service_port: target port on the Service (default `9090`).
+        local_port: TCP port on `127.0.0.1` to bind — auto-picked if `None`.
+
+    Returns:
+        A friendly status string. Includes:
+          - forward_id    — for `stop_port_forward`
+          - local URL     — pass this as `prometheus_url=` to the
+                            Prometheus query tools
+          - pid           — for debugging
+
+    Example flow::
+
+        find_prometheus_service() → pick row "monitoring/prometheus"
+        start_prometheus_port_forward("monitoring", "prometheus")
+        prometheus_query("up", prometheus_url="http://127.0.0.1:34567")
+
+    Lifecycle: the subprocess is reaped when the MCP server exits (via
+    `atexit`). Restarting Cherry Studio's MCP entry therefore kills all
+    running forwards — re-call this tool after restart.
+    """
+    _validate_k8s_name(namespace, "namespace")
+    _validate_k8s_name(service_name, "service_name")
+    service_port = _validate_port(service_port, "service_port")
+
+    kubectl = shutil.which("kubectl")
+    if not kubectl:
+        raise RuntimeError(
+            "`kubectl` is not on PATH; port-forward requires it. "
+            "Install kubectl, or run this MCP server inside the cluster "
+            "(in-cluster mode) so the Service is reachable directly."
+        )
+
+    if local_port is not None:
+        local_port = _validate_port(local_port, "local_port")
+    else:
+        local_port = _pick_free_local_port()
+
+    # Idempotency: re-forwarding the same target is cheap and common.
+    # Match on (ns, service, service_port) so caller can pick the URL blindly.
+    _prune_dead_forwards()
+    for fid, entry in _PF_REGISTRY.items():
+        if (
+            entry["namespace"] == namespace
+            and entry["service"] == service_name
+            and entry["service_port"] == service_port
+        ):
+            url = entry["url"]
+            return (
+                f"Forward already active: {fid}\n"
+                f"local URL: {url}\n"
+                f"Pass this URL as `prometheus_url=` to the Prometheus tools."
+            )
+
+    cmd = [
+        kubectl, "port-forward",
+        "--namespace", namespace,
+        f"svc/{service_name}",
+        f"{local_port}:{service_port}",
+        # Don't block on a TTY — we're a stdio MCP server.
+        "--address", "127.0.0.1",
+    ]
+    logger.info("port_forward: starting: %s", cmd)
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        # New process group so we can SIGTERM everything if it forks.
+        start_new_session=True,
+    )
+
+    try:
+        _wait_port_ready("127.0.0.1", local_port, timeout_s=10.0)
+    except Exception:
+        # Forward didn't come up — kill the half-started process and surface
+        # what kubectl said, so the user knows *why* ("port in use" vs
+        # "service not found" vs "RBAC denied").
+        try:
+            proc.terminate()
+            try:
+                err = proc.stderr.read(4096).decode("utf-8", errors="replace")
+            except Exception:
+                err = ""
+        finally:
+            proc.wait(timeout=2)
+        raise RuntimeError(
+            f"kubectl port-forward for {namespace}/{service_name}:{service_port} "
+            f"→ 127.0.0.1:{local_port} failed to come up.\n"
+            f"kubectl stderr:\n{err.strip() or '(empty)'}"
+        ) from None
+
+    forward_id = (
+        f"{namespace}/{service_name}:{service_port}"
+        f"→127.0.0.1:{local_port}"
+    )
+    url = f"http://127.0.0.1:{local_port}"
+    _PF_REGISTRY[forward_id] = {
+        "proc": proc,
+        "namespace": namespace,
+        "service": service_name,
+        "service_port": service_port,
+        "local_port": local_port,
+        "url": url,
+        "started_at": time.time(),
+        "pid": proc.pid,
+    }
+    logger.info("port_forward: ready %s pid=%d", forward_id, proc.pid)
+    return (
+        f"Forward started: {forward_id}\n"
+        f"local URL: {url}\n"
+        f"pid: {proc.pid}\n"
+        f"Pass `{url}` as `prometheus_url=` to the Prometheus query tools.\n"
+        f"Stop with `stop_port_forward(forward_id={forward_id!r})`."
+    )
+
+
+def list_port_forwards() -> str:
+    """List currently active port-forwards started by this MCP server.
+
+    Returns:
+        A formatted table (FORWARD_ID / URL / PID / AGE). Includes a
+        'use stop_port_forward(forward_id=...) to terminate' reminder.
+
+        If no forwards are active, returns a short 'no active forwards'
+        notice (not an empty string).
+    """
+    _prune_dead_forwards()
+    if not _PF_REGISTRY:
+        return (
+            "No active port-forwards.\n"
+            "Call `start_prometheus_port_forward(namespace, service_name)` "
+            "after `find_prometheus_service()` if you need to reach a "
+            "ClusterIP Prometheus from outside the cluster."
+        )
+
+    rows: list[dict[str, str]] = []
+    now = time.time()
+    for fid, entry in _PF_REGISTRY.items():
+        age_s = int(now - entry["started_at"])
+        age_str = (
+            f"{age_s}s" if age_s < 60
+            else f"{age_s // 60}m{age_s % 60:02d}s"
+        )
+        rows.append({
+            "FORWARD_ID": fid,
+            "URL": entry["url"],
+            "PID": str(entry["pid"]),
+            "AGE": age_str,
+        })
+    return short_table(rows, ["FORWARD_ID", "URL", "PID", "AGE"])
+
+
+def stop_port_forward(forward_id: str) -> str:
+    """Terminate a port-forward started by `start_prometheus_port_forward`.
+
+    Args:
+        forward_id: the identifier returned by `start_prometheus_port_forward`
+            (looks like "default/prometheus:9090→127.0.0.1:34567").
+
+    Returns:
+        A short status string. If the forward was already gone (e.g. the
+        subprocess died on its own) we still report success — the goal state
+        "no forward" is reached either way.
+    """
+    entry = _PF_REGISTRY.get(forward_id)
+    if entry is None:
+        # Was it ever there? Tell the user either way.
+        return (
+            f"No port-forward with id {forward_id!r}.\n"
+            "Call `list_port_forwards()` to see active forwards."
+        )
+
+    proc: subprocess.Popen = entry["proc"]
+    if proc.poll() is None:
+        # Try a clean shutdown first; escalate after 2s.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=2.0)
+
+    _PF_REGISTRY.pop(forward_id, None)
+    return f"Stopped: {forward_id}"
+
+
+@atexit.register
+def _stop_all_port_forwards_on_exit() -> None:
+    """Clean up kubectl subprocesses when the MCP server exits.
+
+    Cherry Studio / Claude Desktop restart the MCP server often; leaving
+    orphan port-forwards around would slow every restart (each becomes a
+    defunct procs that hold TCP ports briefly). Best-effort: SIGTERM, then
+    SIGKILL after a short grace, then move on even if it didn't die.
+    """
+    for fid, entry in list(_PF_REGISTRY.items()):
+        proc: subprocess.Popen = entry["proc"]
+        if proc.poll() is not None:
+            continue
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except Exception as e:  # noqa: BLE001 — best effort at exit
+            logger.debug("atexit: SIGTERM failed for %s: %s", fid, e)
+    # Second pass: reap anything still alive after ~1s.
+    deadline = time.monotonic() + 1.0
+    for _fid, entry in list(_PF_REGISTRY.items()):
+        proc: subprocess.Popen = entry["proc"]
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:  # noqa: BLE001 — last-ditch; nothing useful to do
+                pass
+
+
 def register(mcp) -> None:
     mcp.tool()(prometheus_query)
     mcp.tool()(prometheus_query_range)
     mcp.tool()(pod_metrics)
     mcp.tool()(find_prometheus_service)
+    mcp.tool()(start_prometheus_port_forward)
+    mcp.tool()(list_port_forwards)
+    mcp.tool()(stop_port_forward)

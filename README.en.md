@@ -132,6 +132,8 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `prometheus_query_range(promql, start, end, step="30s", prometheus_url?)` — Prometheus range query
 - `pod_metrics(pod_name, namespace, metric="cpu|memory|network_rx|network_tx|fs_reads|fs_writes", range="5m", prometheus_url?)` — common cAdvisor-derived container metrics for a Pod (CPU / memory / network / fs IO)
 - `find_prometheus_service(namespace=None)` — scans all (or one) namespace(s) for Services whose name looks like Prometheus; returns a NAMESPACE/NAME/CLUSTER_IP/PORT/URL table — the agent picks a URL and threads it into the three tools above
+- `start_prometheus_port_forward(namespace, service_name, service_port=9090, local_port=None)` — **the bridge**: Prometheus Services are usually `ClusterIP` (`10.96.x.x`), only routable from inside the cluster. The MCP server runs *outside*, so hits get TCP RST. This tool launches a managed `kubectl port-forward` and returns a `127.0.0.1` URL the agent can use.
+- `list_port_forwards()` / `stop_port_forward(forward_id)` — list / terminate active forwards
 - `rollout_status(kind, name, namespace, timeout_seconds=60, watch=False)` — polls until rollout completes
 - `rollout_history(kind, name, namespace)` — list ControllerRevisions; pass revision to rollout_undo(to_revision=)
 - `get_api_resources(prefix=None)` — list cluster kinds (CRDs included)
@@ -212,14 +214,22 @@ Tokens are HMAC-SHA256 signed (`K8S_MCP_DELETE_TOKEN_SECRET`), 5 min TTL.
 
 **Endpoint discovery** is a **collaboration** step — every cluster installs
 Prometheus somewhere different (operator vs helm vs bare manifest, different
-namespaces). k8s-mcp exposes a two-step protocol:
+namespaces). k8s-mcp exposes a three-step protocol:
 
 1. **Call `find_prometheus_service(namespace=None)` first** — scans every
    (or one) namespace for Services whose name looks like Prometheus
    (`prometheus` / `prometheus-operated` /
    `kube-prometheus-stack-prometheus` / `prometheus-server` / etc.) and
    returns a NAMESPACE / NAME / CLUSTER_IP / PORT / URL table.
-2. **Pick one URL and pass it to the Prometheus tools** —
+2. **If the URL is a `ClusterIP` (the default!), the agent knows to
+   port-forward first** — ClusterIPs (`10.96.x.x`) are virtual IPs only
+   routable from inside the cluster; the MCP server runs *outside*, so
+   hits get TCP RST. The agent calls
+   `start_prometheus_port_forward(namespace, service_name)` to start a
+   managed `kubectl port-forward` and get a local `http://127.0.0.1:<port>`
+   URL back. (If your Prometheus is already a NodePort / LoadBalancer /
+   external, you can skip this step.)
+3. **Pass that URL to the Prometheus tools** —
    `prometheus_query(promql, prometheus_url=<that URL>)` /
    `prometheus_query_range(..., prometheus_url=<URL>)` /
    `pod_metrics(..., prometheus_url=<URL>)`.
@@ -228,6 +238,12 @@ If `K8S_MCP_PROMETHEUS_URL` is set, the tools use it directly and skip
 discovery. There's also a small built-in fallback list of common
 (namespace, Service) pairs; if even those fail, the tools return a
 friendly "ask the user" message.
+
+**Lifecycle note**: the `kubectl` subprocesses are reaped when the MCP
+server exits (via an `atexit` hook). When Cherry Studio's MCP entry
+restarts, every active forward is killed — re-running
+`start_prometheus_port_forward` is part of the standard first-call flow
+after restart.
 
 ## End-to-end example (Claude session)
 
@@ -257,9 +273,11 @@ friendly "ask the user" message.
 > You: "Show me api-1's CPU and memory right now."
 >
 > Claude → `find_prometheus_service()` →
-> picks the `default/monitor-kube-prometheus-st-prometheus` row URL →
-> `pod_metrics("api-1", "default", "cpu", prometheus_url=<URL>)` →
-> `pod_metrics("api-1", "default", "memory", prometheus_url=<URL>)`.
+> notices ClusterIP can't be reached from outside →
+> `start_prometheus_port_forward("default",
+> "monitor-kube-prometheus-st-prometheus")` → gets `http://127.0.0.1:34567` →
+> `pod_metrics("api-1", "default", "cpu", prometheus_url="http://127.0.0.1:34567")` →
+> `pod_metrics("api-1", "default", "memory", prometheus_url="http://127.0.0.1:34567")`.
 >
 > You: "Delete it."
 >

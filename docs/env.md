@@ -72,17 +72,26 @@ Prometheus 的 URL 解析有 4 层优先级，**由高到低**：
    安装。
 4. **找不到** — 工具返回中文友好提示，引导用户给 URL。
 
-Agent 工作流建议：
+Agent 工作流建议（**含 ClusterIP 桥接**）：
 
 ```
-find_prometheus_service(namespace=None)  # 拿到 URL 表
-   ↓
-prometheus_query(promql, prometheus_url=<那个 URL>)
+find_prometheus_service(namespace=None)        # 拿到 URL 表 (ClusterIP)
+   ↓ 发现给的 URL 是 10.96.x.x (不可达)
+start_prometheus_port_forward(namespace, service_name)
+   ↓ 返回 http://127.0.0.1:<port>
+prometheus_query(promql, prometheus_url="http://127.0.0.1:<port>")
 ```
+
+> ⚠️ `find_prometheus_service()` 返回的 URL 通常是 ClusterIP（`10.96.x.x`），
+> 这种虚拟 IP **只能在集群 pod 内路由**。MCP server 跑在用户机器（Cherry
+> Studio 客户端内），从外面访问 10.x 在路由层就 RST。要解决就用
+> `start_prometheus_port_forward()` 起 `kubectl port-forward`（用 apiserver
+> SPDY 通道）。如果你的 Prometheus Service 已经是 `NodePort` /
+> `LoadBalancer` / External 类型，这一步可跳过。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `K8S_MCP_PROMETHEUS_URL` | (空) | 完整 URL，例如 `http://prometheus.monitoring.svc.cluster.local:9090`。设了就跳过自动探测。 |
+| `K8S_MCP_PROMETHEUS_URL` | (空) | 完整 URL，例如 `http://prometheus.monitoring.svc.cluster.local:9090`。设了就跳过自动探测。注意：如果设的是 ClusterIP，从外部访问会失败。 |
 | `K8S_MCP_PROMETHEUS_BEARER_TOKEN` | (空) | 可选 bearer token。多数本地 Prometheus 不需要。 |
 
 ## 完整示例（`~/.zshrc` 或 `.env`）

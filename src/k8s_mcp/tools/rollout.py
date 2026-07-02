@@ -1,4 +1,13 @@
-"""Rollout status and rollback (Deployment / StatefulSet)."""
+"""Rollout status and rollback (Deployment / StatefulSet).
+
+中文说明：
+- `rollout_status`：轮询直到 Ready / Available / 失败 / 超时
+- `rollout_history`：列出 ControllerRevision 记录，附带 image 字段
+  方便 Agent 选 revision
+- `rollout_undo`：回滚到指定 revision（默认上一次）
+
+仅支持 Deployment / StatefulSet（DaemonSet 没有 ControllerRevision）。
+"""
 from __future__ import annotations
 
 import logging

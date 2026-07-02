@@ -1,4 +1,10 @@
-"""Event listing."""
+"""Event listing.
+
+中文说明：
+拉取 K8s Event 对象，常用于排障。`warning_only=True` 只返回 Warning
+类事件，过滤掉千篇一律的 Normal 事件；`field_selector` 支持按
+`involvedObject.kind`、`reason` 等字段过滤。
+"""
 from __future__ import annotations
 
 from datetime import UTC

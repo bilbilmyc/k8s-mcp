@@ -10,6 +10,18 @@ reveal_secrets=True? Two reasons:
 
 Reads are always allowed (no read-only / allowlist gate). Writes use
 `update_secret` or `apply_yaml` for full replacement.
+
+中文说明：
+Secret 是 k8s-mcp 中最敏感的资源，专门做了三道防线：
+
+  - `list_secrets`：只返回 metadata + data 的 key 个数，**绝不返回 value**。
+  - `get_secret_value(reveal=False)`：返回 `*** MASKED (N bytes)`，
+    Agent 看不到原文。
+  - `get_secret_value(reveal=True)`：必须显式传 True 才会解码 value；
+    非 UTF-8（二进制证书/密钥）会用 `<binary, N bytes, base64=...>`
+    表示，便于重建。
+
+改 Secret 仍然走通用 `apply_yaml`，read_only 检查会自动套上。
 """
 from __future__ import annotations
 

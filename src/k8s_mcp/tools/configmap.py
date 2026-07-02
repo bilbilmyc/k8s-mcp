@@ -1,4 +1,11 @@
-"""ConfigMap read and update (full replace)."""
+"""ConfigMap read and update (full replace).
+
+中文说明：
+`get_configmap` 返回 ConfigMap 内容（按 key 列出）；`update_configmap`
+默认走整体替换（保留 ResourceVersion）；`merge=True` 时仅覆盖传入的
+key，未提及的 key 保持原值。Secret 没有类似工具——改 Secret 必须显式
+用 `apply_yaml`，避免误操作。
+"""
 from __future__ import annotations
 
 from kubernetes import client

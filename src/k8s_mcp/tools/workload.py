@@ -2,6 +2,15 @@
 
 Create functions build YAML manifests and delegate to apply_yaml (so safety
 checks apply). Patch functions go straight to the API for precision.
+
+中文说明：
+Workload 管理工具覆盖 Deployment / StatefulSet / DaemonSet 的创建、扩缩、
+重启、改镜像、改资源等操作。设计上把"创建"和"修改"分两类：
+
+  - 创建类（create_*）：构造 YAML 后走 apply_yaml，read_only 与
+    namespace allowlist 检查会自动套上。
+  - 修改类（scale / restart / set_image / set_resources）：直接走
+    patch API，避免 apply_yaml 的整对象比对，行为更可预测。
 """
 from __future__ import annotations
 

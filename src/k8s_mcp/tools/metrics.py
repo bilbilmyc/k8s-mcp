@@ -1,4 +1,10 @@
-"""Resource usage metrics (kubectl top equivalent)."""
+"""Resource usage metrics (kubectl top equivalent).
+
+中文说明：
+- `top_pods` / `top_nodes`：要求集群装了 metrics-server，否则 K8s API
+  会返回 503；错误会原样回传，便于 Agent 排查。
+- `sort_by=memory|cpu`：排序字段；CPU 单位是核（如 250m），内存是字节。
+"""
 from __future__ import annotations
 
 import logging

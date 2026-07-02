@@ -10,6 +10,15 @@ Supports the two forms kubectl uses:
 
 Polling every second, with a configurable timeout. Returns when satisfied,
 raises TimeoutError on timeout.
+
+中文说明：
+`wait_resource(kind, name, namespace, for_condition=..., for_jsonpath=...,
+jsonpath_value=..., timeout_seconds=60)`：
+
+  - 两种 for_* 模式：condition 看 status.conditions[].type + status==True；
+    jsonpath 比对完整 jsonpath 表达式的字符串结果。
+  - 默认每秒轮询，超时抛 TimeoutError。
+  - 适合 Agent "apply 后等 rollout 完成" 这类编排流程。
 """
 from __future__ import annotations
 

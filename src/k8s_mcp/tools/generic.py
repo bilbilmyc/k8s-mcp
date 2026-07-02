@@ -1,6 +1,16 @@
 """Generic resource tools: list / get / get_yaml / describe / apply.
 
 All use the kubernetes DynamicClient so any registered Kind works.
+
+中文说明：
+通用资源工具，覆盖"读、查、检视、改"四大类核心动作，全部走
+kubernetes DynamicClient，所以内置 kind 与 CRD 都能用。其中：
+
+  - `apply_yaml`：服务端对比（CREATE vs UPDATE）；PUT 时通过
+    ResourceVersion 防止覆盖他人更新。
+  - `diff_resource`：在 apply 之前预览差异，让 Agent 给用户看。
+  - `get_resource_yaml` 默认对 Secret 做脱敏；需 `reveal_secrets=True`
+    才输出原文。
 """
 from __future__ import annotations
 

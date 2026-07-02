@@ -1,4 +1,14 @@
-"""Output formatters: YAML / Table / Describe."""
+"""Output formatters: YAML / Table / Describe.
+
+中文说明：
+本模块集中所有"对象 → 字符串"的格式化逻辑，输出风格对 LLM 友好：
+
+  - `to_yaml(obj)`：标准 YAML 序列化。
+  - `short_table(rows, columns)`：紧凑文本表（无边框、列对齐）。
+  - `describe(obj)`：仿 `kubectl describe` 风格的分组输出。
+  - `mask_secret_data(obj)`：把 Secret.data / stringData 里的值替换为
+    `***`，是 `get_resource_yaml` 默认行为的安全后盾。
+"""
 from __future__ import annotations
 
 from typing import Any

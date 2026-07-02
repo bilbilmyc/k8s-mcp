@@ -11,6 +11,13 @@ Supports a useful subset of JSONPath — the parts LLMs actually use:
     matching resources (one value per line).
 
 Reference: https://kubernetes.io/docs/reference/kubectl/jsonpath/
+
+中文说明：
+`get_resource_jsonpath(kind, path, name?, namespace?, label_selector?)`
+等价于 `kubectl get -o jsonpath=...`。path 形如
+`status.currentReplicas` / `spec.template.spec.containers[0].image`。
+
+只读、自动绕开 namespace allowlist。
 """
 from __future__ import annotations
 

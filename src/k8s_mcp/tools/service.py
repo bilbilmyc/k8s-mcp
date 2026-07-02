@@ -1,4 +1,16 @@
-"""Service and Ingress creation, plus expose_workload."""
+"""Service and Ingress creation, plus expose_workload.
+
+中文说明：
+提供三个常用入口：
+
+  - `create_service`：手动指定 selector / ports / type
+  - `create_ingress`：基于已有的 Service 建 Ingress，支持 hosts / tls
+  - `expose_workload`：给定 Deployment / StatefulSet，自动生成 ClusterIP
+    Service（kubectl expose 的等价物）
+
+所有创建类工具都委托给 generic.apply_yaml，自动套上 read-only 和
+namespace allowlist 检查。
+"""
 from __future__ import annotations
 
 from typing import Any

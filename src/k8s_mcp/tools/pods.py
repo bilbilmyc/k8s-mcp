@@ -1,4 +1,12 @@
-"""Pod listing + delete (escape hatch)."""
+"""Pod listing + delete (escape hatch).
+
+中文说明：
+- `list_pods`：支持 namespace / label_selector / field_selector 三类筛选，
+  `include_all=True` 跨所有 namespace。
+- `delete_pod`：单 Pod 删除的低风险逃生通道——故意绕过 delete_resource 的
+  二次确认机制（删除一个 Pod 通常只是触发重启，不是真删数据），适合 Agent
+  "重启 pod" 这一类常规排障动作。
+"""
 from __future__ import annotations
 
 from datetime import UTC, datetime

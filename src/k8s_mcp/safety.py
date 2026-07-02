@@ -6,6 +6,13 @@ The delete tool requires a two-step flow:
 
 Tokens are short-lived (settings.delete_token_ttl_seconds, default 300s) and
 HMAC-signed so the server can validate without external state.
+
+中文说明：
+删除工具走二次确认流程：第一步不带 confirm 仅返回资源预览和一个
+HMAC 签名 token（默认 5 分钟过期）；用户确认后第二步带 confirm=True
+与 token 才真正删除。本模块负责 token 的签发、校验、过期判断，
+以及确认"token 里记录的 kind/name/ns/grace_period 必须与本次删除
+请求完全一致"，防止 token 被复用去删别的对象。
 """
 from __future__ import annotations
 

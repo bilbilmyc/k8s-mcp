@@ -1,4 +1,11 @@
-"""Auto-scaling and disruption budgets: create_hpa, create_pdb."""
+"""Auto-scaling and disruption budgets: create_hpa, create_pdb.
+
+中文说明：
+- `create_hpa`：HPA 仅支持 Deployment / StatefulSet / ReplicaSet 之一，
+  CPU 与 memory 指标至少要传一个。
+- `create_pdb`：min_available 与 max_unavailable 必须二选一（PDB 语义上
+  互斥），用 `=` 而非 `>=` 约束副本下限，避免自愿驱逐时被卡住。
+"""
 from __future__ import annotations
 
 import logging

@@ -275,6 +275,70 @@ and `diff_resource` (preview what apply would change).
 
 See `PLAN.md` for the full design doc and `tests/` for examples.
 
+## Programmatic usage (without MCP)
+
+Every tool registered with FastMCP is also a plain Python function in
+`k8s_mcp.tools.*`, so you can use the same building blocks from a script,
+notebook, or CLI without spinning up an MCP server. Authentication,
+safety, and namespace allowlist all still apply — they live in `config`,
+`safety`, and per-tool checks, not in the MCP layer.
+
+```python
+# 程序化调用示例 —— 直接 import 函数，无需 MCP server
+# 1) 加载配置（读取 K8S_MCP_* 环境变量）
+from k8s_mcp.config import get_settings, reset_settings_cache
+reset_settings_cache()  # 清掉可能的缓存
+settings = get_settings()
+print(settings.read_only, settings.namespace_allowlist)
+
+# 2) 直接调一个 tool 函数 —— 与 MCP 工具签名完全一致
+from k8s_mcp.tools import logs
+result = logs.get_pod_logs(
+    pod_name="nginx-7c5b-abc",
+    namespace="default",
+    tail_lines=50,
+    pattern=r"\b5\d\d\b",      # 正则：抓 5xx 错误
+    context_lines=2,           # 匹配前后各 2 行
+    since_seconds=3600,        # 最近一小时
+)
+print(result)  # 纯文本，可直接进日志/告警
+
+# 3) 时间窗口（绝对时间）—— "两点到四点之间"
+from k8s_mcp.tools import logs
+out = logs.get_pod_logs(
+    pod_name="api-1",
+    namespace="prod",
+    since_time="2026-07-02T14:00:00Z",   # RFC3339，下界
+    until_time="2026-07-02T16:00:00Z",   # RFC3339，上界（客户端过滤）
+    pattern="aabbcc",
+)
+
+# 4) 创建资源 —— 走和 MCP 一样的守门（read-only / namespace allowlist）
+from k8s_mcp.tools import workload
+out = workload.create_deployment(
+    name="web",
+    image="nginx:1.25",
+    namespace="default",
+    replicas=3,
+)
+print(out)
+
+# 5) 删除二次确认 —— 与 MCP 流程一致
+from k8s_mcp.tools import generic as gen
+# 第一步：不带 confirm，先拿到预览 + token
+preview = gen.delete_resource(kind="Deployment", name="web", namespace="default")
+print(preview)  # 含 confirmation_token
+# 第二步：人工确认后，带 confirm=True + token 真正执行
+# gen.delete_resource(kind="Deployment", name="web", namespace="default",
+#                    confirm=True, confirmation_token="<token-from-preview>")
+```
+
+`k8s_mcp.client.get_api_client()` returns a cached
+`kubernetes.client.api_client.ApiClient` honoring the same three auth
+modes, so any code that wants to drop down to the raw kubernetes-python
+client can do so and still get kubeconfig / apiserver-token / in-cluster
+auto-detection.
+
 ## Out of scope (v2+)
 
 - `exec_pod`, `port_forward` (stateful, doesn't fit MCP stdio)

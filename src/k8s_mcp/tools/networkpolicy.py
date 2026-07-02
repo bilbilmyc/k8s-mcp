@@ -2,6 +2,14 @@
 
 For complex multi-port orcid logic prefer apply_yaml. This helper covers the
 90% case: deny-all baseline + open specific ingress from a namespace.
+
+中文说明：
+`create_networkpolicy(name, namespace, pod_selector, policy_types,
+ingress=[], egress=[])`：
+
+  - `policy_types` 至少要传一个，元素必须是 `Ingress` / `Egress`。
+  - 不填 ingress/egress 时只创建空策略，效果是"什么都不允许"（deny-all）。
+  - 复杂多端口 / CIDR 规则建议直接用 `apply_yaml`。
 """
 from __future__ import annotations
 

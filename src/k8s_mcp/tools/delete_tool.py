@@ -3,6 +3,18 @@
 NEVER delete without first showing the user what will be deleted and getting
 their explicit approval. The tool enforces this with a signed short-lived
 confirmation_token.
+
+中文说明：
+删除是 k8s-mcp 中最危险的工具，所以强制走"预览 → 二次确认"两步流程：
+
+  1. 第一步：`confirm=False`，工具返回当前对象的 YAML（Secret 会脱敏）
+     + 一个 HMAC 签名的 token（默认 5 分钟过期）。
+  2. 第二步：Agent 把预览展示给用户，得到明确同意后用 `confirm=True`
+     + 同一个 token 再调一次，token 里的 kind/name/namespace/grace_period
+     必须与本次请求完全一致才执行真正的删除。
+
+这一步无法跳过，也无法批量复用 token。任何 token 不匹配、过期、伪造、
+read_only、或 namespace 不在 allowlist 内的情况都会被拒。
 """
 from __future__ import annotations
 

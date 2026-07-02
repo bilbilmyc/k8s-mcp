@@ -1,4 +1,10 @@
-"""ServiceAccount creation shortcut."""
+"""ServiceAccount creation shortcut.
+
+中文说明：
+`create_serviceaccount(name, namespace, image_pull_secrets=[]?)`：
+- `image_pull_secrets` 是可选 list，引用已有的 Secret 名（用于私有镜像仓库）。
+- 创建后需要 RoleBinding / ClusterRoleBinding 才能让 SA 有权限操作资源。
+"""
 from __future__ import annotations
 
 import logging

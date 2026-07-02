@@ -8,6 +8,24 @@ logs` would return hundreds of MB. The tool defaults are safe:
   - pattern (regex) + context_lines lets the agent narrow to relevant lines
   - label_selector switches to multi-pod mode and prefixes each line with the
     pod name
+  - since_time / until_time: 绝对时间窗口（RFC3339），用于"两点到四点"
+    这类查询；K8s API 仅支持下界，上界客户端过滤
+  - strict_time: True 时丢弃没有 RFC3339 时间戳的行（部分容器不打印
+    时间戳，会让用户误以为"没数据"）
+
+中文说明：
+`get_pod_logs` 是 k8s-mcp 里被调用最频繁的工具，参数最多也最易踩坑。
+关键设计点：
+
+  - 全部过滤都在客户端做（pattern/context/since_time/until_time 都是），
+    K8s API 只负责返回原始流 + sinceTime 下界。所以"先拉再过滤"是
+    常规路径，tail_lines 不要无脑拉太大，建议配合 pattern 收窄。
+  - 空结果返回中文友好的"没有日志"提示（不是空字符串——Cherry Studio
+    等客户端会隐藏空 tool 输出）。
+  - label_selector 模式自动 list_pods 再逐个 fetch logs，跨 Pod 的多行
+    输出每行都会前缀 `[pod-name]`。
+  - output_format=json 返回 [{pod, container, time, line}] 列表，便于
+    Agent 程序化处理。
 """
 from __future__ import annotations
 

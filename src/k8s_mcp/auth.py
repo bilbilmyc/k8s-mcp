@@ -4,6 +4,17 @@ Priority:
   A. apiserver URL + token   (settings.api_server AND settings.api_token set)
   B. kubeconfig              (settings.kubeconfig path or default ~/.kube/config)
   C. in-cluster              (auto-detected via service account token file)
+
+中文说明：
+认证自动选择三档之一，按优先级匹配：
+
+  - 模式 A：`K8S_MCP_API_SERVER` + `K8S_MCP_API_TOKEN` 都设置 → 直连 apiserver
+  - 模式 B：`K8S_MCP_KUBECONFIG` 显式路径，或 `KUBECONFIG` 环境变量，
+    或默认 `~/.kube/config`
+  - 模式 C：检测到 `/var/run/secrets/kubernetes.io/serviceaccount/token`
+    → 集群内 SA 模式（sidecar / pod 内运行时）
+
+任意一种匹配成功即可，三档全失败则抛 AuthError。
 """
 from __future__ import annotations
 

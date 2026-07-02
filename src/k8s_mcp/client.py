@@ -3,6 +3,11 @@
 The Kubernetes python-client maintains a process-wide ``Configuration`` that
 ``ApiClient`` wraps. We cache a single ``ApiClient`` and rebuild it only when
 auth-relevant settings change.
+
+中文说明：
+K8s python-client 的 ``Configuration`` 是进程级单例。本模块做一层轻量缓存：
+当认证相关的 settings 没变时复用同一 ApiClient（避免每次 tool 调用都重建
+HTTP 连接），只有认证字段变化时才重新构造。
 """
 from __future__ import annotations
 
@@ -20,7 +25,7 @@ _cached_key: tuple | None = None
 
 
 def _client_key(settings: Settings) -> tuple:
-    """Hashable key that uniquely identifies an auth configuration."""
+    """组成认证配置的 hashable key。"""
     return (
         settings.api_server,
         settings.api_token,
@@ -32,7 +37,12 @@ def _client_key(settings: Settings) -> tuple:
 
 
 def get_api_client(settings: Settings | None = None) -> client.ApiClient:
-    """Return a cached ApiClient built from current settings."""
+    """返回根据当前 settings 缓存的 ApiClient。
+
+    中文说明：
+    所有 tool 函数都通过本方法拿 ApiClient；当认证相关的 settings 字段
+    变化（切换 kubeconfig / token 等）时会自动重建。
+    """
     global _cached_client, _cached_key
     settings = settings or get_settings()
     key = _client_key(settings)
@@ -45,7 +55,7 @@ def get_api_client(settings: Settings | None = None) -> client.ApiClient:
 
 
 def reset_client_cache() -> None:
-    """Drop the cached client. Tests should call this between scenarios."""
+    """清掉 ApiClient 缓存。测试场景切换时调用。"""
     global _cached_client, _cached_key
     _cached_client = None
     _cached_key = None

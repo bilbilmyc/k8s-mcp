@@ -2,6 +2,15 @@
 
 These build minimal YAML and delegate to apply_yaml so safety checks apply.
 For complex rule sets, prefer apply_yaml with a hand-written manifest.
+
+中文说明：
+- `create_role` / `create_clusterrole`：必须传至少一条 rule。
+- `create_rolebinding` / `create_clusterrolebinding`：role_kind 必须是
+  `Role` 或 `ClusterRole`（不能是 ServiceAccount —— 那是 subject）。
+- subjects 通常是 `{"kind": "ServiceAccount", "name": "..."}`，可多个。
+
+复杂权限策略建议直接用 `apply_yaml` 传完整 manifest，工具函数只覆盖
+最常见的快捷路径。
 """
 from __future__ import annotations
 

@@ -9,6 +9,17 @@ underlying primitives:
     part of a DaemonSet and don't have emptyDir volumes — those require
     --ignore-daemonsets / --delete-emptydir-data to evict.
 
+中文说明：
+节点运维操作（重启 / 升级 / 维护）三件套：
+
+  - `cordon_node`：标记 unschedulable=true，新 Pod 不会再调度上来。
+  - `uncordon_node`：恢复调度。
+  - `drain_node`：先 cordon，再用 Eviction API 驱逐 Pod（尊重 PDB）。
+    DaemonSet / emptyDir Pod 默认跳过；`force=True` 绕过 PDB 用 raw delete。
+
+执行排障 reboot / 内核升级 / kubelet 重启等场景的标准动作：
+cordon → drain → 维护 → uncordon。
+
 Drain is high-risk: it removes workloads from a node. We respect
 PodDisruptionBudgets via the Eviction API by default (same as `kubectl drain`
 without --force). Set --force to bypass PDBs (uses raw delete, which is

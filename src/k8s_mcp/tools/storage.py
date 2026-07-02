@@ -1,4 +1,12 @@
-"""Storage shortcut: create_pvc."""
+"""Storage shortcut: create_pvc.
+
+中文说明：
+`create_pvc(name, namespace, size, access_modes?, storage_class?, labels?)`：
+- `size` 用 K8s 资源量字符串，如 `"10Gi"`、`"500Mi"`。
+- `access_modes` 默认 `["ReadWriteOnce"]`；多读多写场景传
+  `["ReadWriteMany"]` 等。
+- `storage_class` 留空走集群默认；集群无默认 SC 时会 Pending。
+"""
 from __future__ import annotations
 
 import logging

@@ -6,6 +6,17 @@ the schema for kinds it doesn't know — without those, an agent is limited to
 the built-in kinds hardcoded in our generic tools.
 
 Both are read-only and bypass the namespace allowlist.
+
+中文说明：
+发现/自省类工具，让 Agent 在写 YAML 之前能动态了解集群里有什么 kind：
+
+  - `get_api_resources(prefix=...)`：列出所有 API 资源（含 CRD），
+    字段与 `kubectl api-resources` 一致。
+  - `explain_resource(kind, field_path=..., api_version=...)`：通过
+    OpenAPI v3 schema 反查 kind / 字段的定义与描述，等价于
+    `kubectl explain`。
+
+两个工具都只读，自动绕开 namespace allowlist（只读不需要守门）。
 """
 from __future__ import annotations
 

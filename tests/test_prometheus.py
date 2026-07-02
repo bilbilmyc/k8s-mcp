@@ -536,7 +536,7 @@ def test_ts_human_invalid_passthrough():
 # =============================================================================
 
 
-def test_register_adds_three_tools():
+def test_register_adds_all_tools():
     calls = []
 
     class _FakeMCP:
@@ -550,3 +550,201 @@ def test_register_adds_three_tools():
     assert "prometheus_query" in calls
     assert "prometheus_query_range" in calls
     assert "pod_metrics" in calls
+    assert "find_prometheus_service" in calls
+
+
+# =============================================================================
+# _resolve_base — passed_url override is the "MCP + LLM collaboration" hook
+# =============================================================================
+
+
+def test_resolve_base_passed_url_wins_over_env(monkeypatch):
+    """Agent can override via tool arg even if K8S_MCP_PROMETHEUS_URL is set."""
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_URL", "http://env-prom.example.com:9090")
+    reset_settings_cache()
+    s = prometheus.get_settings()
+    # passed_url takes priority — no apiserver call happens at all
+    assert prometheus._resolve_base("http://agent-found.test:9090", s) == \
+        "http://agent-found.test:9090"
+
+
+def test_resolve_base_passed_url_trailing_slash_normalized(monkeypatch):
+    """Common agent error: append a slash. Strip it."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+    s = prometheus.get_settings()
+    assert prometheus._resolve_base("http://x.test:9090/", s) == \
+        "http://x.test:9090"
+
+
+def test_resolve_base_falls_through_to_env(monkeypatch):
+    """No passed_url → falls through to settings/env."""
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_URL", "http://env-prom.example.com:9090")
+    reset_settings_cache()
+    s = prometheus.get_settings()
+    assert prometheus._resolve_base(None, s) == "http://env-prom.example.com:9090"
+
+
+def test_query_with_passed_url_skips_discovery(monkeypatch):
+    """End-to-end: passing prometheus_url to the tool skips env + discovery."""
+    captured = {}
+
+    def fake_get(path, params, base_url, bearer_token):
+        captured["base_url"] = base_url
+        return {"status": "success", "data": {"resultType": "vector", "result": []}}
+
+    monkeypatch.setattr(prometheus, "_prom_get", fake_get)
+    # Deliberately set no env var — only the passed URL matters
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+    apiserver_calls = {"n": 0}
+
+    class _Core:
+        def read_namespaced_service(self, **kw):
+            apiserver_calls["n"] += 1
+            return _FakeService()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    prometheus.prometheus_query("up", prometheus_url="http://agent-found.example.com:9090")
+    assert captured["base_url"] == "http://agent-found.example.com:9090"
+    # Discovery did NOT run — apiserver not called
+    assert apiserver_calls["n"] == 0
+
+
+def test_pod_metrics_with_passed_url(monkeypatch):
+    """pod_metrics also honors the override."""
+    captured = {}
+
+    def fake_get(path, params, base_url, bearer_token):
+        captured["base_url"] = base_url
+        return {"status": "success", "data": {"resultType": "vector", "result": [
+            {"metric": {"container": "app"}, "value": [1700000000, "0.01"]},
+        ]}}
+
+    monkeypatch.setattr(prometheus, "_prom_get", fake_get)
+    prometheus.pod_metrics(
+        "p1", "ns", metric="cpu",
+        prometheus_url="http://agent-found.example.com:9090",
+    )
+    assert captured["base_url"] == "http://agent-found.example.com:9090"
+
+
+# =============================================================================
+# find_prometheus_service — broader discovery across namespaces
+# =============================================================================
+
+
+def _ns_service(ns, name, ip="10.0.0.1", port=9090):
+    """Build a fake CoreV1Service for the discovery tests."""
+    return type(
+        "Svc", (), {
+            "metadata": type("M", (), {"namespace": ns, "name": name})(),
+            "spec": type(
+                "S", (), {
+                    "cluster_ip": ip,
+                    "ports": [type("P", (), {"name": "http", "port": port})()],
+                }
+            )(),
+        }
+    )()
+
+
+def _ns_obj(name):
+    return type("Ns", (), {"metadata": type("M", (), {"name": name})()})()
+
+
+def test_find_prometheus_service_scans_all_namespaces(monkeypatch):
+    """When no namespace is given, lists every ns and surfaces any Service
+    whose name looks like Prometheus — even in non-standard namespaces."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    all_namespaces = [_ns_obj("default"), _ns_obj("monitoring")]
+    services_by_ns = {
+        "default": [_ns_service("default", "monitor-kube-prometheus-st-prometheus", ip="10.96.10.5", port=9090)],
+        "monitoring": [_ns_service("monitoring", "kube-prometheus-stack-prometheus", ip="10.96.20.5", port=9090)],
+    }
+
+    class _Core:
+        def list_namespace(self, **kw):
+            return type("R", (), {"items": all_namespaces})()
+
+        def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {"items": services_by_ns.get(namespace, [])})()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    out = prometheus.find_prometheus_service()
+    # Both non-standard and standard names should appear (table format)
+    assert "monitor-kube-prometheus-st-prometheus" in out
+    assert "kube-prometheus-stack-prometheus" in out
+    # And the URLs the agent should pass back
+    assert "http://10.96.10.5:9090" in out
+    assert "http://10.96.20.5:9090" in out
+    # ns separation visible
+    assert "default" in out
+    assert "monitoring" in out
+
+
+def test_find_prometheus_service_namespace_filter(monkeypatch):
+    """When namespace is given, only scans that one ns."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    services = [_ns_service("default", "prometheus", ip="10.96.99.1", port=9090)]
+
+    class _Core:
+        def list_namespace(self, **kw):
+            return type("R", (), {"items": []})()
+
+        def list_namespaced_service(self, namespace, **kw):
+            assert namespace == "default"
+            return type("R", (), {"items": services})()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    out = prometheus.find_prometheus_service(namespace="default")
+    assert "default" in out
+    assert "prometheus" in out
+    assert "http://10.96.99.1:9090" in out
+
+
+def test_find_prometheus_service_filters_non_matching_names(monkeypatch):
+    """Services whose names don't include 'prometheus' / 'prom' are skipped."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    services = [
+        _ns_service("default", "my-app"),
+        _ns_service("default", "prometheus-operated"),
+    ]
+
+    class _Core:
+        def list_namespace(self, **kw):
+            return type("R", (), {"items": [_ns_obj("default")]})()
+
+        def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {"items": services})()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    out = prometheus.find_prometheus_service()
+    assert "my-app" not in out
+    assert "prometheus-operated" in out
+
+
+def test_find_prometheus_service_empty_returns_helpful_notice(monkeypatch):
+    """When nothing is found, return a 'no results' notice (not an empty string)."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    class _Core:
+        def list_namespace(self, **kw):
+            return type("R", (), {"items": [_ns_obj("default")]})()
+
+        def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {"items": [_ns_service("default", "nginx")]})()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    out = prometheus.find_prometheus_service()
+    assert "No Prometheus-looking Services" in out
+    assert out.strip() != ""
+    # Should hint at the env-var workaround
+    assert "K8S_MCP_PROMETHEUS_URL" in out

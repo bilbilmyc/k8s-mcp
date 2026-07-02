@@ -162,6 +162,135 @@ def reset_prometheus_discovery_cache() -> None:
     _DISCOVERY_TRIED = False
 
 
+# Common Service name patterns we'd consider "likely Prometheus". The fuzzy
+# match is intentionally generous so a non-standard install (e.g. someone
+# renamed it "monitor-prometheus" or "prom" or "prom-kube") still gets
+# surfaced to the agent rather than silently ignored.
+_PROM_NAME_HINTS: tuple[str, ...] = (
+    "prometheus",
+    "kube-prometheus",
+    "prom",
+)
+
+
+def find_prometheus_service(namespace: str | None = None) -> str:
+    """Discover where Prometheus is running in the cluster.
+
+    Different clusters install Prometheus into different namespaces and
+    with different Service names — kube-prometheus-stack typically uses
+    `monitoring/kube-prometheus-stack-prometheus`, the operator uses
+    `prometheus-operated`, bare manifests use `prometheus`. Rather than
+    hard-coding a list (which fails on novel installs), this tool exposes
+    a wider scan so the agent can find Prometheus in *any* namespace.
+
+    Args:
+        namespace: optional — limit search to a single namespace. If
+            omitted, scans every namespace in the cluster (cheap; ns list
+            is one API call).
+
+    Returns:
+        A formatted table of candidate Services. Each row has
+        NAMESPACE, NAME, CLUSTER_IP, PORT, URL. The agent should pick the
+        row that looks like Prometheus and pass `url=<URL>` to
+        `prometheus_query` / `prometheus_query_range` / `pod_metrics`.
+
+        Empty result returns a "no Prometheus Services found" notice with
+        suggestions (install kube-prometheus-stack; or set
+        `K8S_MCP_PROMETHEUS_URL`).
+
+    Errors:
+        ApiException on cluster-level API errors (RBAC, apiserver down).
+
+    This is the **first step** of the recommended flow:
+
+        find_prometheus_service()  →  pick a URL from the table
+        prometheus_query(..., prometheus_url=<that URL>)
+    """
+    core = client.CoreV1Api()
+
+    if namespace:
+        namespaces = [namespace]
+        svcs_iter = (
+            (s.metadata.namespace, s)
+            for s in core.list_namespaced_service(namespace=namespace).items
+        )
+    else:
+        namespaces = [ns.metadata.name for ns in core.list_namespace().items]
+        svcs_iter = (
+            (s.metadata.namespace, s)
+            for ns_name in namespaces
+            for s in core.list_namespaced_service(namespace=ns_name).items
+        )
+
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for ns_name, svc in svcs_iter:
+        name = svc.metadata.name
+        key = (ns_name, name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        lname = name.lower()
+        if not any(hint in lname for hint in _PROM_NAME_HINTS):
+            continue
+
+        try:
+            url = _service_url(svc)
+        except Exception as e:  # noqa: BLE001 — defensive
+            logger.debug("find_prometheus_service: skip %s/%s: %s", ns_name, name, e)
+            continue
+
+        port = (svc.spec.ports[0].port if svc.spec and svc.spec.ports else 9090)
+        rows.append(
+            {
+                "NAMESPACE": ns_name,
+                "NAME": name,
+                "CLUSTER_IP": svc.spec.cluster_ip if svc.spec else "",
+                "PORT": str(port),
+                "URL": url,
+            }
+        )
+
+    if not rows:
+        scanned = (
+            f"namespace(s)={namespace}" if namespace else f"{len(namespaces)} namespaces"
+        )
+        return (
+            f"No Prometheus-looking Services found in {scanned}.\n"
+            "Hints:\n"
+            "  - Install kube-prometheus-stack, the prometheus-operator, or "
+            "a bare Prometheus chart.\n"
+            "  - Or set `K8S_MCP_PROMETHEUS_URL` in the MCP server's env "
+            "block to skip discovery."
+        )
+
+    return short_table(
+        rows, ["NAMESPACE", "NAME", "CLUSTER_IP", "PORT", "URL"]
+    )
+
+
+# =============================================================================
+# URL resolution (with override support)
+# =============================================================================
+
+
+def _resolve_base(passed_url: str | None, settings: Settings) -> str:
+    """Pick the Prometheus base URL, in priority order:
+
+      1. `passed_url` — agent-discovered / user-provided URL passed to the
+         tool directly (highest priority; the agent typically discovers via
+         `list_resources(Service)` or `find_prometheus_service()` and
+         threads it through).
+      2. `settings.prometheus_url` — `K8S_MCP_PROMETHEUS_URL` env var.
+      3. Auto-scan candidate (namespace, Service) pairs.
+      4. Raise LookupError with the "ask the user" message.
+    """
+    if passed_url:
+        return passed_url.rstrip("/")
+    return _resolve_prometheus_url(settings)
+
+
 # =============================================================================
 # HTTP transport
 # =============================================================================
@@ -204,13 +333,25 @@ def _prom_get(path: str, params: dict[str, str], base_url: str,
 # =============================================================================
 
 
-def prometheus_query(promql: str, time: str | None = None) -> str:
+def prometheus_query(
+    promql: str,
+    time: str | None = None,
+    prometheus_url: str | None = None,
+) -> str:
     """Run an instant PromQL query against Prometheus.
 
     Args:
         promql: the PromQL expression, e.g.
             `rate(container_cpu_usage_seconds_total{pod="web-1"}[5m])`.
         time: optional RFC3339 timestamp for the query. Default = "now".
+        prometheus_url: optional explicit URL (e.g.
+            `http://prometheus.monitoring.svc.cluster.local:9090`).
+            If omitted, falls back to `K8S_MCP_PROMETHEUS_URL` env var,
+            then auto-discovery. Agents should typically discover the URL
+            via `find_prometheus_service(namespace=...)` first, then pass
+            it here — this is the "MCP and the LLM collaborate" pattern
+            that lets one binary serve clusters with Prometheus in any
+            namespace.
 
     Returns:
         A formatted table. Each result row has METRIC (the metric name and
@@ -218,12 +359,12 @@ def prometheus_query(promql: str, time: str | None = None) -> str:
         "no data points" notice.
 
     Errors:
-      LookupError if Prometheus isn't reachable (auto-discovery failed
-      and no `K8S_MCP_PROMETHEUS_URL` is set).
+      LookupError if Prometheus isn't reachable (no override, no env var,
+      auto-discovery failed).
       ValueError if Prometheus returns an error or the network call fails.
     """
     settings = get_settings()
-    base = _resolve_prometheus_url(settings)
+    base = _resolve_base(prometheus_url, settings)
 
     params: dict[str, str] = {"query": promql}
     if time:
@@ -250,14 +391,12 @@ def prometheus_query(promql: str, time: str | None = None) -> str:
         )
 
     if result_type == "scalar":
-        # single value, no labels
         v = result[1] if isinstance(result, list) and len(result) == 2 else result
         return f"{promql} = {v}"
 
     if result_type == "string":
         return f"{promql} = {result[1] if isinstance(result, list) else result}"
 
-    # vector / matrix both come as [{metric: {...}, value|values: ...}]
     rows: list[dict[str, str]] = []
     for r in result:
         metric = r.get("metric") or {}
@@ -266,8 +405,6 @@ def prometheus_query(promql: str, time: str | None = None) -> str:
         full = f"{name}{{{labels}}}" if labels else name
         v = r.get("value") or r.get("values")
         if isinstance(v, list) and v and isinstance(v[0], list):
-            # matrix result (shouldn't appear here for instant query, but
-            # be defensive)
             v_str = "; ".join(f"{ts}={val}" for ts, val in v)
         elif isinstance(v, list) and len(v) == 2:
             ts, val = v
@@ -283,6 +420,7 @@ def prometheus_query_range(
     start: str,
     end: str,
     step: str = "30s",
+    prometheus_url: str | None = None,
 ) -> str:
     """Run a range PromQL query (time series) against Prometheus.
 
@@ -292,6 +430,9 @@ def prometheus_query_range(
         end:   RFC3339 end time.
         step:  query resolution step width (Prometheus duration: "15s", "1m",
             "5m", "1h"). Smaller step → more data points.
+        prometheus_url: optional explicit URL — see `prometheus_query` for
+            the discovery pattern. Use `find_prometheus_service()` to
+            locate Prometheus, then pass the URL here.
 
     Returns:
         A formatted table per series. Each series has its own block with
@@ -300,7 +441,7 @@ def prometheus_query_range(
     See `prometheus_query` for error semantics.
     """
     settings = get_settings()
-    base = _resolve_prometheus_url(settings)
+    base = _resolve_base(prometheus_url, settings)
 
     payload = _prom_get(
         "/api/v1/query_range",
@@ -393,6 +534,7 @@ def pod_metrics(
     namespace: str,
     metric: str = "cpu",
     range: str = "5m",
+    prometheus_url: str | None = None,
 ) -> str:
     """Fetch a common container metric for a single Pod.
 
@@ -411,6 +553,9 @@ def pod_metrics(
             - "fs_writes"  — bytes/sec written to filesystem
         range: rate window for rate-based metrics (Prometheus duration).
             Ignored by "memory" (instantaneous).
+        prometheus_url: optional explicit URL — see `prometheus_query` for
+            the discovery pattern. Use `find_prometheus_service()` to
+            locate Prometheus, then pass the URL here.
 
     Returns:
         Human-readable summary with one line per container:
@@ -442,7 +587,7 @@ def pod_metrics(
     # formatted table — we want structured data, not a string we'd have to
     # re-parse (fragile: the closing brace can land in the value column).
     settings = get_settings()
-    base = _resolve_prometheus_url(settings)
+    base = _resolve_base(prometheus_url, settings)
     payload = _prom_get(
         "/api/v1/query",
         {"query": promql},
@@ -512,3 +657,4 @@ def register(mcp) -> None:
     mcp.tool()(prometheus_query)
     mcp.tool()(prometheus_query_range)
     mcp.tool()(pod_metrics)
+    mcp.tool()(find_prometheus_service)

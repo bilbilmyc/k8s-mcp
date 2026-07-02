@@ -57,10 +57,28 @@ k8s-mcp 通过 pydantic-settings 读取环境变量，所有变量以 `K8S_MCP_`
 
 ### Prometheus（可选，监控查询）
 
-未设置时自动在 `monitoring` / `prometheus` / `kube-prometheus` /
-`observability` 这几个 namespace 找名为 `prometheus` /
-`prometheus-operated` / `kube-prometheus-stack-prometheus` /
-`prometheus-server` 的 Service。找不到时工具会返回"问用户"的提示。
+Prometheus 的 URL 解析有 4 层优先级，**由高到低**：
+
+1. **工具参数 `prometheus_url=`** — Agent 用 `find_prometheus_service()`
+   找到的 URL 直接传给 `prometheus_query` / `prometheus_query_range` /
+   `pod_metrics`。这是不同集群差异最大的场景的**主要协议**（每个集群
+   把 Prometheus 装在不同 namespace / 不同 Service 名）。
+2. **环境变量 `K8S_MCP_PROMETHEUS_URL`** — 全局兜底；设了就跳过发现，
+   适合 Prometheus 在固定地址的环境。
+3. **硬编码小候选名单自动扫描** — `monitoring` /
+   `kube-prometheus` / `prometheus` / `observability` 这几个 namespace
+   里名为 `kube-prometheus-stack-prometheus` / `prometheus-operated` /
+   `prometheus` / `prometheus-server` 的 Service。覆盖大约 80% 的标准
+   安装。
+4. **找不到** — 工具返回中文友好提示，引导用户给 URL。
+
+Agent 工作流建议：
+
+```
+find_prometheus_service(namespace=None)  # 拿到 URL 表
+   ↓
+prometheus_query(promql, prometheus_url=<那个 URL>)
+```
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |

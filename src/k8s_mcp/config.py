@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     delete_token_secret: str = "change-me"
     delete_token_ttl_seconds: int = 300
 
+    # Prometheus（可选，监控查询）
+    # 显式 URL 优先；未设置则按候选 (namespace, service) 自动探测。
+    prometheus_url: str | None = None
+    prometheus_bearer_token: str | None = None
+
     @field_validator("namespace_allowlist", mode="before")
     @classmethod
     def _split_allowlist(cls, v: Any) -> list[str] | None:

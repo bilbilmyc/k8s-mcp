@@ -128,6 +128,9 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `get_secret_value(name, namespace, key, reveal=False)` — narrow blast-radius single-key fetch; reveal must be explicitly True
 - `top_pods(namespace?, label_selector?, sort_by=memory|cpu)` — requires metrics-server
 - `top_nodes(sort_by=memory|cpu)` — requires metrics-server
+- `prometheus_query(promql, time?)` — Prometheus instant PromQL query (**not** metrics-server; queries any scraped series)
+- `prometheus_query_range(promql, start, end, step="30s")` — Prometheus range query
+- `pod_metrics(pod_name, namespace, metric="cpu|memory|network_rx|network_tx|fs_reads|fs_writes", range="5m")` — common cAdvisor-derived container metrics for a Pod (CPU / memory / network / fs IO)
 - `rollout_status(kind, name, namespace, timeout_seconds=60, watch=False)` — polls until rollout completes
 - `rollout_history(kind, name, namespace)` — list ControllerRevisions; pass revision to rollout_undo(to_revision=)
 - `get_api_resources(prefix=None)` — list cluster kinds (CRDs included)
@@ -194,6 +197,25 @@ Tokens are HMAC-SHA256 signed (`K8S_MCP_DELETE_TOKEN_SECRET`), 5 min TTL.
   proceed.
 - `force=True` bypasses PDBs (raw delete).
 
+**Prometheus tools** (`prometheus_query` / `prometheus_query_range` /
+`pod_metrics`) are a **separate system from `top_pods`**:
+
+- `top_pods` calls Kubernetes's aggregation layer API at
+  `/apis/metrics.k8s.io/...`, which **only sees metrics-server data**.
+- The Prometheus tools hit Prometheus's HTTP API (default `:9090`), which
+  sees every metric Prometheus has scraped (cAdvisor, node-exporter, app
+  exporters / ServiceMonitors).
+- Most Prometheus setups scrape cAdvisor by default, so
+  `pod_metrics("nginx-7c5b", "default", "cpu")` works without
+  metrics-server installed.
+
+**Endpoint discovery**: auto-scans `monitoring` / `prometheus` /
+`kube-prometheus` / `observability` for Services named `prometheus` /
+`prometheus-operated` / `kube-prometheus-stack-prometheus` /
+`prometheus-server`. If none match, returns a friendly "ask the user"
+message — the user provides a URL and you inject it via
+`K8S_MCP_PROMETHEUS_URL`.
+
 ## End-to-end example (Claude session)
 
 > You: "Deploy nginx 1.25 as a Deployment with 3 replicas, expose it via Service and Ingress."
@@ -218,6 +240,11 @@ Tokens are HMAC-SHA256 signed (`K8S_MCP_DELETE_TOKEN_SECRET`), 5 min TTL.
 > You: "Drain node-3 so I can reboot it."
 >
 > Claude → `cordon_node("node-3")` → lists pods → `drain_node("node-3")`.
+>
+> You: "Show me api-1's CPU and memory right now."
+>
+> Claude → `pod_metrics("api-1", "default", "cpu")` →
+> `pod_metrics("api-1", "default", "memory")`.
 >
 > You: "Delete it."
 >
@@ -267,7 +294,8 @@ src/k8s_mcp/
     ├── rbac.py       # Role / RoleBinding / ClusterRole / ClusterRoleBinding
     ├── serviceaccount.py # create_serviceaccount
     ├── networkpolicy.py # create_networkpolicy
-    └── storage.py    # create_pvc
+    ├── storage.py    # create_pvc
+    └── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
 ```
 
 `generic.py` additionally exposes `replace_resource` (PUT with ResourceVersion)

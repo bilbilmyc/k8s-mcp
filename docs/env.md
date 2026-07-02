@@ -55,6 +55,18 @@ k8s-mcp 通过 pydantic-settings 读取环境变量，所有变量以 `K8S_MCP_`
 | `K8S_MCP_DELETE_TOKEN_SECRET` | `change-me` | 删除二次确认 token 的 HMAC 签名密钥。**生产环境务必用 `openssl rand -hex 32` 重新生成**。 |
 | `K8S_MCP_DELETE_TOKEN_TTL_SECONDS` | `300` | token 有效期（秒），默认 5 分钟 |
 
+### Prometheus（可选，监控查询）
+
+未设置时自动在 `monitoring` / `prometheus` / `kube-prometheus` /
+`observability` 这几个 namespace 找名为 `prometheus` /
+`prometheus-operated` / `kube-prometheus-stack-prometheus` /
+`prometheus-server` 的 Service。找不到时工具会返回"问用户"的提示。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `K8S_MCP_PROMETHEUS_URL` | (空) | 完整 URL，例如 `http://prometheus.monitoring.svc.cluster.local:9090`。设了就跳过自动探测。 |
+| `K8S_MCP_PROMETHEUS_BEARER_TOKEN` | (空) | 可选 bearer token。多数本地 Prometheus 不需要。 |
+
 ## 完整示例（`~/.zshrc` 或 `.env`）
 
 ```bash

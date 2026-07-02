@@ -1,59 +1,62 @@
 # k8s-mcp
 
-Kubernetes MCP server for LLM agents. Exposes 30+ tools covering CRUD on
-Pods, Deployments, StatefulSets, DaemonSets, Services, Ingresses, ConfigMaps
-plus logs/events, node ops, top, rollout, wait, and bulk YAML apply.
+[English version](./README.en.md)
 
-The goal is to drive day-to-day K8s operations from natural language
-(Claude Desktop, Cursor, Cline, …) with structured tool calls instead of
-`kubectl` shell scraping.
+面向 LLM Agent 的 Kubernetes MCP server。提供 30+ 工具，覆盖 Pod /
+Deployment / StatefulSet / DaemonSet / Service / Ingress / ConfigMap
+等资源的增删改查，加上日志 / 事件 / 节点运维 / top / rollout / wait /
+批量 YAML apply。
 
-## Quick start
+设计目标：让日常 K8s 运维通过自然语言驱动（Claude Desktop、Cursor、
+Cline、Cherry Studio…），用结构化 tool 调用替代 `kubectl` 文本解析。
+
+## 快速开始
 
 ```bash
-# From source (dev mode)
+# 从源码（开发模式）
 uv sync
 uv run k8s-mcp
 
-# From a built wheel (production / agent config)
+# 从已构建的 wheel（生产 / Agent 配置）
 uv build
 uv tool run --from ./dist/k8s_mcp-0.1.0-py3-none-any.whl k8s-mcp
 ```
 
-That's it. By default the server reads `~/.kube/config`. Override via env
-vars (see below).
+就这样。默认读 `~/.kube/config`，通过环境变量可覆盖（见 [环境变量参考](./docs/env.md)）。
 
-## Authentication — three modes
+## 认证 — 三档
 
-Auto-detected, in this priority:
+自动检测，按以下优先级匹配：
 
-### Mode A — apiserver URL + token
-For remote/CI/CD scenarios where you can't use a kubeconfig.
+### 模式 A — apiserver URL + token
+
+远程 / CI / CD 场景下用，不能用 kubeconfig 时。
 
 ```bash
 export K8S_MCP_API_SERVER=https://api.example.com:6443
 export K8S_MCP_API_TOKEN=eyJhbGciOiJSUzI1NiIs...
-export K8S_MCP_API_CA_CERT=/path/to/ca.crt   # optional
-export K8S_MCP_API_INSECURE=false            # optional, skip TLS verify (testing only)
+export K8S_MCP_API_CA_CERT=/path/to/ca.crt   # 可选
+export K8S_MCP_API_INSECURE=false            # 可选，跳过 TLS 校验（仅测试）
 ```
 
-### Mode B — kubeconfig
-Default. Reads `KUBECONFIG` env or `~/.kube/config`.
+### 模式 B — kubeconfig
+
+默认。读 `KUBECONFIG` 环境变量或 `~/.kube/config`。
 
 ```bash
-export KUBECONFIG=/path/to/kubeconfig         # optional
-export K8S_MCP_KUBE_CONTEXT=my-cluster        # optional, override current-context
+export KUBECONFIG=/path/to/kubeconfig         # 可选
+export K8S_MCP_KUBE_CONTEXT=my-cluster        # 可选，覆盖 current-context
 ```
 
-### Mode C — in-cluster
-Auto-detected when `/var/run/secrets/kubernetes.io/serviceaccount/token`
-exists. Useful when running the MCP server as a sidecar inside a pod.
+### 模式 C — in-cluster
 
-## Claude Desktop / Cursor / Cline / Claude Code setup
+检测到 `/var/run/secrets/kubernetes.io/serviceaccount/token` 时自动启用。
+MCP server 作为 sidecar 跑在 pod 内时用。
 
-`uv tool run --from <wheel>` is the recommended stable entrypoint because
-every agent uses it the same way, regardless of how the source lives on
-the box.
+## Claude Desktop / Cursor / Cline / Cherry Studio / Claude Code 配置
+
+推荐用 `uv tool run --from <wheel>`，所有 Agent 的注册方式一致，与源码
+在机器上的位置无关。
 
 ```json
 {
@@ -73,7 +76,7 @@ the box.
 }
 ```
 
-For Claude Code, the equivalent registration is:
+Claude Code 的注册方式：
 
 ```bash
 claude mcp add-json k8s "$(cat <<'EOF'
@@ -88,54 +91,59 @@ EOF
 )"
 ```
 
-To use Mode A instead, add `"K8S_MCP_API_SERVER"` and `"K8S_MCP_API_TOKEN"`
-to the `env` block. Mode C (in-cluster) needs no env at all — it reads the
-pod's SA token automatically.
+想用模式 A 就把 `K8S_MCP_API_SERVER` 和 `K8S_MCP_API_TOKEN` 加到 `env`
+块里。模式 C 不需要任何 env——它读 pod 自己的 SA token。
 
-Restart the agent. You should see ~46 tools listed under "k8s".
+重启 Agent，应该看到 "k8s" 下挂着约 46 个工具。
 
-## Safety flags
+完整环境变量清单见 [docs/env.md](./docs/env.md)。
+
+## 安全守门
 
 ```bash
-# Read-only mode: all write tools refuse with PermissionError.
+# 只读模式：所有写工具直接抛 PermissionError
 export K8S_MCP_READ_ONLY=true
 
-# Namespace allowlist for writes. Reads are unrestricted.
-# Cluster-scoped writes (no namespace) are rejected when this is set.
+# 写操作的 namespace 白名单。读不受限制。
+# 设置后，cluster-scoped 写入（无 namespace）一律拒绝。
 export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod
 
-# HMAC secret for delete confirmation tokens. CHANGE THIS in production.
+# 删除二次确认 token 的 HMAC 密钥。生产环境务必改！
 export K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32)
 
-# Token TTL in seconds (default 300 = 5 min).
+# token 有效期（秒），默认 300 = 5 分钟
 export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 ```
 
-## Tool catalog (~50 tools)
+详见 [docs/env.md](./docs/env.md)。
 
-### Read (always safe)
-- `list_resources(kind, namespace?, label_selector?)` — list any built-in Kind
-- `get_resource(kind, name, namespace?)` — full JSON object
-- `get_resource_yaml(kind, name, namespace?, reveal_secrets=False)` — YAML manifest; Secrets are masked by default
-- `describe_resource(kind, name, namespace?)` — kubectl-describe-style summary
-- `get_resource_jsonpath(kind, path, name?, namespace?, label_selector?)` — extract one field
-- `diff_resource(yaml_content)` — preview what apply_yaml would change (CREATE vs UPDATE, top-level field changes)
+## 工具目录（约 50 个）
+
+### 读（始终安全）
+
+- `list_resources(kind, namespace?, label_selector?)` — 列出任意内置 Kind
+- `get_resource(kind, name, namespace?)` — 完整 JSON 对象
+- `get_resource_yaml(kind, name, namespace?, reveal_secrets=False)` — YAML 清单；Secret 默认脱敏
+- `describe_resource(kind, name, namespace?)` — kubectl-describe 风格摘要
+- `get_resource_jsonpath(kind, path, name?, namespace?, label_selector?)` — 提取单个字段
+- `diff_resource(yaml_content)` — 预览 apply_yaml 会改什么（CREATE vs UPDATE、顶层字段变化）
 - `list_pods(namespace?, label_selector?, field_selector?, include_all=False)`
 - `list_events(namespace?, field_selector?, warning_only=False, limit=50)`
-- `get_pod_logs(pod_name|label_selector, namespace, container?, tail_lines?, since_seconds?, since_time=RFC3339?, until_time=RFC3339?, strict_time=False, previous=False, timestamps=False, pattern=regex?, context_lines=0, max_bytes=1MiB, output_format=text|json)` — empty result returns an informative notice, not blank. `since_time` is passed to the apiserver; `until_time` is enforced client-side (K8s has no `untilTime`); `strict_time=True` drops lines without parseable RFC3339 timestamps (useful for containers that don't emit them)
+- `get_pod_logs(pod_name|label_selector, namespace, container?, tail_lines?, since_seconds?, since_time=RFC3339?, until_time=RFC3339?, strict_time=False, previous=False, timestamps=False, pattern=regex?, context_lines=0, max_bytes=1MiB, output_format=text|json)` — 空结果返回中文友好提示，不是空白
 - `get_configmap(name, namespace)`
-- `list_secrets(namespace?, label_selector?)` — metadata only, never returns values
-- `get_secret_value(name, namespace, key, reveal=False)` — narrow blast-radius single-key fetch; reveal must be explicitly True
-- `top_pods(namespace?, label_selector?, sort_by=memory|cpu)` — requires metrics-server
-- `top_nodes(sort_by=memory|cpu)` — requires metrics-server
-- `rollout_status(kind, name, namespace, timeout_seconds=60, watch=False)` — polls until rollout completes
-- `rollout_history(kind, name, namespace)` — list ControllerRevisions; pass revision to rollout_undo(to_revision=)
-- `get_api_resources(prefix=None)` — list cluster kinds (CRDs included)
-- `explain_resource(kind, field_path?, api_version?)` — `kubectl explain` over the OpenAPI schema
+- `list_secrets(namespace?, label_selector?)` — 仅 metadata，绝不返回值
+- `get_secret_value(name, namespace, key, reveal=False)` — 单 key 窄爆炸半径读取；`reveal` 必须显式为 True
+- `top_pods(namespace?, label_selector?, sort_by=memory|cpu)` — 需要 metrics-server
+- `top_nodes(sort_by=memory|cpu)` — 需要 metrics-server
+- `rollout_status(kind, name, namespace, timeout_seconds=60, watch=False)` — 轮询直到 rollout 完成
+- `rollout_history(kind, name, namespace)` — 列出 ControllerRevisions；传给 `rollout_undo(to_revision=)`
+- `get_api_resources(prefix=None)` — 列出集群所有 kind（含 CRD）
+- `explain_resource(kind, field_path?, api_version?)` — 通过 OpenAPI schema 做 `kubectl explain`
 
-### Write (subject to read-only and namespace-allowlist)
-- `apply_yaml(yaml_content)` — apply single or multi-doc manifest
-- `replace_resource(yaml_content)` — PUT with ResourceVersion; refuses if cluster sees a newer revision
+### 写（受 read-only 和 namespace-allowlist 限制）
+
+- `apply_yaml(yaml_content)` — 应用单文档或多文档清单
+- `replace_resource(yaml_content)` — PUT 带 ResourceVersion；集群看到更新版本则拒绝
 - `create_deployment(name, image, namespace?, replicas?, container_name?, ports?, env?, labels?, resources?, image_pull_policy?)`
 - `create_statefulset(name, image, service_name, namespace?, replicas?, ...)`
 - `create_service(...)`, `create_ingress(...)`, `expose_workload(...)`
@@ -149,119 +157,119 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `scale_workload(kind, name, namespace, replicas)`
 - `restart_workload(kind, name, namespace)`
 - `set_image(kind, name, namespace, container, image)`
-- `set_resources(kind, name, namespace, container, requests={}, limits={})` — `kubectl set resources`
+- `set_resources(kind, name, namespace, container, requests={}, limits={})` — `kubectl set resources` 等价
 - `rollout_undo(kind, name, namespace?, to_revision?)`
-- `cordon_node(name)`, `uncordon_node(name)` — Node scheduling
+- `cordon_node(name)`, `uncordon_node(name)` — 节点调度
 - `drain_node(name, ignore_daemonsets=False, delete_emptydir_data=False, force=False, grace_period_seconds=-1, timeout_seconds=60)`
-- `delete_pod(name, namespace, grace_period_seconds=30)` — recovery / restart primitive, bypasses 2-step confirm
+- `delete_pod(name, namespace, grace_period_seconds=30)` — 恢复 / 重启原语，绕过二次确认
 - `wait_resource(kind, name, namespace?, for_condition=Ready|..., for_jsonpath=expr?, jsonpath_value?, timeout_seconds=60)`
 - `update_configmap(name, namespace, data, merge=False)`
 
-### Delete (two-step confirmation)
+### 删除（二次确认）
+
 - `delete_resource(kind, name, namespace?, confirm=False, confirmation_token?, grace_period_seconds=30)`
 
-### Notes on key tools
+### 重点工具说明
 
-**`get_pod_logs`** is built for long-running pods (days/weeks of logs):
+**`get_pod_logs`** 专为长跑 Pod 设计（数天 / 数周的日志）：
 
-- Defaults: `tail_lines=100`, `max_bytes=1 MiB`.
-- Use `pattern=<regex>` + `context_lines=N` to grep with N lines of context.
-- Use `label_selector=...` to fetch logs for all matching pods at once
-  (multi-pod mode prefixes each line with `[pod-name]`).
-- Use `output_format=json` to get a list of `{pod, container, time, line}`
-  records.
-- Hard cap: 16 MiB; output is truncated from the head with a `[truncated]`
-  footer if exceeded.
-- When the container has no log output (writes to file / freshly started /
-  too small tail), the tool returns an **explicit notice** rather than an
-  empty string — prevents agents from missing the call entirely.
+- 默认：`tail_lines=100`，`max_bytes=1 MiB`。
+- `pattern=<regex>` + `context_lines=N` 按正则抓 N 行上下文。
+- `label_selector=...` 一次拉多个 Pod 的日志（多 Pod 模式每行前缀
+  `[pod-name]`）。
+- `output_format=json` 返回 `[{pod, container, time, line}]` 列表。
+- 硬上限：16 MiB；超过从头部截断，附 `[truncated]` 标记。
+- 当容器没有日志输出（写到文件 / 刚启动 / tail_lines 太小）时，工具
+  返回**明确的中文提示**，避免 Agent 误以为"没调用"。
+- `since_time` / `until_time` 支持 RFC3339 绝对时间窗口（"两点到四点"），
+  K8s API 仅支持下界，`until_time` 客户端过滤；`strict_time=True` 丢弃
+  没有 RFC3339 时间戳的行。
 
-**`delete_resource`** uses a mandatory two-step flow:
+**`delete_resource`** 强制走两步流程：
 
-1. Call `delete_resource(kind=..., name=..., namespace=..., confirm=False)`.
-2. Tool returns `{preview_yaml, confirmation_token, expires_in_seconds}`.
-3. Show the YAML to the user; ask for explicit confirmation.
-4. Re-call with `confirm=True` and the `confirmation_token`. The token's
-   payload (kind/name/namespace/grace_period) must match.
+1. 调 `delete_resource(kind=..., name=..., namespace=..., confirm=False)`。
+2. 工具返回 `{preview_yaml, confirmation_token, expires_in_seconds}`。
+3. 把 YAML 给用户看，明确确认。
+4. 再调一次，带 `confirm=True` 和 `confirmation_token`。token 里的
+   kind/name/namespace/grace_period 必须匹配。
 
-Tokens are HMAC-SHA256 signed (`K8S_MCP_DELETE_TOKEN_SECRET`), 5 min TTL.
+Token 是 HMAC-SHA256 签名（`K8S_MCP_DELETE_TOKEN_SECRET`），默认 5 分钟过期。
 
-**`drain_node`** mirrors `kubectl drain`:
+**`drain_node`** 镜像 `kubectl drain`：
 
-- Cordon first; then evict pods via the Eviction API (respects PDBs).
-- DaemonSet pods and emptyDir pods are skipped by default (matches kubectl);
-  re-run with `ignore_daemonsets=True` / `delete_emptydir_data=True` to
-  proceed.
-- `force=True` bypasses PDBs (raw delete).
+- 先 cordon，再用 Eviction API 驱逐 Pod（尊重 PDB）。
+- DaemonSet 和 emptyDir Pod 默认跳过（与 kubectl 一致）；重跑加
+  `ignore_daemonsets=True` / `delete_emptydir_data=True`。
+- `force=True` 绕过 PDB（raw delete）。
 
-## End-to-end example (Claude session)
+## 端到端示例（Claude 会话）
 
-> You: "Deploy nginx 1.25 as a Deployment with 3 replicas, expose it via Service and Ingress."
+> 你："部署 nginx 1.25，Deployment 3 副本，再加 Service 和 Ingress 暴露。"
 >
-> Claude → `create_deployment`, `expose_workload`, `create_ingress`.
+> Claude → `create_deployment`, `expose_workload`, `create_ingress`。
 >
-> You: "Find any 5xx errors in the last hour."
+> 你："找出最近一小时所有 5xx 错误。"
 >
 > Claude → `get_pod_logs(label_selector=app=nginx, pattern=r"\b5\d\d\b",
-> context_lines=2, since_seconds=3600)`.
+> context_lines=2, since_seconds=3600)`。
 >
-> You: "Show me the request count from the HPA."
+> 你："给我看看 HPA 的当前副本数。"
 >
 > Claude → `get_resource_jsonpath("HorizontalPodAutoscaler",
-> "status.currentMetrics", name="web", namespace="default")`.
+> "status.currentMetrics", name="web", namespace="default")`。
 >
-> You: "Wait until the deployment rolls out, then bump to 1.27."
+> 你："等 Deployment rollout 完成，然后把镜像升到 1.27。"
 >
 > Claude → `wait_resource("Deployment", "nginx", namespace="default",
-> for_condition="Available")` → `set_image(...)`.
+> for_condition="Available")` → `set_image(...)`。
 >
-> You: "Drain node-3 so I can reboot it."
+> 你："drain node-3，我要重启它。"
 >
-> Claude → `cordon_node("node-3")` → lists pods → `drain_node("node-3")`.
+> Claude → `cordon_node("node-3")` → 列 Pod → `drain_node("node-3")`。
 >
-> You: "Delete it."
+> 你："把它删了。"
 >
-> Claude → `delete_resource(confirm=False)` → shows you the YAML preview.
+> Claude → `delete_resource(confirm=False)` → 给你看 YAML 预览。
 >
-> You: "Yes, go ahead."
+> 你："好，删吧。"
 >
-> Claude → `delete_resource(confirm=True, confirmation_token=...)`.
+> Claude → `delete_resource(confirm=True, confirmation_token=...)`。
 
-## Development
+## 开发
 
 ```bash
 uv sync
-uv run pytest              # 154 tests
+uv run pytest              # 182 个测试
 uv run ruff check .        # lint
-uv run k8s-mcp             # run over stdio
-uv build                   # produce dist/*.whl + .tar.gz
+uv run k8s-mcp             # stdio 启动
+uv build                   # 生成 dist/*.whl + .tar.gz
 ```
 
-## Architecture
+## 架构
 
 ```
 src/k8s_mcp/
-├── server.py         # FastMCP entry, registers all tools
-├── config.py         # Settings (pydantic-settings, K8S_MCP_* env vars)
-├── auth.py           # 3-mode auth (apiserver+token / kubeconfig / in-cluster)
-├── client.py         # Cached ApiClient factory
-├── formatters.py     # YAML / Table / Describe + Secret masking
-├── safety.py         # HMAC confirmation tokens
+├── server.py         # FastMCP 入口，注册所有工具
+├── config.py         # Settings（pydantic-settings，K8S_MCP_* env）
+├── auth.py           # 三档认证（apiserver+token / kubeconfig / in-cluster）
+├── client.py         # 缓存的 ApiClient 工厂
+├── formatters.py     # YAML / Table / Describe + Secret 脱敏
+├── safety.py         # HMAC 二次确认 token
 └── tools/
     ├── generic.py    # list/get/get_yaml/describe/apply_yaml
     ├── workload.py   # create_deployment/statefulset, scale/restart/set_image
     ├── service.py    # create_service/ingress, expose_workload
-    ├── logs.py       # get_pod_logs (long-log optimized)
+    ├── logs.py       # get_pod_logs（长日志优化）
     ├── pods.py       # list_pods
     ├── events.py     # list_events
     ├── configmap.py  # get/update_configmap
-    ├── delete_tool.py# delete_resource (two-step)
+    ├── delete_tool.py# delete_resource（两步确认）
     ├── metrics.py    # top_pods / top_nodes
     ├── rollout.py    # rollout_status / rollout_undo / rollout_history
     ├── node_ops.py   # cordon / uncordon / drain
-    ├── wait_tool.py  # wait_resource (condition or JSONPath)
+    ├── wait_tool.py  # wait_resource（condition 或 JSONPath）
     ├── jsonpath.py   # get_resource_jsonpath
-    ├── secret.py     # list_secrets + get_secret_value (single-key)
+    ├── secret.py     # list_secrets + get_secret_value（单 key）
     ├── discovery.py  # get_api_resources + explain_resource
     ├── autoscale.py  # create_hpa + create_pdb
     ├── rbac.py       # Role / RoleBinding / ClusterRole / ClusterRoleBinding
@@ -270,18 +278,17 @@ src/k8s_mcp/
     └── storage.py    # create_pvc
 ```
 
-`generic.py` additionally exposes `replace_resource` (PUT with ResourceVersion)
-and `diff_resource` (preview what apply would change).
+`generic.py` 还额外暴露 `replace_resource`（PUT 带 ResourceVersion）和
+`diff_resource`（apply 前预览差异）。
 
-See `PLAN.md` for the full design doc and `tests/` for examples.
+完整设计文档见 [PLAN.md](./PLAN.md)，用法示例见 [tests/](./tests/)。
 
-## Programmatic usage (without MCP)
+## 程序化调用（无需 MCP）
 
-Every tool registered with FastMCP is also a plain Python function in
-`k8s_mcp.tools.*`, so you can use the same building blocks from a script,
-notebook, or CLI without spinning up an MCP server. Authentication,
-safety, and namespace allowlist all still apply — they live in `config`,
-`safety`, and per-tool checks, not in the MCP layer.
+每个注册到 FastMCP 的工具同时也是 `k8s_mcp.tools.*` 下的纯 Python 函数，
+所以你可以在脚本、notebook 或 CLI 里直接调，不用启 MCP server。认证、
+安全、namespace allowlist 都仍然生效——它们住在 `config`、`safety` 和
+各 tool 的内部检查里，不在 MCP 层。
 
 ```python
 # 程序化调用示例 —— 直接 import 函数，无需 MCP server
@@ -333,17 +340,16 @@ print(preview)  # 含 confirmation_token
 #                    confirm=True, confirmation_token="<token-from-preview>")
 ```
 
-`k8s_mcp.client.get_api_client()` returns a cached
-`kubernetes.client.api_client.ApiClient` honoring the same three auth
-modes, so any code that wants to drop down to the raw kubernetes-python
-client can do so and still get kubeconfig / apiserver-token / in-cluster
-auto-detection.
+`k8s_mcp.client.get_api_client()` 返回缓存的
+`kubernetes.client.api_client.ApiClient`，自动套用同样的三档认证，所以
+任何想下沉到原始 kubernetes-python-client 的代码也能享受 kubeconfig /
+apiserver-token / in-cluster 自动探测。
 
-## Out of scope (v2+)
+## 后续计划（v2+）
 
-- `exec_pod`, `port_forward` (stateful, doesn't fit MCP stdio)
-- log streaming (same)
-- Helm / Kustomize integration
-- Multi-cluster routing
-- MCP HTTP/SSE transport (v1 is stdio-only)
-- Docker image / Helm chart publishing (we ship wheel only)
+- `exec_pod`、`port_forward`（有状态，不适合 MCP stdio）
+- 日志流式推送（同上）
+- Helm / Kustomize 集成
+- 多集群路由
+- MCP HTTP / SSE 传输（v1 仅 stdio）
+- Docker 镜像 / Helm Chart 发布（v1 只发 wheel）

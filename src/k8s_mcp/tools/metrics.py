@@ -62,9 +62,15 @@ def top_pods(
     except ApiException as e:
         if e.status == 404:
             raise RuntimeError(
-                "metrics-server is not installed in the cluster. "
-                "kubectl top requires metrics-server. Install it with: "
-                "kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+                "metrics-server is NOT installed in the cluster. "
+                "Either install it: "
+                "kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml\n"
+                "OR, if Prometheus is deployed, use the Prometheus path instead: "
+                "call `find_prometheus_service()` to locate it, then "
+                "`prometheus_query(\"container_cpu_usage_seconds_total{pod=...}\")` "
+                "for CPU and `prometheus_query(\"container_memory_working_set_bytes{pod=...}\")` "
+                "for memory. Prometheus also gives network rx/tx and filesystem r/w "
+                "metrics-server doesn't carry."
             ) from e
         raise
 
@@ -99,7 +105,16 @@ def top_nodes(sort_by: str = "memory") -> str:
         items = api.list_cluster_custom_object("metrics.k8s.io", "v1beta1", "nodes")["items"]
     except ApiException as e:
         if e.status == 404:
-            raise RuntimeError("metrics-server is not installed in the cluster.") from e
+            raise RuntimeError(
+                "metrics-server is NOT installed in the cluster. "
+                "Either install it: "
+                "kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml\n"
+                "OR, if Prometheus is deployed, use the Prometheus path instead: "
+                "call `find_prometheus_service()` to locate it, then "
+                "`prometheus_query(\"node_cpu_seconds_total{node=...}\")` "
+                "for CPU and `prometheus_query(\"node_memory_working_set_bytes{node=...}\")` "
+                "for memory."
+            ) from e
         raise
 
     rows = []

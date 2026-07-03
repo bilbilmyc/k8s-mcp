@@ -169,6 +169,9 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `restart_workload(kind, name, namespace)`
 - `set_image(kind, name, namespace, container, image)`
 - `set_resources(kind, name, namespace, container, requests={}, limits={})` — `kubectl set resources` 等价
+- `bulk_set_image(label_selector, container, image, kind=Deployment, namespace?, dry_run=True, confirm=False, confirmation_token?)` — ⚠️ 批量改 image，走 dry-run → token → confirm 三步
+- `bulk_restart(label_selector, kind=Deployment, namespace?, dry_run=True, confirm=False, confirmation_token?)` — ⚠️ 批量 rolling restart（stamp `kubectl.kubernetes.io/restartedAt` 注解）
+- `bulk_scale(label_selector, replicas, kind=Deployment, namespace?, dry_run=True, confirm=False, confirmation_token?)` — ⚠️ 批量改 replicas（Deployment / StatefulSet；DaemonSet 无此概念会拒绝）
 - `rollout_undo(kind, name, namespace?, to_revision?)`
 - `cordon_node(name)`, `uncordon_node(name)` — 节点调度
 - `drain_node(name, ignore_daemonsets=False, delete_emptydir_data=False, force=False, grace_period_seconds=-1, timeout_seconds=60)`
@@ -232,6 +235,18 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
    kind/name/namespace/grace_period 必须匹配。
 
 Token 是 HMAC-SHA256 签名（`K8S_MCP_DELETE_TOKEN_SECRET`），默认 5 分钟过期。
+
+**`bulk_set_image` / `bulk_restart` / `bulk_scale`** 走 **dry-run → token → confirm** 三步安全流程，因为它们能一次影响几十个工作负载：
+
+1. `dry_run=True`（默认）—— 列出所有匹配 `label_selector` 的资源，**当前值 → 目标值**的对比表。**不写**，不发 token。
+2. `dry_run=False, confirm=False` —— 同样预览，但额外返回一个 `confirmation_token`（HMAC-SHA256，5 分钟有效）。
+3. `dry_run=False, confirm=True, confirmation_token=...` —— 校验 token，**只对预览时匹配的 N 个资源执行**；预览到确认之间新出现的同名 label 资源**不会被误伤**（token 的 `matched_names` 列表是权威范围）。
+
+Token payload 把每个危险参数（image / container / replicas / label_selector / kind / namespace / op）都签名进去，**改任何一项都校验失败**。`bulk_set_image` 的 token 不能拿去 `bulk_scale`，反之亦然。
+
+匹配工作负载类型：
+- `bulk_set_image` / `bulk_restart` 支持 Deployment / StatefulSet / DaemonSet
+- `bulk_scale` 只支持 Deployment / StatefulSet（DaemonSet 没 replicas 字段）
 
 **`drain_node`** 镜像 `kubectl drain`：
 
@@ -434,7 +449,8 @@ src/k8s_mcp/
     ├── storage.py    # create_pvc
     ├── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
     ├── certs.py      # get_certificate_expiry（CRD + 内置 kind 都用 DynamicClient）
-    └── health.py     # cluster_health_snapshot（7 维集群体检）
+    ├── health.py     # cluster_health_snapshot（7 维集群体检）
+    └── bulk.py       # bulk_set_image / bulk_restart / bulk_scale
 ```
 
 `generic.py` 还额外暴露 `replace_resource`（PUT 带 ResourceVersion）和

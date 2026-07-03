@@ -161,6 +161,9 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `restart_workload(kind, name, namespace)`
 - `set_image(kind, name, namespace, container, image)`
 - `set_resources(kind, name, namespace, container, requests={}, limits={})` — `kubectl set resources`
+- `bulk_set_image(label_selector, container, image, kind=Deployment, namespace?, dry_run=True, confirm=False, confirmation_token?)` — ⚠️ bulk image update; dry-run → token → confirm flow
+- `bulk_restart(label_selector, kind=Deployment, namespace?, dry_run=True, confirm=False, confirmation_token?)` — ⚠️ bulk rolling restart (stamps the `kubectl.kubernetes.io/restartedAt` annotation)
+- `bulk_scale(label_selector, replicas, kind=Deployment, namespace?, dry_run=True, confirm=False, confirmation_token?)` — ⚠️ bulk `replicas` patch (Deployment / StatefulSet; DaemonSet rejected — no replicas concept)
 - `rollout_undo(kind, name, namespace?, to_revision?)`
 - `cordon_node(name)`, `uncordon_node(name)` — Node scheduling
 - `drain_node(name, ignore_daemonsets=False, delete_emptydir_data=False, force=False, grace_period_seconds=-1, timeout_seconds=60)`
@@ -196,6 +199,18 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
    payload (kind/name/namespace/grace_period) must match.
 
 Tokens are HMAC-SHA256 signed (`K8S_MCP_DELETE_TOKEN_SECRET`), 5 min TTL.
+
+**`bulk_set_image` / `bulk_restart` / `bulk_scale`** follow a **dry-run → token → confirm** three-step safety flow, because a single call can touch dozens of workloads:
+
+1. `dry_run=True` (default) — list every resource matching `label_selector`; render a current→target diff table. **No write, no token issued.**
+2. `dry_run=False, confirm=False` — same preview, plus a `confirmation_token` (HMAC-SHA256, 5 min TTL).
+3. `dry_run=False, confirm=True, confirmation_token=...` — verify the token, then apply the change **only to the N resources that matched at preview time**. Resources that appeared with the same label_selector between preview and confirm are **NOT** touched — the token's `matched_names` list is the authoritative scope.
+
+The token payload signs every "dangerous" parameter (image / container / replicas / label_selector / kind / namespace / op) — changing any one of them fails verification. A `bulk_set_image` token cannot unlock `bulk_scale`, and vice versa.
+
+Workload type coverage:
+- `bulk_set_image` / `bulk_restart`: Deployment / StatefulSet / DaemonSet
+- `bulk_scale`: Deployment / StatefulSet only (DaemonSet has no `replicas` field — caller gets a clear ValueError pointing at `bulk_restart` instead)
 
 **`drain_node`** mirrors `kubectl drain`:
 
@@ -412,7 +427,8 @@ src/k8s_mcp/
     ├── networkpolicy.py # create_networkpolicy
     ├── storage.py    # create_pvc
     ├── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
-    └── health.py     # cluster_health_snapshot (7-section cluster health)
+    ├── health.py     # cluster_health_snapshot (7-section cluster health)
+    └── bulk.py       # bulk_set_image / bulk_restart / bulk_scale
 ```
 
 `generic.py` additionally exposes `replace_resource` (PUT with ResourceVersion)

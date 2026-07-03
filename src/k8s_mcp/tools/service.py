@@ -22,9 +22,12 @@ from ..config import get_settings
 from . import generic
 
 
-def _read_only_guard() -> None:
+def _read_only_guard(action: str) -> None:
     if get_settings().read_only:
-        raise PermissionError("Server is in read-only mode.")
+        raise PermissionError(
+            f"Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
+            f"{action} is disabled."
+        )
 
 
 def _ensure_ns(namespace: str) -> None:
@@ -62,7 +65,7 @@ def create_service(
         cluster_ip: explicit cluster IP; for headless set to "None".
         labels: optional labels for the Service.
     """
-    _read_only_guard()
+    _read_only_guard("create_service")
     _ensure_ns(namespace)
     if service_type not in ("ClusterIP", "NodePort", "LoadBalancer"):
         raise ValueError(f"Unsupported service_type: {service_type}")
@@ -113,7 +116,7 @@ def create_ingress(
         annotations: e.g. {"nginx.ingress.kubernetes.io/rewrite-target": "/"}.
         labels: optional labels.
     """
-    _read_only_guard()
+    _read_only_guard("create_ingress")
     _ensure_ns(namespace)
     ingress_rules = []
     for r in rules:
@@ -173,7 +176,7 @@ def expose_workload(
     instead when you need a custom selector, multi-port Service, headless
     Service, or a Service not backed by an existing workload.
     """
-    _read_only_guard()
+    _read_only_guard("expose_workload")
     _ensure_ns(namespace)
 
     workload_kind_lower = workload_kind.lower()

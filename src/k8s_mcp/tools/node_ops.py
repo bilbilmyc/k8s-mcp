@@ -43,9 +43,12 @@ def _core_v1():
     return client.CoreV1Api(get_api_client())
 
 
-def _read_only_guard():
+def _read_only_guard(action: str) -> None:
     if get_settings().read_only:
-        raise PermissionError("Server is in read-only mode.")
+        raise PermissionError(
+            f"Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
+            f"{action} is disabled."
+        )
 
 
 def cordon_node(name: str) -> str:
@@ -58,7 +61,7 @@ def cordon_node(name: str) -> str:
     Args:
         name: node name.
     """
-    _read_only_guard()
+    _read_only_guard("cordon_node")
     core = _core_v1()
     body = {"spec": {"unschedulable": True}}
     try:
@@ -75,7 +78,7 @@ def uncordon_node(name: str) -> str:
 
     Equivalent to `kubectl uncordon <name>`.
     """
-    _read_only_guard()
+    _read_only_guard("uncordon_node")
     core = _core_v1()
     body = {"spec": {"unschedulable": False}}
     try:
@@ -115,7 +118,7 @@ def drain_node(
         flags set.
       - With --force we DELETE rather than evict, so PDBs are bypassed.
     """
-    _read_only_guard()
+    _read_only_guard("drain_node")
     core = _core_v1()
 
     try:

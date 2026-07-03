@@ -204,8 +204,15 @@ def get_resource_yaml(
     namespace: str | None = None,
     reveal_secrets: bool = False,
     api_version: str | None = None,
+    include_managed_fields: bool = False,
 ) -> str:
     """Fetch a resource as a YAML manifest. Supports CRDs.
+
+    By default, server-managed metadata fields are stripped from the output:
+    `managedFields`, `resourceVersion`, `uid`, `generation`, `selfLink`.
+    These are apiserver-stamped bookkeeping that an LLM never edits and that
+    `managedFields` alone can take 80% of a Pod manifest. Set
+    `include_managed_fields=True` to keep them.
 
     Args:
         kind, name, namespace: resource identity.
@@ -213,13 +220,41 @@ def get_resource_yaml(
             with '***'. Set to True to print actual values; the caller is
             responsible for confirming with the user first.
         api_version: optional, e.g. `"cert-manager.io/v1"` for a CRD.
+        include_managed_fields: default False — strip server-managed metadata
+            fields. Set True to keep them.
 
     Returns YAML text.
     """
     obj = _fetch(kind, name, namespace, api_version=api_version)
     if kind.lower() == "secret" and not reveal_secrets:
         obj = mask_secret_data(obj)
+    obj = _strip_managed_metadata(obj, include_managed_fields=include_managed_fields)
     return to_yaml(obj)
+
+
+# Server-managed metadata keys: stamped by the apiserver on every resource,
+# never user-edited, and `managedFields` in particular is the loudest noise
+# in any kubectl-style YAML dump of a real cluster.
+_MANAGED_METADATA_KEYS = (
+    "managedFields",
+    "resourceVersion",
+    "uid",
+    "generation",
+    "selfLink",
+)
+
+
+def _strip_managed_metadata(obj: dict, *, include_managed_fields: bool) -> dict:
+    if include_managed_fields or not isinstance(obj, dict):
+        return obj
+    md = obj.get("metadata")
+    if not isinstance(md, dict):
+        return obj
+    if not any(k in md for k in _MANAGED_METADATA_KEYS):
+        return obj  # nothing to strip — avoid a needless copy
+    out = dict(obj)
+    out["metadata"] = {k: v for k, v in md.items() if k not in _MANAGED_METADATA_KEYS}
+    return out
 
 
 def describe_resource(

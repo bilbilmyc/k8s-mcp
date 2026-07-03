@@ -27,9 +27,12 @@ def _apps_v1():
     return client.AppsV1Api(get_api_client())
 
 
-def _read_only_guard():
+def _read_only_guard(action: str) -> None:
     if get_settings().read_only:
-        raise PermissionError("Server is in read-only mode.")
+        raise PermissionError(
+            f"Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
+            f"{action} is disabled."
+        )
 
 
 def _ensure_ns(namespace: str):
@@ -128,7 +131,7 @@ def rollout_undo(
     This calls the server's rollback endpoint (Deployment) or patches the
     StatefulSet's pod template back to the previous revision.
     """
-    _read_only_guard()
+    _read_only_guard("rollout_undo")
     _ensure_ns(namespace)
     kind_lower = kind.lower()
     if kind_lower not in ("deployment", "statefulset"):

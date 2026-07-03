@@ -94,6 +94,72 @@ def test_apply_yaml_raises_for_unknown_kind(monkeypatch):
 
 
 # =============================================================================
+# get_resource_yaml: managedFields stripping
+# =============================================================================
+
+
+def test_strip_managed_metadata_removes_server_fields_by_default():
+    obj = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "p",
+            "namespace": "default",
+            "managedFields": [{"manager": "kuebctl", "operation": "Update"}],
+            "resourceVersion": "12345",
+            "uid": "abc-123",
+            "generation": 1,
+            "selfLink": "/api/v1/namespaces/default/pods/p",
+        },
+        "spec": {"containers": [{"name": "c", "image": "nginx"}]},
+    }
+    out = generic._strip_managed_metadata(obj, include_managed_fields=False)
+    assert "managedFields" not in out["metadata"]
+    assert "resourceVersion" not in out["metadata"]
+    assert "uid" not in out["metadata"]
+    assert "generation" not in out["metadata"]
+    assert "selfLink" not in out["metadata"]
+    # user-meaningful metadata kept
+    assert out["metadata"]["name"] == "p"
+    assert out["metadata"]["namespace"] == "default"
+    # spec untouched
+    assert out["spec"] == obj["spec"]
+
+
+def test_strip_managed_metadata_keeps_managed_fields_when_requested():
+    obj = {
+        "metadata": {
+            "name": "p",
+            "managedFields": [{"manager": "kubectl"}],
+            "resourceVersion": "99",
+        }
+    }
+    out = generic._strip_managed_metadata(obj, include_managed_fields=True)
+    # No stripping — same dict, no copy needed
+    assert out is obj
+    assert "managedFields" in out["metadata"]
+    assert "resourceVersion" in out["metadata"]
+
+
+def test_strip_managed_metadata_no_op_when_no_managed_fields_present():
+    obj = {"metadata": {"name": "p", "namespace": "default"}}
+    out = generic._strip_managed_metadata(obj, include_managed_fields=False)
+    # Avoids a needless copy when there's nothing to strip
+    assert out is obj
+
+
+def test_strip_managed_metadata_handles_missing_metadata():
+    obj = {"spec": {"foo": "bar"}}
+    out = generic._strip_managed_metadata(obj, include_managed_fields=False)
+    assert out is obj
+
+
+def test_strip_managed_metadata_handles_non_dict():
+    out = generic._strip_managed_metadata("not a dict", include_managed_fields=False)
+    assert out == "not a dict"
+
+
+# =============================================================================
 # CRD support — api_version parameter + auto-discovery
 # =============================================================================
 

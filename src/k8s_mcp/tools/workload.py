@@ -40,9 +40,12 @@ def _ensure_ns(namespace: str) -> str:
     return namespace
 
 
-def _read_only_guard() -> None:
+def _read_only_guard(action: str) -> None:
     if get_settings().read_only:
-        raise PermissionError("Server is in read-only mode.")
+        raise PermissionError(
+            f"Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
+            f"{action} is disabled."
+        )
 
 
 # ---------- Deployment / StatefulSet -------------------------------------------
@@ -82,7 +85,7 @@ def create_deployment(
 
     Returns the apply result.
     """
-    _read_only_guard()
+    _read_only_guard("create_deployment")
     _ensure_ns(namespace)
     container_name = container_name or name
     labels = labels or {"app": name}
@@ -146,7 +149,7 @@ def create_statefulset(
         storage_class: StorageClass name (optional).
         storage_size: PVC size (default "1Gi").
     """
-    _read_only_guard()
+    _read_only_guard("create_statefulset")
     _ensure_ns(namespace)
     container_name = container_name or name
     labels = labels or {"app": name}
@@ -205,7 +208,7 @@ def scale_workload(kind: str, name: str, namespace: str, replicas: int) -> str:
         name, namespace: workload identity.
         replicas: desired replica count.
     """
-    _read_only_guard()
+    _read_only_guard("scale_workload")
     _ensure_ns(namespace)
     kind_lower = kind.lower()
     if kind_lower not in ("deployment", "statefulset"):
@@ -232,7 +235,7 @@ def restart_workload(kind: str, name: str, namespace: str) -> str:
     Implemented by patching the `kubectl.kubernetes.io/restartedAt`
     annotation on the pod template.
     """
-    _read_only_guard()
+    _read_only_guard("restart_workload")
     _ensure_ns(namespace)
     kind_lower = kind.lower()
     if kind_lower not in ("deployment", "statefulset"):
@@ -272,7 +275,7 @@ def set_image(kind: str, name: str, namespace: str, container: str, image: str) 
     `container` must match an existing container name in the PodSpec (case-
     sensitive); for multi-container workloads call once per container.
     """
-    _read_only_guard()
+    _read_only_guard("set_image")
     _ensure_ns(namespace)
     kind_lower = kind.lower()
     if kind_lower not in ("deployment", "statefulset"):
@@ -323,7 +326,7 @@ def set_resources(
     Pass an empty value for a key (e.g. `requests={"cpu": ""}`) to REMOVE
     that quota. Equivalent to `kubectl set resources`.
     """
-    _read_only_guard()
+    _read_only_guard("set_resources")
     _ensure_ns(namespace)
     if not requests and not limits:
         raise ValueError("Provide at least one of requests=... or limits=...")

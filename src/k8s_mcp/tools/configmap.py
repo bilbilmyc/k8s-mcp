@@ -20,9 +20,12 @@ def _core_v1():
     return client.CoreV1Api(get_api_client())
 
 
-def _read_only_guard() -> None:
+def _read_only_guard(action: str) -> None:
     if get_settings().read_only:
-        raise PermissionError("Server is in read-only mode.")
+        raise PermissionError(
+            f"Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
+            f"{action} is disabled."
+        )
 
 
 def _ensure_ns(namespace: str) -> None:
@@ -74,7 +77,7 @@ def update_configmap(
             (existing keys not in `data` are removed). If True, new keys are
             merged over the existing data and missing keys are preserved.
     """
-    _read_only_guard()
+    _read_only_guard("update_configmap")
     _ensure_ns(namespace)
 
     api = _core_v1()

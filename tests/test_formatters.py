@@ -75,8 +75,28 @@ def test_describe_basic():
     assert "replicas: 3" in out
 
 
-def test_compact_truncation():
+def test_compact_truncation_marks_explicitly():
+    """Truncation must be visible to an LLM, not a silent trailing '...'
+    (which YAML also uses as a document-end marker and could be mistaken
+    for the natural end of the value)."""
     big = {"x": "y" * 500}
     out = _compact(big, max_len=50)
-    assert out.endswith("...")
+    assert "[TRUNCATED" in out
+    assert "full=" in out
     assert len(out) <= 50
+
+
+def test_compact_short_value_untouched():
+    v = {"x": "short"}
+    out = _compact(v, max_len=200)
+    assert "TRUNCATED" not in out
+
+
+def test_compact_breaks_at_flow_separator():
+    """When possible, cut at a comma/brace so the truncated output ends
+    cleanly instead of slicing mid-token."""
+    v = {"items": list(range(50))}  # flow-style: {items: [0, 1, 2, ...]}
+    out = _compact(v, max_len=40)
+    assert "[TRUNCATED" in out
+    # Marker shouldn't be glued to a partial token; ends with the marker
+    assert out.endswith("b]")

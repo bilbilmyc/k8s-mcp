@@ -41,11 +41,11 @@ _DEFAULT_CLASS_ANNOTATION = (
 _manifest_cache: str | None = None
 
 
-def _read_only_guard() -> None:
+def _read_only_guard(action: str) -> None:
     if get_settings().read_only:
         raise PermissionError(
-            "Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
-            "Bootstrap is disabled."
+            f"Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
+            f"{action} is disabled."
         )
 
 
@@ -193,7 +193,7 @@ def bootstrap_local_path_provisioner(
         Override via `K8S_MCP_LOCAL_PATH_PROVISIONER_URL` for air-gapped
         clusters with an internal mirror.
     """
-    _read_only_guard()
+    _read_only_guard("bootstrap_local_path_provisioner")
     yaml_text = _fetch_local_path_manifest()
 
     if not set_as_default:

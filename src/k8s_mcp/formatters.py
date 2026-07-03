@@ -112,7 +112,27 @@ def describe(obj: dict) -> str:
 
 
 def _compact(v: Any, max_len: int = 200) -> str:
+    """Compact YAML dump, hard-truncated with an explicit marker when it
+    would exceed max_len.
+
+    A plain trailing '...' is invisible to an LLM reading the output: the
+    model can mistake the ellipsis for a normal YAML value continuation
+    (YAML uses '...' as a document-end marker too). The marker is the
+    explicit signal that this single field was cut, so the model knows to
+    re-fetch with a narrower scope rather than trust the partial value.
+    """
     s = yaml.safe_dump(v, default_flow_style=True, sort_keys=False).strip()
-    if len(s) > max_len:
-        s = s[: max_len - 3] + "..."
-    return s
+    if len(s) <= max_len:
+        return s
+    marker = f" ...[TRUNCATED; full={len(s)}b]"
+    budget = max_len - len(marker)
+    head = s[:budget]
+    # Trim to a YAML-flow-friendly break point (comma between items,
+    # closing brace/bracket) when one exists in the back half — produces
+    # a cleaner cut than slicing mid-token.
+    for sep in (",", "}", "]", " "):
+        cut = head.rfind(sep)
+        if cut > budget // 2:
+            head = head[: cut + 1]
+            break
+    return head + marker

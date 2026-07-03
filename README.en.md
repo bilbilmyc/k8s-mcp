@@ -140,6 +140,7 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `get_api_resources(prefix=None)` — list cluster kinds (CRDs included)
 - `explain_resource(kind, field_path?, api_version?)` — `kubectl explain` over the OpenAPI schema
 - `get_certificate_expiry()` — aggregate cluster-certificate expiry report. **The apiserver's own serving cert isn't queryable via the K8s API**, but the 4 sources the MCP server can see (`K8S_MCP_API_CA_CERT` / in-cluster SA bundle / kubeconfig CA / kubeconfig client cert — last one only when the kubeconfig uses cert auth) are read in one shot. Each row gives Subject / Issuer / NotBefore / NotAfter / days-left / status (✅ valid / ⚠️<30d / ❌<7d / ❌EXPIRED). Sorted ascending by days-left, with an "Action needed" block highlighting anything not yet expiring safely. **Local parse — no apiserver calls.**
+- `cluster_health_snapshot(namespaces=None, events_minutes=60, restart_threshold=3)` — ⭐ **AI-ops entry point**: one call returns a 7-section cluster health report (Nodes / Pending Pods / Abnormal Restarts / HPA / Orphan PVs / Certificates / Recent Warning Events), with a `✅ HEALTHY` / `⚠️ ATTENTION` one-liner at the top. **Each section is independently error-bounded** — a single apiserver hiccup won't blank the whole report. Use this when asked "how's the cluster?"; drill into details with `describe_resource` / `get_pod_logs`.
 
 ### Write (subject to read-only and namespace-allowlist)
 - `apply_yaml(yaml_content)` — apply single or multi-doc manifest
@@ -410,7 +411,8 @@ src/k8s_mcp/
     ├── serviceaccount.py # create_serviceaccount
     ├── networkpolicy.py # create_networkpolicy
     ├── storage.py    # create_pvc
-    └── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
+    ├── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
+    └── health.py     # cluster_health_snapshot (7-section cluster health)
 ```
 
 `generic.py` additionally exposes `replace_resource` (PUT with ResourceVersion)

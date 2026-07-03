@@ -104,6 +104,7 @@ def _register_tools(mcp: FastMCP) -> None:
         discovery,
         events,
         generic,
+        health,
         logs,
         metrics,
         networkpolicy,
@@ -145,6 +146,7 @@ def _register_tools(mcp: FastMCP) -> None:
     storage.register(mcp)
     prometheus.register(mcp)
     certs.register(mcp)
+    health.register(mcp)
 
 
 def main() -> None:

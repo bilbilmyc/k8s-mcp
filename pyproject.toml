@@ -1,13 +1,17 @@
 [project]
-name = "k8s-mcp"
-version = "0.1.0"
-description = "Kubernetes MCP server for LLM agents — manage workloads, services, logs, and node ops through Claude / Cursor / any MCP-compatible client."
+name = "k8s-mcp-bilbilmyc"
+version = "0.1.1"
+description = "Kubernetes MCP server for LLM agents — 74 tools covering CRUD on workloads/services/storage/RBAC, logs/events, Prometheus queries, bulk ops with HMAC 2-step confirmation."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
     { name = "mayc" },
 ]
-keywords = ["kubernetes", "k8s", "llm", "agent", "devops", "claude"]
+keywords = [
+    "kubernetes", "k8s", "mcp", "model-context-protocol",
+    "llm", "agent", "devops", "claude", "cherry-studio",
+    "kubectl", "k8s-mcp",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: System Administrators",
@@ -17,6 +21,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: System :: Systems Administration",
+    "Topic :: System :: Monitoring",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
 ]
 requires-python = ">=3.11"
 dependencies = [
@@ -27,6 +34,12 @@ dependencies = [
     "pyyaml>=6.0",
     "cryptography>=42.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/bilbilmyc/k8s-mcp"
+Repository = "https://github.com/bilbilmyc/k8s-mcp"
+Issues = "https://github.com/bilbilmyc/k8s-mcp/issues"
+Changelog = "https://github.com/bilbilmyc/k8s-mcp/blob/main/PLAN.md"
 
 [project.scripts]
 k8s-mcp = "k8s_mcp.server:main"

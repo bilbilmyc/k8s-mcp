@@ -462,3 +462,185 @@ class _FakeResources:
             from kubernetes.dynamic.exceptions import ResourceNotFoundError
             raise ResourceNotFoundError(f"nope {kind}")
         return self._resources[kind]
+
+
+# =============================================================================
+# list_resources — wide mode (kubectl `-o wide` style extra columns)
+# =============================================================================
+
+
+class _FakeListResult:
+    """Mimics the `.items` envelope on a DynamicClient list response."""
+
+    def __init__(self, items):
+        self.items = items  # plain list[dict]
+
+
+class _FakeListResource:
+    """A fake Resource whose `.get(name=None)` returns a predetermined list.
+
+    Items are plain dicts so `_to_dict`'s `dict(resource)` branch handles them.
+    """
+
+    def __init__(self, items):
+        self._items = items
+
+    def get(self, name=None, namespace=None, **kwargs):
+        if name is not None:
+            from kubernetes.dynamic.exceptions import NotFoundError
+            raise NotFoundError("list-mode tests should not fetch by name")
+        return _FakeListResult(self._items)
+
+
+def test_list_resources_default_keeps_four_columns(monkeypatch):
+    """wide=False (default) preserves the original NAME/NAMESPACE/STATUS/AGE
+    shape — backward-compatible with callers that grep for those headers."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [
+        {
+            "metadata": {"name": "node-1"},
+            "status": {"addresses": [{"type": "InternalIP", "address": "10.0.0.5"}]},
+        }
+    ]
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"Node": _FakeListResource(items)})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        out = generic.list_resources("Node")
+    # Headers
+    assert "NAME" in out
+    assert "NAMESPACE" in out
+    assert "STATUS" in out
+    assert "AGE" in out
+    # Wide columns absent
+    assert "INTERNAL-IP" not in out
+    assert "ROLES" not in out
+    assert "10.0.0.5" not in out
+
+
+def test_list_resources_wide_node_adds_internal_ip_and_roles(monkeypatch):
+    """wide=True on Node adds INTERNAL-IP and ROLES — the main user request:
+    avoid a follow-up `get_resource_jsonpath` call just to surface the IP."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [
+        {
+            "metadata": {
+                "name": "node-1",
+                "labels": {
+                    "node-role.kubernetes.io/control-plane": "",
+                    "node-role.kubernetes.io/worker": "",
+                },
+            },
+            "status": {"addresses": [{"type": "InternalIP", "address": "10.0.0.5"}]},
+        }
+    ]
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"Node": _FakeListResource(items)})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        out = generic.list_resources("Node", wide=True)
+
+    assert "INTERNAL-IP" in out
+    assert "10.0.0.5" in out
+    assert "ROLES" in out
+    # Both roles surface; order is stable (sorted).
+    assert "control-plane" in out
+    assert "worker" in out
+    assert "node-1" in out
+
+
+def test_list_resources_wide_service_adds_cluster_ip_and_ports(monkeypatch):
+    """wide=True on Service surfaces CLUSTER-IP, PORT(S), EXTERNAL-IP — the
+    three fields an agent almost always wants after listing Services."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [
+        {
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {
+                "clusterIP": "10.96.10.5",
+                "ports": [
+                    {"port": 80, "targetPort": 8080, "protocol": "TCP"},
+                    {"port": 443, "targetPort": 8443, "protocol": "TCP"},
+                ],
+            },
+            "status": {"loadBalancer": {"ingress": [{"ip": "1.2.3.4"}]}},
+        }
+    ]
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"Service": _FakeListResource(items)})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        out = generic.list_resources("Service", wide=True)
+
+    assert "CLUSTER-IP" in out
+    assert "10.96.10.5" in out
+    assert "PORT(S)" in out
+    assert "80:8080/TCP" in out
+    assert "443:8443/TCP" in out
+    assert "EXTERNAL-IP" in out
+    assert "1.2.3.4" in out
+
+
+def test_list_resources_wide_deployment_adds_ready(monkeypatch):
+    """wide=True on Deployment surfaces the ready/desired ratio in its own
+    column — agents no longer have to drill into status.readyReplicas."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [
+        {
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {"replicas": 3},
+            "status": {"replicas": 3, "readyReplicas": 2},
+        }
+    ]
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"Deployment": _FakeListResource(items)})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        out = generic.list_resources("Deployment", wide=True)
+
+    assert "READY" in out
+    assert "2/3" in out
+
+
+def test_list_resources_wide_unknown_kind_does_not_crash(monkeypatch):
+    """wide=True on a kind without a registered extractor list still works —
+    just doesn't add any extra columns (graceful degradation)."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [{"metadata": {"name": "x"}}]
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"ConfigMap": _FakeListResource(items)})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        out = generic.list_resources("ConfigMap", wide=True)
+
+    # Original columns present
+    assert "NAME" in out
+    assert "x" in out
+    # No wide columns for ConfigMap
+    assert "INTERNAL-IP" not in out
+    assert "READY" not in out

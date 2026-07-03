@@ -144,6 +144,34 @@ def _service_url(svc_obj: Any) -> str:
     return f"{scheme}://{spec.cluster_ip}:{port}"
 
 
+def _external_url_and_node_port(svc_obj: Any) -> tuple[str | None, int | None]:
+    """For an externally-reachable Service, return (url_template, node_port).
+
+    `url_template` substitutes `<node-ip>` or `<lb-ip>` — the caller has to
+    look up the real address. `node_port` is the apiserver-allocated
+    nodePort (None for LoadBalancer / non-NodePort types). Returns
+    `(None, None)` for ClusterIP / ExternalName / headless / port-less
+    services.
+
+    The bug fix: previously the URL field was filled with `port` (the
+    cluster-internal port, e.g. 9090) instead of `node_port` (45149),
+    which made the URL column misleading for NodePort rows.
+    """
+    spec = svc_obj.spec if hasattr(svc_obj, "spec") else None
+    if not spec or not spec.ports:
+        return None, None
+    svc_type = getattr(spec, "type", None) or "ClusterIP"
+    if svc_type == "NodePort":
+        for p in spec.ports:
+            if p.node_port:
+                return f"http://<node-ip>:{p.node_port}", p.node_port
+        return None, None
+    if svc_type == "LoadBalancer":
+        port = spec.ports[0].port
+        return f"http://<lb-ip>:{port}", None
+    return None, None
+
+
 def _not_found_message(tried: list[str] | None = None) -> str:
     msg = (
         "Prometheus is not auto-discoverable in this cluster.\n"
@@ -265,14 +293,12 @@ def find_prometheus_service(namespace: str | None = None) -> str:
             svc.spec.type if svc.spec and getattr(svc.spec, "type", None)
             else "ClusterIP"
         )
-        port = (
-            svc.spec.ports[0].port if svc.spec and svc.spec.ports else 9090
-        )
         try:
             url = _service_url(svc)
         except Exception as e:  # noqa: BLE001 — defensive
             logger.debug("find_prometheus_service: skip %s/%s: %s", ns_name, name, e)
             continue
+        ext_url, node_port = _external_url_and_node_port(svc)
 
         if svc_type == "ClusterIP":
             recommended = (
@@ -284,12 +310,12 @@ def find_prometheus_service(namespace: str | None = None) -> str:
             recommended = (
                 "✅ direct (substitute <node-ip> from list_resources(kind=Node))"
             )
-            url_cell = f"http://<node-ip>:{port}"
+            url_cell = ext_url or url
         elif svc_type == "LoadBalancer":
             recommended = (
                 "✅ direct (substitute LB ingress from Service.status)"
             )
-            url_cell = f"http://<lb-ip>:{port}"
+            url_cell = ext_url or url
         else:
             # ExternalName / unknown — leave to the agent.
             recommended = (
@@ -303,6 +329,7 @@ def find_prometheus_service(namespace: str | None = None) -> str:
                 "NAMESPACE": ns_name,
                 "NAME": name,
                 "TYPE": svc_type,
+                "NODE_PORT": str(node_port) if node_port else "",
                 "RECOMMENDED": recommended,
                 "URL": url_cell,
             }
@@ -322,7 +349,7 @@ def find_prometheus_service(namespace: str | None = None) -> str:
         )
 
     table = short_table(
-        rows, ["NAMESPACE", "NAME", "TYPE", "RECOMMENDED", "URL"]
+        rows, ["NAMESPACE", "NAME", "TYPE", "NODE_PORT", "RECOMMENDED", "URL"]
     )
     has_clusterip = any(r["TYPE"] == "ClusterIP" for r in rows)
     guidance = (

@@ -15,6 +15,7 @@ kubernetes DynamicClient，所以内置 kind 与 CRD 都能用。其中：
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC
 from typing import Any
 
@@ -142,6 +143,7 @@ def list_resources(
     namespace: str | None = None,
     label_selector: str | None = None,
     api_version: str | None = None,
+    wide: bool = False,
 ) -> str:
     """List Kubernetes resources by Kind. CRDs are supported — pass `api_version`
     explicitly (`"cert-manager.io/v1"` etc.) or rely on auto-discovery when
@@ -157,8 +159,15 @@ def list_resources(
             `"cert-manager.io/v1"` for CRDs. Omit for built-in kinds —
             auto-resolved via the hardcoded dictionary. Required only when
             the same Kind name exists in multiple API groups (rare).
+        wide: when True, append kind-specific extra columns (e.g. Node →
+            INTERNAL-IP / ROLES; Service → CLUSTER-IP / PORT(S) / EXTERNAL-IP;
+            Deployment → READY). Mirrors `kubectl get -o wide`. Default False
+            keeps the compact NAME / NAMESPACE / STATUS / AGE shape for
+            backward compatibility. For Pod-specific columns (PHASE /
+            RESTARTS / NODE) prefer `list_pods()`.
 
-    Returns a compact NAME / NAMESPACE / STATUS / AGE table.
+    Returns a compact NAME / NAMESPACE / STATUS / AGE table; with wide=True,
+    adds columns per `_WIDE_COLUMNS`.
     """
     dc = _dyn_client()
     resource = _resource_for_kind(dc, kind, api_version=api_version)
@@ -170,19 +179,26 @@ def list_resources(
         ret = resource.get(**get_kwargs)
     items = ret.items
 
+    wide_cols = _WIDE_COLUMNS.get(kind, ()) if wide else ()
+
     rows = []
     for item in items:
         obj = _to_dict(item)
         md = obj.get("metadata", {})
         status = obj.get("status", {}) or {}
-        rows.append({
+        row = {
             "NAME": md.get("name"),
             "NAMESPACE": md.get("namespace", ""),
             "STATUS": _status_for(kind, status),
             "AGE": _age(md.get("creationTimestamp")),
-        })
+        }
+        for col, fn in wide_cols:
+            row[col] = fn(obj)
+        rows.append(row)
 
-    return short_table(rows, ["NAME", "NAMESPACE", "STATUS", "AGE"])
+    columns = ["NAME", "NAMESPACE", "STATUS", "AGE"]
+    columns.extend(c for c, _ in wide_cols)
+    return short_table(rows, columns)
 
 
 def get_resource(
@@ -549,6 +565,100 @@ def _fetch(
         suffix = f" in namespace '{namespace}'" if namespace else ""
         raise LookupError(f"{kind} '{name}' not found{suffix}")
     return obj
+
+
+# ---------- wide-column extractors ------------------------------------------
+#
+# These power `list_resources(..., wide=True)`. Each extractor receives the
+# resource dict (as returned by DynamicClient's `.to_dict()`) and returns
+# the cell value as a string — empty string when the field is absent, so the
+# column aligns cleanly in `short_table` even when a row lacks that data.
+
+
+def _extract_internal_ip(obj: dict) -> str:
+    for a in obj.get("status", {}).get("addresses") or []:
+        if a.get("type") == "InternalIP":
+            return a.get("address", "") or ""
+    return ""
+
+
+def _extract_node_roles(obj: dict) -> str:
+    """Comma-separated role names (stripped of the `node-role.kubernetes.io/` prefix)."""
+    labels = obj.get("metadata", {}).get("labels") or {}
+    roles = sorted(
+        k.split("/", 1)[1]
+        for k in labels
+        if k.startswith("node-role.kubernetes.io/")
+    )
+    return ",".join(roles)
+
+
+def _extract_pod_restarts(obj: dict) -> str:
+    cs = obj.get("status", {}).get("containerStatuses") or []
+    return str(sum(c.get("restartCount", 0) for c in cs))
+
+
+def _extract_pod_node(obj: dict) -> str:
+    return obj.get("spec", {}).get("nodeName", "") or ""
+
+
+def _extract_pod_ip(obj: dict) -> str:
+    return obj.get("status", {}).get("podIP", "") or ""
+
+
+def _extract_service_cluster_ip(obj: dict) -> str:
+    return obj.get("spec", {}).get("clusterIP", "") or ""
+
+
+def _extract_service_ports(obj: dict) -> str:
+    parts: list[str] = []
+    for p in obj.get("spec", {}).get("ports") or []:
+        port = p.get("port")
+        target = p.get("targetPort")
+        proto = p.get("protocol", "TCP")
+        if target is not None and target != port:
+            parts.append(f"{port}:{target}/{proto}")
+        else:
+            parts.append(f"{port}/{proto}")
+    return ",".join(parts)
+
+
+def _extract_service_external_ip(obj: dict) -> str:
+    ingress = obj.get("status", {}).get("loadBalancer", {}).get("ingress") or []
+    if not ingress:
+        return ""
+    return ",".join(i.get("ip") or i.get("hostname", "") or "" for i in ingress)
+
+
+def _extract_workload_ready(obj: dict) -> str:
+    s = obj.get("status") or {}
+    ready = s.get("readyReplicas")
+    desired = s.get("replicas")
+    if ready is None and desired is None:
+        return ""
+    return f"{ready or 0}/{desired or '?'}"
+
+
+_WIDE_COLUMNS: dict[str, tuple[tuple[str, Callable[[dict], str]], ...]] = {
+    "Node": (
+        ("INTERNAL-IP", _extract_internal_ip),
+        ("ROLES", _extract_node_roles),
+    ),
+    "Pod": (
+        ("RESTARTS", _extract_pod_restarts),
+        ("NODE", _extract_pod_node),
+        ("IP", _extract_pod_ip),
+    ),
+    "Service": (
+        ("CLUSTER-IP", _extract_service_cluster_ip),
+        ("PORT(S)", _extract_service_ports),
+        ("EXTERNAL-IP", _extract_service_external_ip),
+    ),
+    "Deployment": (("READY", _extract_workload_ready),),
+    "StatefulSet": (("READY", _extract_workload_ready),),
+    "DaemonSet": (("READY", _extract_workload_ready),),
+    "ReplicaSet": (("READY", _extract_workload_ready),),
+}
 
 
 def _status_for(kind: str, status: dict) -> str:

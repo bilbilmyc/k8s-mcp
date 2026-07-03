@@ -777,8 +777,8 @@ def test_find_prometheus_service_empty_returns_helpful_notice(monkeypatch):
 # explicit `type` field (the default helper above leaves it unset).
 
 
-def _ns_service_with_type(ns, name, ip="10.0.0.1", port=9090, svc_type=None):
-    """Same as `_ns_service` but with `spec.type` populated."""
+def _ns_service_with_type(ns, name, ip="10.0.0.1", port=9090, svc_type=None, node_port=None):
+    """Same as `_ns_service` but with `spec.type` populated and optional `node_port`."""
     return type(
         "Svc", (), {
             "metadata": type("M", (), {"namespace": ns, "name": name})(),
@@ -786,7 +786,9 @@ def _ns_service_with_type(ns, name, ip="10.0.0.1", port=9090, svc_type=None):
                 "S", (), {
                     "cluster_ip": ip,
                     "type": svc_type,
-                    "ports": [type("P", (), {"name": "http", "port": port})()],
+                    "ports": [
+                        type("P", (), {"name": "http", "port": port, "node_port": node_port})()
+                    ],
                 }
             )(),
         }
@@ -859,6 +861,7 @@ def test_find_prometheus_service_nodeport_row_says_direct(monkeypatch):
                         "kube-prometheus-stack-prometheus",
                         port=9090,
                         svc_type="NodePort",
+                        node_port=45149,
                     ),
                 ],
             })()
@@ -873,6 +876,15 @@ def test_find_prometheus_service_nodeport_row_says_direct(monkeypatch):
     # may still appear in the static guidance text.
     assert "namespace='monitoring'" not in out
     assert "service_name='kube-prometheus-stack-prometheus'" not in out
+    # Bug fix: NodePort URL must use the apiserver-allocated nodePort
+    # (45149), NOT the clusterIP port (9090). Pre-fix code wrote
+    # `http://<node-ip>:{port}` which was always 9090 for a default
+    # kube-prometheus-stack Service.
+    assert "http://<node-ip>:45149" in out
+    assert "http://<node-ip>:9090" not in out
+    # And the new NODE_PORT column surfaces the same number.
+    assert "NODE_PORT" in out
+    assert "45149" in out
     # And guidance that mentions port-forward caveats should NOT appear,
     # since no ClusterIP rows are present.
     # (Guidance still appears for NodePort/LoadBalancer rows with a different
@@ -894,7 +906,9 @@ def test_find_prometheus_service_loadbalancer_row_says_direct(monkeypatch):
                     _ns_service_with_type(
                         "monitoring",
                         "kube-prometheus-stack-prometheus",
+                        port=9090,
                         svc_type="LoadBalancer",
+                        node_port=30080,
                     ),
                 ],
             })()
@@ -905,6 +919,15 @@ def test_find_prometheus_service_loadbalancer_row_says_direct(monkeypatch):
     assert "LoadBalancer" in out
     assert "✅ direct" in out
     assert "LB ingress" in out or "Service.status" in out
+    # LoadBalancer URL uses service port (the LB forwards to that port),
+    # NOT nodePort — LoadBalancer doesn't have one and using 30080 here
+    # would mislead the agent.
+    assert "http://<lb-ip>:9090" in out
+    assert "http://<lb-ip>:30080" not in out
+    # NODE_PORT column stays empty for LoadBalancer.
+    # We can't easily assert "empty cell" against short_table's padded output,
+    # but we can assert the header is there (proving wide format is active).
+    assert "NODE_PORT" in out
 
 
 def test_find_prometheus_service_guidance_omits_portforward_warning_when_only_nodeport(monkeypatch):

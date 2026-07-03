@@ -380,9 +380,170 @@ def _build_container(name, image, ports, env, resources, image_pull_policy):
     return container
 
 
+def _build_pod_spec(
+    image: str,
+    container_name: str,
+    command: list[str] | None,
+    args: list[str] | None,
+    env: dict[str, str] | None,
+    resources: dict | None,
+    image_pull_policy: str | None,
+    restart_policy: str,
+) -> dict:
+    """Shared PodSpec builder for Job / CronJob — they only differ in the
+    enclosing template structure."""
+    container = {"name": container_name, "image": image}
+    if command is not None:
+        container["command"] = list(command)
+    if args is not None:
+        container["args"] = list(args)
+    if env:
+        container["env"] = [{"name": k, "value": v} for k, v in env.items()]
+    if resources:
+        container["resources"] = resources
+    if image_pull_policy:
+        container["imagePullPolicy"] = image_pull_policy
+    return {
+        "restartPolicy": restart_policy,
+        "containers": [container],
+    }
+
+
+# ---------- Job ----------------------------------------------------------------
+
+
+def create_job(
+    name: str,
+    image: str,
+    namespace: str = "default",
+    container_name: str | None = None,
+    command: list[str] | None = None,
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    resources: dict | None = None,
+    image_pull_policy: str | None = None,
+    restart_policy: str = "Never",
+    backoff_limit: int | None = None,
+    labels: dict[str, str] | None = None,
+) -> str:
+    """⚠️ WRITE — create a one-off Job — pick THIS for batch tasks
+    (DB migration, one-time script, data import, ad-hoc data processing).
+
+    Equivalent to `kubectl create job`. For repeating tasks use
+    `create_cronjob` instead.
+
+    Args:
+        name: Job name.
+        image: container image, e.g. "postgres:16-alpine".
+        namespace: target namespace (default "default").
+        container_name: container name (default = job name).
+        command: container command, e.g. `["pg_dump", "-U", "postgres"]`.
+        args: container args.
+        env: env vars dict, e.g. `{"PGHOST": "db"}`.
+        resources: requests/limits dict, e.g. `{"requests": {"cpu": "100m"}}`.
+        image_pull_policy: "IfNotPresent" / "Always" / "Never".
+        restart_policy: "Never" (default) or "OnFailure". Job pods
+            almost never want "Always".
+        backoff_limit: max retries on failure. Default (None) = 6,
+            matching kubectl's default.
+        labels: optional labels.
+    """
+    _read_only_guard("create_job")
+    _ensure_ns(namespace)
+    container_name = container_name or name
+    pod_spec = _build_pod_spec(
+        image, container_name, command, args, env, resources,
+        image_pull_policy, restart_policy,
+    )
+    md: dict = {"name": name, "namespace": namespace}
+    if labels:
+        md["labels"] = labels
+    spec: dict = {"template": {"spec": pod_spec}}
+    if backoff_limit is not None:
+        spec["backoffLimit"] = int(backoff_limit)
+    manifest = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": md,
+        "spec": spec,
+    }
+    import yaml
+    return generic.apply_yaml(yaml.safe_dump(manifest))
+
+
+# ---------- CronJob ------------------------------------------------------------
+
+
+def create_cronjob(
+    name: str,
+    image: str,
+    schedule: str,
+    namespace: str = "default",
+    container_name: str | None = None,
+    command: list[str] | None = None,
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    resources: dict | None = None,
+    image_pull_policy: str | None = None,
+    restart_policy: str = "OnFailure",
+    labels: dict[str, str] | None = None,
+) -> str:
+    """⚠️ WRITE — create a CronJob — pick THIS for scheduled tasks
+    (nightly backups, periodic cleanup, hourly data sync).
+
+    Equivalent to `kubectl create cronjob`. For one-off batch tasks use
+    `create_job` instead.
+
+    Args:
+        name: CronJob name.
+        image: container image.
+        schedule: cron expression, e.g.
+            "0 2 * * *"   (every day at 02:00)
+            "*/15 * * * *" (every 15 min)
+            "0 0 * * 0"  (weekly, Sunday midnight)
+        namespace: target namespace (default "default").
+        container_name: container name (default = cronjob name).
+        command: container command.
+        args: container args.
+        env: env vars dict.
+        resources: requests/limits dict.
+        image_pull_policy: "IfNotPresent" / "Always" / "Never".
+        restart_policy: "OnFailure" (default) or "Never".
+        labels: optional labels.
+    """
+    _read_only_guard("create_cronjob")
+    _ensure_ns(namespace)
+    container_name = container_name or name
+    pod_spec = _build_pod_spec(
+        image, container_name, command, args, env, resources,
+        image_pull_policy, restart_policy,
+    )
+    md: dict = {"name": name, "namespace": namespace}
+    if labels:
+        md["labels"] = labels
+    spec = {
+        "schedule": schedule,
+        "jobTemplate": {
+            "spec": {
+                "template": {"spec": pod_spec},
+            },
+        },
+    }
+    manifest = {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": md,
+        "spec": spec,
+    }
+    import yaml
+    return generic.apply_yaml(yaml.safe_dump(manifest))
+
+
 def register(mcp) -> None:
     mcp.tool()(create_deployment)
     mcp.tool()(create_statefulset)
+    mcp.tool()(create_job)
+    mcp.tool()(create_cronjob)
     mcp.tool()(scale_workload)
     mcp.tool()(restart_workload)
     mcp.tool()(set_image)

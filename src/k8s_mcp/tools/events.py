@@ -99,5 +99,67 @@ def _epoch_zero():
     return datetime(1970, 1, 1, tzinfo=UTC)
 
 
+def get_events_for_object(
+    kind: str,
+    name: str,
+    namespace: str | None = None,
+    limit: int = 50,
+) -> str:
+    """📜 EVENTS FOR OBJECT — list every Event whose `involvedObject` matches
+    the given (kind, name). Use this for "why is X failing?" — instead of
+    scanning a namespace-wide event stream and grepping mentally.
+
+    Args:
+        kind: object Kind, e.g. "Pod", "Deployment", "StatefulSet",
+            "ReplicaSet", "PersistentVolumeClaim".
+        name: object name.
+        namespace: object namespace. Required for namespaced kinds; pass
+            None for cluster-scoped kinds (Node, PersistentVolume).
+        limit: max events to return (default 50). Sorted by last-seen
+            desc, so the latest signal is at the top.
+
+    Returns a TYPE / REASON / MESSAGE / LAST-SEEN / COUNT table — same
+    shape as `list_events`. Empty result returns "(no events)" rather
+    than an empty table, so the agent doesn't misread "no data" as
+    "tool failed".
+    """
+    field_selector = f"involvedObject.kind={kind},involvedObject.name={name}"
+    api = _core_v1()
+    if namespace:
+        ret = api.list_namespaced_event(namespace, field_selector=field_selector)
+    else:
+        ret = api.list_event_for_all_namespaces(field_selector=field_selector)
+
+    events = list(ret.items)
+    # Sort by last_timestamp desc (use first_timestamp as fallback). Local
+    # copy of the sort key from `list_events` to avoid coupling.
+    def _ts(e):
+        lt = e.last_timestamp or e.first_timestamp or e.event_time or e.metadata.creation_timestamp
+        return lt or _epoch_zero()
+    events.sort(key=_ts, reverse=True)
+    events = events[:limit]
+
+    rows = []
+    for e in events:
+        etype = e.type or "Normal"
+        obj = e.involved_object
+        rows.append({
+            "TYPE": etype,
+            "REASON": e.reason or "",
+            "OBJECT": f"{obj.kind}/{obj.name}" if obj else "",
+            "MESSAGE": (e.message or "")[:80],
+            "LAST-SEEN": _format_time(e.last_timestamp or e.first_timestamp),
+            "COUNT": str(e.count or 1),
+        })
+
+    if not rows:
+        return (
+            f"(no events for {kind}/{name}"
+            f"{' in namespace ' + namespace if namespace else ''})"
+        )
+    return short_table(rows, ["TYPE", "REASON", "OBJECT", "MESSAGE", "LAST-SEEN", "COUNT"])
+
+
 def register(mcp) -> None:
     mcp.tool()(list_events)
+    mcp.tool()(get_events_for_object)

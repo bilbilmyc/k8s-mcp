@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from kubernetes import client
+from kubernetes.client.rest import ApiException
 
 from ..client import get_api_client
 from ..config import get_settings
@@ -217,7 +218,63 @@ def _service_port(p: Any) -> dict[str, Any]:
     return {"name": str(p)}
 
 
+def _core_v1():
+    return client.CoreV1Api(get_api_client())
+
+
+def _networking_v1():
+    return client.NetworkingV1Api(get_api_client())
+
+
+def delete_service(name: str, namespace: str = "default") -> str:
+    """⚠️ WRITE — delete a Service (one-step, no two-step HMAC).
+
+    Why one-step: a Service is a traffic-routing rule, not a workload.
+    Deleting it stops inbound traffic to the Pods, but the Pods continue
+    to run. Re-creatable with `create_service` / `expose_workload` /
+    `apply_yaml`.
+
+    Args:
+        name: Service name.
+        namespace: Service namespace (default "default").
+    """
+    _read_only_guard("delete_service")
+    _ensure_ns(namespace)
+    try:
+        _core_v1().delete_namespaced_service(name, namespace)
+    except ApiException as e:
+        if e.status == 404:
+            raise LookupError(f"Service '{namespace}/{name}' not found") from e
+        raise
+    return f"Service/{namespace}/{name} deleted"
+
+
+def delete_ingress(name: str, namespace: str = "default") -> str:
+    """⚠️ WRITE — delete an Ingress (one-step, no two-step HMAC).
+
+    Why one-step: an Ingress is an HTTP routing rule, not a workload.
+    Deleting it stops external HTTP(S) traffic to the Services; the
+    Services and Pods keep running. Re-creatable with `create_ingress`
+    / `apply_yaml`.
+
+    Args:
+        name: Ingress name.
+        namespace: Ingress namespace (default "default").
+    """
+    _read_only_guard("delete_ingress")
+    _ensure_ns(namespace)
+    try:
+        _networking_v1().delete_namespaced_ingress(name, namespace)
+    except ApiException as e:
+        if e.status == 404:
+            raise LookupError(f"Ingress '{namespace}/{name}' not found") from e
+        raise
+    return f"Ingress/{namespace}/{name} deleted"
+
+
 def register(mcp) -> None:
     mcp.tool()(create_service)
     mcp.tool()(create_ingress)
+    mcp.tool()(delete_service)
+    mcp.tool()(delete_ingress)
     mcp.tool()(expose_workload)

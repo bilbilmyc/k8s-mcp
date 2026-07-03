@@ -17,6 +17,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from kubernetes import client
+from kubernetes.client.rest import ApiException
+
+from ..client import get_api_client
 from . import generic
 
 logger = logging.getLogger(__name__)
@@ -176,8 +180,92 @@ def _normalize_subject(s: dict) -> dict:
     return out
 
 
+def whoami(namespace: str = "default") -> str:
+    """👤 WHOAMI — show the identity the MCP server is running as and the
+    effective permissions in the given namespace.
+
+    Use this when a write/read tool returns `Forbidden` and you want to
+    know why — call `whoami` first to see which user/SA you are, which
+    groups you're in, and what resources/verbs you can touch in the
+    target namespace. Saves a round of "let me try the same call with
+    different role bindings".
+
+    Args:
+        namespace: namespace to check effective permissions in. Default
+            "default" — that's where the SelfSubjectRulesReview API
+            scopes its results. Cluster-scoped permissions (e.g.
+            ClusterRoles bound via ClusterRoleBinding) are NOT listed
+            here; check those with `get_role_bindings` / `list_resources
+            (kind="ClusterRoleBinding", ...)`.
+
+    Returns a multi-line report with:
+        ## Identity
+          user/SA, UID, groups
+        ## Effective permissions in namespace '<ns>'
+          table of api_group / resources / verbs
+    """
+    api_client = get_api_client()
+    authn_api = client.AuthenticationV1Api(api_client)
+
+    try:
+        review = authn_api.create_self_subject_review(body={})
+    except ApiException as e:
+        return f"❌ whoami: identity check failed: {e.status} {e.reason}"
+
+    username = (getattr(review.status, "username", None) or "(anonymous)")
+    uid = getattr(review.status, "uid", None) or ""
+    groups = list(getattr(review.status, "groups", None) or [])
+
+    lines = ["## Identity"]
+    lines.append(f"User/SA:    {username}")
+    if uid:
+        lines.append(f"UID:        {uid}")
+    if groups:
+        lines.append(f"Groups:     {', '.join(groups)}")
+
+    # Effective permissions in the requested namespace
+    try:
+        from kubernetes.client.models import (
+            V1SelfSubjectRulesReview,
+            V1SelfSubjectRulesReviewSpec,
+        )
+        authz_api = client.AuthorizationV1Api(api_client)
+        spec = V1SelfSubjectRulesReviewSpec(namespace=namespace)
+        body = V1SelfSubjectRulesReview(spec=spec)
+        result = authz_api.create_self_subject_rules_review(body)
+        rules = list(getattr(result.status, "resource_rules", None) or [])
+        non_resource = list(getattr(result.status, "non_resource_rules", None) or [])
+
+        lines.append("")
+        lines.append(f"## Effective permissions in namespace '{namespace}'")
+        if not rules and not non_resource:
+            lines.append("(none — this identity has no namespace-scoped rules here)")
+        if rules:
+            for r in rules:
+                api_groups = ", ".join(r.api_groups or []) or "core"
+                resources = ", ".join(r.resources or [])
+                verbs = ", ".join(r.verbs or [])
+                lines.append(f"  - {api_groups}/{resources}: {verbs}")
+        if non_resource:
+            lines.append("  Non-resource URLs:")
+            for url in non_resource:
+                lines.append(f"    - {url}")
+    except ApiException as e:
+        lines.append("")
+        lines.append(f"## Effective permissions in namespace '{namespace}'")
+        lines.append(f"(SelfSubjectRulesReview failed: {e.status} {e.reason})")
+    except Exception as e:  # noqa: BLE001
+        # Older apiservers may not support the API; surface that clearly.
+        lines.append("")
+        lines.append(f"## Effective permissions in namespace '{namespace}'")
+        lines.append(f"(SelfSubjectRulesReview unsupported: {type(e).__name__}: {e})")
+
+    return "\n".join(lines)
+
+
 def register(mcp) -> None:
     mcp.tool()(create_role)
     mcp.tool()(create_rolebinding)
     mcp.tool()(create_clusterrole)
     mcp.tool()(create_clusterrolebinding)
+    mcp.tool()(whoami)

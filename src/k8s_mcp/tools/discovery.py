@@ -269,6 +269,96 @@ def _explain_field(kind: str, path: str, field_def: dict) -> str:
     return "\n".join(lines)
 
 
+# =============================================================================
+# find_images — "which workloads are using image X (or matching substring)?"
+# =============================================================================
+
+
+_WORKLOAD_IMAGE_KINDS = ("Deployment", "StatefulSet", "DaemonSet")
+
+
+def find_images(
+    image_substring: str,
+    namespace: str | None = None,
+    kinds: list[str] | None = None,
+) -> str:
+    """🔍 FIND IMAGES — list every workload whose containers reference an
+    image matching `image_substring` (case-insensitive substring match).
+
+    Use case: "which Deployments are still on nginx:1.21?" or "which
+    workloads reference my internal registry?" — answers in one call
+    instead of `list_resources` + N × `get_resource_yaml`.
+
+    Searches across Deployment / StatefulSet / DaemonSet (and any custom
+    kinds you pass via `kinds=`) by walking
+    `spec.template.spec.containers[*].image` and init containers.
+
+    Args:
+        image_substring: case-insensitive substring to match against
+            container image strings. e.g. "nginx:1.21", "1.25.3",
+            "registry.internal/library/".
+        namespace: limit to one namespace. None = all namespaces.
+        kinds: workload kinds to search. Default: Deployment, StatefulSet,
+            DaemonSet. Pass a list like `["Deployment", "StatefulSet"]`
+            to narrow.
+
+    Returns a KIND / NAMESPACE / NAME / CONTAINER / IMAGE table.
+    """
+    from . import generic
+
+    if not image_substring:
+        raise ValueError("image_substring is required")
+    needle = image_substring.lower()
+    target_kinds = list(kinds) if kinds else list(_WORKLOAD_IMAGE_KINDS)
+
+    dc = generic._dyn_client()
+    rows: list[dict[str, str]] = []
+    for kind in target_kinds:
+        try:
+            resource = generic._resource_for_kind(dc, kind)
+        except (ValueError, Exception):
+            # Unknown kind for this cluster — skip silently rather than
+            # blanking the whole report.
+            continue
+        try:
+            ret = resource.get(namespace=namespace) if namespace else resource.get()
+            items = list(ret.items)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("find_images: skipping %s: %s", kind, e)
+            continue
+        for item in items:
+            obj = generic._to_dict(item)
+            spec = (obj.get("spec", {}) or {}).get("template", {}) or {}
+            pod_spec = spec.get("spec", {}) or {}
+            for c in pod_spec.get("containers", []) or []:
+                img = c.get("image", "")
+                if needle in img.lower():
+                    md = obj.get("metadata", {}) or {}
+                    rows.append({
+                        "KIND": kind,
+                        "NAMESPACE": md.get("namespace", ""),
+                        "NAME": md.get("name", "?"),
+                        "CONTAINER": c.get("name", "?"),
+                        "IMAGE": img,
+                    })
+            for c in pod_spec.get("initContainers", []) or []:
+                img = c.get("image", "")
+                if needle in img.lower():
+                    md = obj.get("metadata", {}) or {}
+                    rows.append({
+                        "KIND": kind,
+                        "NAMESPACE": md.get("namespace", ""),
+                        "NAME": md.get("name", "?"),
+                        "CONTAINER": f"[init] {c.get('name', '?')}",
+                        "IMAGE": img,
+                    })
+
+    if not rows:
+        return f"(no workloads reference an image matching {image_substring!r})"
+    return short_table(rows, ["KIND", "NAMESPACE", "NAME", "CONTAINER", "IMAGE"])
+
+
 def register(mcp) -> None:
     mcp.tool()(get_api_resources)
     mcp.tool()(explain_resource)
+    mcp.tool()(find_images)

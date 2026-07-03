@@ -100,6 +100,7 @@ def _register_tools(mcp: FastMCP) -> None:
         autoscale,
         bulk,
         certs,
+        cluster_info,
         configmap,
         delete_tool,
         discovery,
@@ -151,6 +152,7 @@ def _register_tools(mcp: FastMCP) -> None:
     health.register(mcp)
     bulk.register(mcp)
     notifier.register(mcp)
+    cluster_info.register(mcp)
 
 
 def main() -> None:

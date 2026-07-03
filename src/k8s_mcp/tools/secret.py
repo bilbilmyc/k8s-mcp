@@ -47,7 +47,18 @@ def list_secrets(
     namespace: str | None = None,
     label_selector: str | None = None,
 ) -> str:
-    """List Secrets (metadata only; never returns values).
+    """List Secrets (metadata + key count only; values NEVER returned) — pick
+    THIS when you want to discover which Secrets exist. Step 1 of the
+    three-step Secret workflow.
+
+    Three-step workflow to read a Secret value:
+      1. THIS tool — find the Secret and confirm the key exists
+      2. `get_secret_value(reveal=False)` — confirms size, value stays MASKED
+      3. `get_secret_value(reveal=True)` — explicit reveal, returns bytes
+
+    For structured YAML where you don't need values, use
+    `get_resource_yaml(kind="Secret")` instead — it masks values by default
+    and never requires reveal.
 
     Args:
         namespace: namespace to list in. None = all namespaces.
@@ -91,7 +102,18 @@ def get_secret_value(
     key: str,
     reveal: bool = False,
 ) -> str:
-    """Fetch one key from a Secret and return its decoded value.
+    """⚠️ SENSITIVE — fetch one key from a Secret. Two-call pattern enforces
+    explicit consent before bytes leave the cluster:
+
+      - `reveal=False` (default): returns `*** MASKED (N bytes)`. The agent
+        MUST make a second call with `reveal=True` to see actual bytes.
+      - `reveal=True`: decodes and returns the value (UTF-8 text, or
+        `<binary, N bytes, base64=...>` for non-printable bytes).
+
+    Step 2/3 of the three-step workflow (after `list_secrets`). For bulk
+    YAML view of a Secret without ever exposing values, use
+    `get_resource_yaml(kind="Secret")` instead — it masks values by default
+    and never requires reveal.
 
     Args:
         name: Secret name.

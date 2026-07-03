@@ -94,7 +94,15 @@ def create_rolebinding(
 
 
 def create_clusterrole(name: str, rules: list[dict[str, Any]]) -> str:
-    """Create a cluster-scoped ClusterRole (same rule schema as create_role)."""
+    """⚠️ WRITE / ⚠️ CLUSTER-SCOPED — ClusterRole bypasses the
+    K8S_MCP_NAMESPACE_ALLOWLIST (ClusterRoles have no namespace) and the
+    permissions are visible to every namespace.
+
+    For namespace-scoped permissions, use `create_role` instead. Rule
+    schema is identical — see `create_role`.
+
+    Args: name + rules (same shape as create_role).
+    """
     if not rules:
         raise ValueError("Provide at least one rule")
     manifest = {
@@ -112,7 +120,12 @@ def create_clusterrolebinding(
     role_name: str,
     subjects: list[dict[str, str]],
 ) -> str:
-    """Create a cluster-scoped ClusterRoleBinding."""
+    """⚠️ WRITE / ⚠️ CLUSTER-SCOPED — grants the bound subjects cluster-wide
+    access; bypasses K8S_MCP_NAMESPACE_ALLOWLIST and is visible everywhere.
+
+    For namespace-scoped bindings, use `create_rolebinding` instead.
+    `role_name` MUST reference a ClusterRole (not a namespaced Role).
+    """
     if not subjects:
         raise ValueError("Provide at least one subject")
     manifest = {

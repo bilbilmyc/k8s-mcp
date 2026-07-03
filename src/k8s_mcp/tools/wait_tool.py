@@ -46,7 +46,13 @@ def wait_resource(
     jsonpath_value: str | None = None,
     timeout_seconds: int = 60,
 ) -> str:
-    """Wait until a resource satisfies a condition or matches a JSONPath value.
+    """⚠️ BLOCKING — polls the resource every second until the condition is met
+    or `timeout_seconds` elapses (whichever comes first). The agent stays
+    blocked for the full duration when the condition is slow to appear.
+
+    Use `timeout_seconds` to bound the wait. To get a snapshot instead of
+    waiting, use `get_resource` and inspect status manually. For Pod
+    startup specifically, a smaller timeout (10–20s) usually suffices.
 
     Args:
         kind: resource kind (e.g. "Pod", "Deployment").

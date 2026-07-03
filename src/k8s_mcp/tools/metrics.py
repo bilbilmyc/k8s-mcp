@@ -27,7 +27,13 @@ def top_pods(
     label_selector: str | None = None,
     sort_by: str = "memory",
 ) -> str:
-    """Show current CPU and memory usage for Pods (kubectl top pods).
+    """Show current CPU + memory for Pods from metrics-server — pick THIS when
+    Prometheus is NOT deployed in the cluster. Equivalent to `kubectl top pods`.
+
+    Only emits CPU + memory (the two things metrics-server carries). For
+    richer container metrics — network rx/tx, filesystem read/write, or
+    per-container breakdown — Prometheus is the answer; use
+    `prometheus_query` / `pod_metrics`.
 
     Args:
         namespace: namespace to query; None = all namespaces.

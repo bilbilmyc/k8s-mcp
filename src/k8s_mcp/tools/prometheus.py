@@ -612,7 +612,15 @@ def pod_metrics(
     range: str = "5m",
     prometheus_url: str | None = None,
 ) -> str:
-    """Fetch a common container metric for a single Pod.
+    """Fetch a common container metric for one Pod from Prometheus — pick THIS
+    when Prometheus is deployed and you want richer signals (per-container
+    breakdown, network rx/tx, filesystem read/write). Equivalent to running
+    PromQL via `kubectl exec` side-car pattern, automated.
+
+    For cluster-wide CPU/memory ranking of many Pods (using metrics-server
+    only, no Prometheus needed), use `top_pods` instead. For arbitrary PromQL,
+    use `prometheus_query`. Requires a reachable Prometheus; use
+    `find_prometheus_service` to locate one.
 
     Args:
         pod_name: pod name. Use a regex prefix (e.g. "nginx-7c5b.*") if you

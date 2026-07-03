@@ -31,7 +31,14 @@ logger = logging.getLogger(__name__)
 
 
 def get_api_resources(prefix: str | None = None) -> str:
-    """List all API resources discoverable in the cluster.
+    """List all API resources discoverable in the cluster — call THIS first
+    before passing kind names to `list_resources` / `get_resource` /
+    `get_resource_yaml`. Lets you confirm the exact spelling, apiVersion,
+    and whether the kind is namespaced.
+
+    Equivalent to `kubectl api-resources`. Includes CRDs (custom resources
+    registered in the cluster), so this is the right way to ask "what
+    kinds exist here?". Pass `prefix="deploy"` to narrow the table.
 
     Args:
         prefix: optional filter, e.g. "deploy" → matches Deployment, etc.
@@ -128,7 +135,14 @@ def explain_resource(
     field_path: str | None = None,
     api_version: str | None = None,
 ) -> str:
-    """Look up the schema (and description) for a Kind or a nested field.
+    """Look up the schema (and description) for a Kind or a nested field —
+    call THIS BEFORE writing a YAML manifest for a kind you don't know, so
+    you don't miss required fields, get enum values wrong, or nest fields
+    at the wrong level.
+
+    Equivalent to `kubectl explain <kind>[.<field_path>]`. For pure kind
+    enumeration (does this kind exist in this cluster?), use
+    `get_api_resources` instead.
 
     Args:
         kind: e.g. "Pod", "Deployment", "HorizontalPodAutoscaler".
@@ -137,10 +151,6 @@ def explain_resource(
             top-level description and a list of top-level fields.
         api_version: optional, e.g. "apps/v1". When omitted, the first
             matching definition in the OpenAPI schema is used.
-
-    Equivalent to `kubectl explain <kind>[.<field_path>]`. LLM agents
-    should call this before writing a YAML manifest for a kind they
-    don't know.
 
     Returns a text description; raise LookupError if the kind is not in
     the schema.

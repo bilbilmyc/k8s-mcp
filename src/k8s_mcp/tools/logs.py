@@ -72,7 +72,17 @@ def get_pod_logs(
     max_bytes: int = DEFAULT_MAX_BYTES,
     output_format: str = "text",
 ) -> str:
-    """Fetch logs for one or more Pods with safe defaults for long-running pods.
+    """Fetch Pod logs with safe defaults. Equivalent to `kubectl logs`, with
+    added filtering on top. Defaults: `tail_lines` from settings
+    (default_tail_lines), `max_bytes` 1 MiB (16 MiB hard cap — the response
+    is truncated past the cap with a footer notice telling you to narrow).
+
+    ⚠️ BLOCKING on `since_time` / `since_seconds` — K8s streams the entire
+    log from the start of the pod (not from the lower bound); the bound is
+    applied server-side AFTER the stream finishes. For very chatty pods,
+    `tail_lines` + `pattern` is faster than `since_seconds`.
+
+    Args:
 
     Args:
         pod_name: pod name (mutually exclusive with label_selector).

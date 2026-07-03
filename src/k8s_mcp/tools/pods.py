@@ -33,6 +33,7 @@ def list_pods(
     generic cross-kind list, prefer `list_resources(kind="Pod", ...)` — that
     one works on any kind (including CRDs); use THIS tool only when you need
     Pod-specific columns or the `include_all` Succeeded/Failed filter.
+    Equivalent to `kubectl get pods`.
 
     Args:
         namespace: namespace to list; None = all namespaces.

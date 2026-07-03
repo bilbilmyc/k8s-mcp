@@ -43,7 +43,9 @@ def rollout_status(
     kind: str, name: str, namespace: str = "default",
     timeout_seconds: int = 60, watch: bool = False,
 ) -> str:
-    """Wait for a Deployment/StatefulSet rollout to finish.
+    """Show rollout status for a Deployment / StatefulSet. With
+    `watch=True` ⚠️ BLOCKING — polls every 2s until the rollout completes
+    or `timeout_seconds` elapses. Pass `watch=False` for a one-shot snapshot.
 
     Args:
         kind: "Deployment" or "StatefulSet".
@@ -113,9 +115,10 @@ def rollout_undo(
     kind: str, name: str, namespace: str = "default",
     to_revision: int | None = None,
 ) -> str:
-    """⚠️ WRITE / ⚠️ SILENT ROLLBACK — by default rolls back to the previous
-    revision (no prompt). Pass `to_revision=N` to target a specific revision;
-    use `rollout_history` first to see what's available.
+    """⚠️ WRITE / ⚠️ SILENT ROLLBACK — equivalent to
+    `kubectl rollout undo <kind>/<name> [--to-revision=N]`. By default rolls
+    back to the previous revision (no prompt). Pass `to_revision=N` to target
+    a specific revision; use `rollout_history` first to see what's available.
 
     Args:
         kind: "Deployment" or "StatefulSet".
@@ -181,7 +184,8 @@ def rollout_undo(
 
 
 def rollout_history(kind: str, name: str, namespace: str = "default") -> str:
-    """Show the rollout history of a Deployment/StatefulSet.
+    """Show the rollout history of a Deployment/StatefulSet. Equivalent to
+    `kubectl rollout history <kind>/<name>`.
 
     Args:
         kind: "Deployment" or "StatefulSet".

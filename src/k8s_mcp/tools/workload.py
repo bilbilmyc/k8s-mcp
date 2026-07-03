@@ -227,10 +227,10 @@ def scale_workload(kind: str, name: str, namespace: str, replicas: int) -> str:
 def restart_workload(kind: str, name: str, namespace: str) -> str:
     """⚠️ WRITE — triggers a rolling restart of every Pod in a Deployment /
     StatefulSet (Deployment / StatefulSet only; DaemonSet, Job, CronJob
-    are not supported).
+    are not supported). Equivalent to `kubectl rollout restart <kind>/<name>`.
 
     Implemented by patching the `kubectl.kubernetes.io/restartedAt`
-    annotation on the pod template — kubectl-equivalent.
+    annotation on the pod template.
     """
     _read_only_guard()
     _ensure_ns(namespace)

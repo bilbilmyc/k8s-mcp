@@ -31,20 +31,22 @@ PyPI 或 TestPyPI。这页是维护者发版流程。
 
 ```ini
 [distutils]
-index-servers =
-    pypi
-    testpypi
+  index-servers =
+      pypi
+      testpypi
 
 [pypi]
-username = __token__
-password = pypi-AgEIcHl...   # 生产 PyPI 的 token
+  username = __token__
+  password = pypi-AgEIcHl...   # 生产 PyPI 的 token
 
 [testpypi]
-username = __token__
-password = pypi-AgENdGVz...   # TestPyPI 的 token
+  username = __token__
+  password = pypi-AgENdGVz...   # TestPyPI 的 token
 ```
 
-`username = __token__` 是 PyPI 要求的固定值（字面量），`password` 是 token 字符串。
+`username = __token__` 是 PyPI 要求的固定值（字面量），`password` 是 token
+字符串。section header 与 `key = value` 之间**用 2 空格缩进**，INI 解析
+不在意缩进但保持风格统一，便于后面用脚本抓 token。
 
 文件权限收紧：
 
@@ -73,12 +75,27 @@ ls -la dist/
 ## 5. 推到 TestPyPI（先试这里）
 
 ```bash
-# uv 会自动从 ~/.config/pypirc 读 [testpypi] 段
+# 标准做法：uv 会从 ~/.config/pypirc 读 [testpypi] 段
 uv publish --publish-url https://test.pypi.org/legacy/ \
            --repository testpypi
 ```
 
 输出 `Successfully uploaded k8s_mcp_bilbilmyc-0.1.1.tar.gz` 之类即可。
+
+> ⚠️ **新版 uv 默认走 Trusted Publishing（OIDC），不会自动回退去读
+> `~/.config/pypirc`**。如果看到 `Missing credentials for
+> https://upload.pypi.org/legacy/`，说明 pypirc 没被读到，**最稳的兜底
+> 是把 token 直接塞到环境变量**：
+>
+> ```bash
+> UV_PUBLISH_TOKEN="$(grep -E '^[[:space:]]+password' ~/.config/pypirc \
+>                    | sed -E 's/^[[:space:]]+password[[:space:]]*=[[:space:]]*//')" \
+>     uv publish --publish-url https://test.pypi.org/legacy/ --repository testpypi
+> ```
+>
+> 这里 `grep '^[[:space:]]+password'` 是为了**容错 section header 缩进**
+> ——你 pypirc 里如果 password 行有 2 空格缩进，`^password`（无空格）会
+> 匹配不上，token 静默变空，403 一脸懵。
 
 **首次发版**：上一步是创建这个项目。如果用 Project-scope token，需要先在
 <https://test.pypi.org/manage/projects/> 手动 "create" 一次空项目（包名
@@ -114,11 +131,16 @@ k8s-mcp --help    # CLI 入口
 TestPyPI 验证完再推生产：
 
 ```bash
-uv publish    # 默认从 ~/.config/pypirc [pypi] 段读
+# 标准做法：uv 从 ~/.config/pypirc [pypi] 段读
+uv publish
 ```
 
 第一次推生产如果用 Account-scope token 会自动创建项目；Project-scope
 需要先在 <https://pypi.org/manage/projects/> 手动 "create" 一次空项目。
+
+> ⚠️ 如果 pypirc 没生效（看到 `Missing credentials for
+> https://upload.pypi.org/legacy/`），用 `UV_PUBLISH_TOKEN` 环境变量绕开，
+> 见 §5 末尾的兜底命令。
 
 ## 8. 验证生产发布
 
@@ -131,8 +153,14 @@ k8s-mcp --version
 
 ## 常见坑
 
+- **`Missing credentials for https://upload.pypi.org/legacy/`** —— 新版
+  `uv publish` 默认走 [Trusted Publishing](#不用-pypi-token-的方案trusted-publishing)
+  （OIDC），不会自动回退去读 `~/.config/pypirc`。解决方案：
+  `UV_PUBLISH_TOKEN=$(grep -E '^[[:space:]]+password' ~/.config/pypirc | sed ...) uv publish`。
 - **403 Invalid or non-existent authentication** —— token 写错，或者 `username` 用了
-  自己的 PyPI 用户名而不是 `__token__`。
+  自己的 PyPI 用户名而不是 `__token__`，**或者 pypirc 里的 password 行带缩进但脚本
+  `grep '^password'` 没匹配上、token 静默变空**。用 `grep -E '^[[:space:]]+password'`
+  容错缩进。
 - **403 The user 'X' isn't allowed to upload to project 'Y'** —— token scope
   跟项目不匹配。要么换 Account-scope token，要么先在 PyPI 手动 create 项目再用
   Project-scope token。

@@ -149,10 +149,7 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 {
   "mcpServers": {
     "k8s": {
-      "command": "uv",
-      "args": ["tool", "run", "--from",
-               "/Users/mayc/codes/k8s-mcp/dist/k8s_mcp-0.1.0-py3-none-any.whl",
-               "k8s-mcp"],
+      "command": "k8s-mcp",
       "env": {
         "K8S_MCP_LOG_LEVEL": "INFO",
         "K8S_MCP_API_SERVER": "https://api.example.com:6443",

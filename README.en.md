@@ -154,6 +154,7 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `create_serviceaccount(name, namespace, image_pull_secrets=[]?)`
 - `create_networkpolicy(name, namespace, pod_selector, policy_types=[Ingress|Egress], ingress=[], egress=[])`
 - `create_pvc(name, namespace, size, access_modes?, storage_class?, labels?)`
+- `bootstrap_local_path_provisioner(set_as_default=True, apply_immediately=True)` — one-shot install of Rancher local-path provisioner for SC-less dev/test clusters (see "Troubleshooting & dev scenarios" below)
 - `scale_workload(kind, name, namespace, replicas)`
 - `restart_workload(kind, name, namespace)`
 - `set_image(kind, name, namespace, container, image)`
@@ -271,6 +272,33 @@ friendly "ask the user" message.
   - `start_prometheus_port_forward` only needs the apiserver, so it
     works even in read-only; it still honors the namespace allowlist
     (forwarding *into* a blocked namespace is rejected).
+
+## Troubleshooting & dev scenarios
+
+### Cluster has no StorageClass? Bootstrap a local one
+
+kind / k3s default / minikube (without extras) ship **with no
+StorageClass** — PVCs sit Pending forever. `bootstrap_local_path_provisioner`
+solves it in one call:
+
+```
+bootstrap_local_path_provisioner()      # applies Rancher local-path-storage
+```
+
+After this, `storage_class_name="local-path"` works immediately —
+PVCs auto-create hostPath PVs. **Don't use on production**
+(hostPath is bound to the node; data is lost if the node dies).
+
+Arguments:
+- `set_as_default=True` (default) — mark the new SC as cluster-wide default
+  so subsequent PVCs don't need `storage_class_name`.
+- `apply_immediately=False` — return the manifest YAML without installing
+  (good for auditing before applying).
+- `K8S_MCP_LOCAL_PATH_PROVISIONER_URL` — air-gapped clusters, point at
+  an internal mirror. Default: [Rancher official manifest](https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml).
+
+Manifest is fetched and cached once per MCP session (re-fetched after
+every client reconnect — see [[restart-clears-state]] memory note).
 
 ## End-to-end example (Claude session)
 

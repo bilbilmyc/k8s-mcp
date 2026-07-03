@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     prometheus_url: str | None = None
     prometheus_bearer_token: str | None = None
 
+    # 引导性集群组件：local-path-provisioner 之类单 manifest 部署
+    # 集群基础设施。默认指向公开 manifest，私有/离线集群可以通过
+    # 环境变量指向自家镜像。
+    local_path_provisioner_url: str = (
+        "https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml"
+    )
+
     @field_validator("namespace_allowlist", mode="before")
     @classmethod
     def _split_allowlist(cls, v: Any) -> list[str] | None:

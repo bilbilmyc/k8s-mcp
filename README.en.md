@@ -153,7 +153,8 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `create_clusterrole(name, rules)`, `create_clusterrolebinding(name, role_name, subjects)`
 - `create_serviceaccount(name, namespace, image_pull_secrets=[]?)`
 - `create_networkpolicy(name, namespace, pod_selector, policy_types=[Ingress|Egress], ingress=[], egress=[])`
-- `create_pvc(name, namespace, size, access_modes?, storage_class?, labels?)`
+- `create_pvc(name, namespace, size, access_modes?, storage_class?, volume_name?, labels?)` — `volume_name` pins the PVC to a specific PV (hostPath / local volumes on dev/test clusters)
+- `validate_pv_hostpath_paths()` — lists every hostPath PV with its target node + a one-line `ssh` check / create command (see "Troubleshooting & dev scenarios" below)
 - `bootstrap_local_path_provisioner(set_as_default=True, apply_immediately=True)` — one-shot install of Rancher local-path provisioner for SC-less dev/test clusters (see "Troubleshooting & dev scenarios" below)
 - `scale_workload(kind, name, namespace, replicas)`
 - `restart_workload(kind, name, namespace)`
@@ -299,6 +300,29 @@ Arguments:
 
 Manifest is fetched and cached once per MCP session (re-fetched after
 every client reconnect — see [[restart-clears-state]] memory note).
+
+### Pod stuck on FailedMount? The hostPath directory may be missing
+
+Dev/test clusters often use hand-rolled **hostPath PVs**
+(`spec.hostPath.path=/data/xxx`). The kubelet does **not** create the
+host directory — and a missing one looks like:
+
+```
+Warning  FailedMount  ... path "/data/k8s/pgsql-sts" does not exist
+```
+
+Fix flow:
+1. `validate_pv_hostpath_paths()` — lists every hostPath PV, the node it's
+   pinned to, and a one-line `ssh` command (checks `ls -ld`, then
+   `sudo mkdir -p` if missing).
+2. After fixing, the Pod auto-retries the mount.
+3. `create_pvc(volume_name="...")` automatically appends a `mkdir -p`
+   hint to its result when the bound PV is hostPath, so future calls
+   don't repeat the gotcha.
+
+When a PVC needs to bind to a specific hostPath PV, `volume_name` is
+required — k8s does not match PVs to PVCs by hostPath path on its own
+when no StorageClass is involved.
 
 ## End-to-end example (Claude session)
 

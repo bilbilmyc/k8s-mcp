@@ -161,7 +161,8 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `create_clusterrole(name, rules)`, `create_clusterrolebinding(name, role_name, subjects)`
 - `create_serviceaccount(name, namespace, image_pull_secrets=[]?)`
 - `create_networkpolicy(name, namespace, pod_selector, policy_types=[Ingress|Egress], ingress=[], egress=[])`
-- `create_pvc(name, namespace, size, access_modes?, storage_class?, labels?)`
+- `create_pvc(name, namespace, size, access_modes?, storage_class?, volume_name?, labels?)` — `volume_name` 用于把 PVC 显式绑到指定 PV（hostPath / local 的本地卷场景）
+- `validate_pv_hostpath_paths()` — 列出全部 hostPath PV + 对应节点 + 一键 `ssh` 检查 / 创建命令（见下方"排错与开发场景"）
 - `bootstrap_local_path_provisioner(set_as_default=True, apply_immediately=True)` — 一键给无 SC 的 dev/test 集群装 Rancher local-path provisioner(见下方"排错与开发场景")
 - `scale_workload(kind, name, namespace, replicas)`
 - `restart_workload(kind, name, namespace)`
@@ -323,6 +324,27 @@ bootstrap_local_path_provisioner()      # 应用 Rancher local-path-storage
   默认指向 [Rancher 官方 manifest](https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml)。
 
 Manifest 在 session 内 fetch + cache 一次(每次 MCP 重连会重拉)。
+
+### Pod 一直 FailedMount？hostPath 主机的目录可能没建
+
+dev/test 集群常用手搓的 **hostPath PV**（`spec.hostPath.path=/data/xxx`），
+但 kubelet **不会**自动在节点上建这个目录。Pod 卡在 ContainerCreating，
+事件里看到：
+
+```
+Warning  FailedMount  ... path "/data/k8s/pgsql-sts" does not exist
+```
+
+处理流：
+1. `validate_pv_hostpath_paths()` —— 列出所有 hostPath PV、对应的节点、
+   主机路径，**直接给出一行可复制的 `ssh` 命令**（先 `ls -ld` 检查，
+   缺则 `sudo mkdir -p`）。
+2. 修好后 Pod 会自动重试挂载。
+3. `create_pvc(volume_name="...")` 在绑定的 PV 是 hostPath 时，**返回里
+   会自动带 `mkdir -p` 提示**，避免下次再踩坑。
+
+PVC 想绑到具体 hostPath PV 必须显式 `volume_name`（PVC 没有 SC 的情况下，
+k8s 不会自动按 hostPath path 匹配）。
 
 ## 端到端示例（Claude 会话）
 

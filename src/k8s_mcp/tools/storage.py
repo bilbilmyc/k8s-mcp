@@ -55,6 +55,7 @@ def create_pvc(
     size: str,
     access_modes: list[str] | None = None,
     storage_class: str | None = None,
+    volume_name: str | None = None,
     labels: dict[str, str] | None = None,
 ) -> str:
     """⚠️ WRITE / ⚠️ PROVISIONS STORAGE — claims a PersistentVolume from the
@@ -71,7 +72,19 @@ def create_pvc(
         storage_class: optional StorageClass name. If the cluster has no
             StorageClass at all, run `bootstrap_local_path_provisioner()`
             first to give it one.
+        volume_name: pin the PVC to a specific PersistentVolume by name
+            (sets `spec.volumeName`). Use this when binding to a
+            pre-provisioned local PV (hostPath / local) on a dev/test
+            cluster that has no dynamic provisioner — the PVC must name
+            the PV explicitly, otherwise it sits Pending forever.
         labels: optional labels.
+
+    NOTE on hostPath PVs: if `volume_name` points to a hostPath PV, the
+    kubelet does NOT create the host directory — it must already exist
+    on the target Node. When this tool detects that, the result includes
+    a `mkdir -p` hint; run it on the node (or call
+    `validate_pv_hostpath_paths` first) before scheduling a Pod that
+    mounts the PVC.
     """
     if access_modes is None:
         access_modes = ["ReadWriteOnce"]
@@ -84,6 +97,8 @@ def create_pvc(
     }
     if storage_class:
         spec["storageClassName"] = storage_class
+    if volume_name:
+        spec["volumeName"] = volume_name
     manifest = {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
@@ -91,7 +106,60 @@ def create_pvc(
         "spec": spec,
     }
     import yaml
-    return generic.apply_yaml(yaml.safe_dump(manifest))
+    result = generic.apply_yaml(yaml.safe_dump(manifest))
+    if volume_name:
+        hint = _hostpath_pv_hint(volume_name)
+        if hint:
+            return f"{result}\n\n{hint}"
+    return result
+
+
+def _node_for_pv(pv_obj: dict) -> str | None:
+    """Best-effort hostname for a PV — nodeAffinity first, else None."""
+    affinity = (pv_obj.get("spec", {}) or {}).get("nodeAffinity", {}) or {}
+    terms = affinity.get("required", {}).get("nodeSelectorTerms", []) or []
+    for term in terms:
+        for expr in term.get("matchExpressions", []) or []:
+            if (expr.get("key") == "kubernetes.io/hostname"
+                    and expr.get("operator") == "In"
+                    and expr.get("values")):
+                return expr["values"][0]
+    return None
+
+
+def _hostpath_pv_hint(pv_name: str) -> str:
+    """If PV <pv_name> is hostPath type, return a `mkdir` hint naming the
+    target node and host path. Return '' if the PV is not hostPath or
+    could not be fetched (don't fail the create call on a hint lookup)."""
+    try:
+        pv = generic.get_resource(kind="PersistentVolume", name=pv_name)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("hostPath hint skipped: PV %s lookup failed: %s", pv_name, e)
+        return ""
+    spec = pv.get("spec", {}) or {}
+    host_path = spec.get("hostPath")
+    if not host_path:
+        return ""
+    path = host_path.get("path", "<unknown>")
+    node = _node_for_pv(pv) or "<the node that mounts this PV>"
+    typ = host_path.get("type", "DirectoryOrCreate")
+    typ_note = ""
+    if typ != "DirectoryOrCreate":
+        typ_note = (
+            f"  (hostPath.type={typ} — directory must already exist; "
+            f"DirectoryOrCreate would auto-create it.)\n"
+        )
+    return (
+        f"⚠️  PV '{pv_name}' is hostPath type — the kubelet does NOT create "
+        f"the directory on the node. Before the Pod can mount, run on node "
+        f"'{node}':\n"
+        f"    mkdir -p {path!r}\n"
+        f"{typ_note}"
+        f"  SSH:  ssh {node} 'mkdir -p {path!r}'\n"
+        f"  Verify:  ssh {node} 'ls -ld {path!r}'\n"
+        f"Without this, Pods will hit FailedMount: path ... does not exist. "
+        f"Call `validate_pv_hostpath_paths()` to see all hostPath PVs at once."
+    )
 
 
 def bootstrap_local_path_provisioner(
@@ -188,6 +256,104 @@ def _fetch_local_path_manifest() -> str:
     return text
 
 
+# ---------- hostPath PV diagnostics -----------------------------------------
+
+
+def _list_hostpath_pvs() -> list[dict]:
+    """Return normalized records for every hostPath PV in the cluster.
+
+    Each record: {name, capacity, claim_ns, claim_name, path, type, node}.
+    `claim_ns`/`claim_name` are empty strings if PV is unbound; `node` is
+    the hostname from `nodeAffinity` (best effort) or '' when unknown.
+    """
+    dc = generic._dyn_client()
+    resource = generic._resource_for_kind(dc, "PersistentVolume")
+    ret = resource.get()  # cluster-scoped
+    out: list[dict] = []
+    for item in ret.items:
+        obj = generic._to_dict(item)
+        spec = obj.get("spec", {}) or {}
+        hp = spec.get("hostPath")
+        if not hp:
+            continue
+        claim_ref = spec.get("claimRef", {}) or {}
+        out.append({
+            "name": (obj.get("metadata", {}) or {}).get("name", "?"),
+            "capacity": (spec.get("capacity", {}) or {}).get("storage", "?"),
+            "claim_ns": claim_ref.get("namespace", "") or "",
+            "claim_name": claim_ref.get("name", "") or "",
+            "path": hp.get("path", "<unknown>"),
+            "type": hp.get("type", "DirectoryOrCreate"),
+            "node": _node_for_pv(obj) or "",
+        })
+    return out
+
+
+def _format_hostpath_pv_report(host_pvs: list[dict]) -> str:
+    """Render the hostPath PV list into a CLI-friendly report with a
+    ready-to-paste `ssh` command for each entry.
+
+    Separated from `_list_hostpath_pvs` so the formatter can be unit-tested
+    without touching the apiserver.
+    """
+    if not host_pvs:
+        return (
+            "No hostPath PVs found. If PVCs sit Pending, the issue is "
+            "elsewhere (StorageClass missing, capacity, selector, etc.) — "
+            "try `get_resource(kind='Pod', ...)` to read the FailedScheduling "
+            "events."
+        )
+    lines = [f"Found {len(host_pvs)} hostPath PV(s) — hostPath volumes do "
+             f"NOT auto-create their host directory:", ""]
+    for pv in host_pvs:
+        bound_to = ""
+        if pv["claim_ns"] and pv["claim_name"]:
+            bound_to = f"  →  bound to {pv['claim_ns']}/{pv['claim_name']}"
+        node = pv["node"] or "<unknown — see PV nodeAffinity or bound Pod>"
+        lines.append(
+            f"  • {pv['name']}  ({pv['capacity']}){bound_to}\n"
+            f"      node:    {node}\n"
+            f"      path:    {pv['path']}\n"
+            f"      type:    {pv['type']}"
+            + ("  (NOT DirectoryOrCreate — directory must already exist)"
+               if pv["type"] != "DirectoryOrCreate" else "")
+            + "\n"
+            f"      check:   ssh {node} 'ls -ld {pv['path']!r} 2>/dev/null \\\n"
+            f"                  || echo MISSING; sudo mkdir -p {pv['path']!r}'\n"
+        )
+    return "\n".join(lines)
+
+
+def validate_pv_hostpath_paths() -> str:
+    """List every hostPath PV with the host path it expects, the node it's
+    pinned to, and a ready-to-paste `ssh` command to verify (and create) the
+    directory.
+
+    Background — a PV with `spec.hostPath.path=/foo` does NOT make the
+    kubelet create `/foo` on the node. If the directory is missing, kubelet
+    reports `FailedMount: path ... does not exist` and the Pod stays
+    ContainerCreating / Pending. The fix is `mkdir -p <path>` on the target
+    node BEFORE the Pod is scheduled.
+
+    This tool does not run commands on the node itself (k8s-mcp is not an
+    SSH client). It prints the exact `ssh` command the operator should run
+    for each hostPath PV, plus a `check` form that prints `MISSING` when the
+    directory is absent.
+
+    Typical use: after a StatefulSet / Deployment stays Pending with a
+    FailedMount event, call this to see whether the host directory is the
+    root cause. If the report lists no hostPath PVs, look elsewhere
+    (StorageClass missing, capacity, label selectors, etc.) — the issue is
+    not hostPath.
+
+    The host directory requirement also appears inline in
+    `create_pvc(volume_name=...)` output as a reminder, so this tool is the
+    standalone "see all of them at once" view.
+    """
+    return _format_hostpath_pv_report(_list_hostpath_pvs())
+
+
 def register(mcp) -> None:
     mcp.tool()(create_pvc)
     mcp.tool()(bootstrap_local_path_provisioner)
+    mcp.tool()(validate_pv_hostpath_paths)

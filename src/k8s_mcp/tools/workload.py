@@ -60,7 +60,12 @@ def create_deployment(
     resources: dict[str, Any] | None = None,
     image_pull_policy: str | None = None,
 ) -> str:
-    """Create a Deployment.
+    """Create a stateless Deployment — pick THIS when you have a single image
+    that doesn't need stable identity or persistent volumes.
+
+    For stateful workloads needing per-replica stable storage / network IDs,
+    use `create_statefulset` instead. For raw YAML control (init containers,
+    sidecars, multiple containers, custom PodSpec), use `apply_yaml` directly.
 
     Args:
         name: deployment name.
@@ -117,7 +122,14 @@ def create_statefulset(
     storage_class: str | None = None,
     storage_size: str = "1Gi",
 ) -> str:
-    """Create a StatefulSet with one PersistentVolumeClaim per replica.
+    """Create a StatefulSet with one PersistentVolumeClaim per replica — pick THIS
+    when you need stable network IDs (pod-0, pod-1, …) and per-pod persistent
+    storage (databases, message brokers, distributed stores).
+
+    For stateless services (web/API/cache), use `create_deployment` instead —
+    it's cheaper and faster to roll. `service_name` must already exist as a
+    headless Service (clusterIP=None); use `create_service(cluster_ip="None")`
+    first. For raw YAML control, use `apply_yaml` directly.
 
     Args:
         name: statefulset name.
@@ -185,7 +197,8 @@ def _apps_v1():
 
 
 def scale_workload(kind: str, name: str, namespace: str, replicas: int) -> str:
-    """Scale a Deployment or StatefulSet.
+    """⚠️ WRITE — patches replica count on a Deployment / StatefulSet only
+    (not DaemonSet, not Job, not CronJob; HPA-managed workloads will fight back).
 
     Args:
         kind: "Deployment" or "StatefulSet".
@@ -212,10 +225,12 @@ def scale_workload(kind: str, name: str, namespace: str, replicas: int) -> str:
 
 
 def restart_workload(kind: str, name: str, namespace: str) -> str:
-    """Trigger a rollout restart of a Deployment or StatefulSet.
+    """⚠️ WRITE — triggers a rolling restart of every Pod in a Deployment /
+    StatefulSet (Deployment / StatefulSet only; DaemonSet, Job, CronJob
+    are not supported).
 
     Implemented by patching the `kubectl.kubernetes.io/restartedAt`
-    annotation on the pod template.
+    annotation on the pod template — kubectl-equivalent.
     """
     _read_only_guard()
     _ensure_ns(namespace)
@@ -249,9 +264,13 @@ def restart_workload(kind: str, name: str, namespace: str) -> str:
 
 
 def set_image(kind: str, name: str, namespace: str, container: str, image: str) -> str:
-    """Update the image of a single container in a Deployment or StatefulSet.
+    """⚠️ WRITE — triggers a rolling update by changing one container's image on
+    a Deployment / StatefulSet (Deployment / StatefulSet only; DaemonSet, Job,
+    CronJob are not supported).
 
     Uses a JSON strategic merge patch under the hood via the kubernetes client.
+    `container` must match an existing container name in the PodSpec (case-
+    sensitive); for multi-container workloads call once per container.
     """
     _read_only_guard()
     _ensure_ns(namespace)
@@ -290,7 +309,9 @@ def set_resources(
     requests: dict[str, str] | None = None,
     limits: dict[str, str] | None = None,
 ) -> str:
-    """Update CPU / memory requests and limits for a container in a workload.
+    """⚠️ WRITE — silently overwrites the `resources:` block of one container in
+    a Deployment / StatefulSet (Deployment / StatefulSet only; DaemonSet, Job,
+    CronJob are not supported). Triggers a rolling update.
 
     Args:
         kind: "Deployment" or "StatefulSet".

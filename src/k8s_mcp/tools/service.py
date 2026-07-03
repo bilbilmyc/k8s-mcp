@@ -43,7 +43,14 @@ def create_service(
     cluster_ip: str | None = None,
     labels: dict[str, str] | None = None,
 ) -> str:
-    """Create a Service.
+    """Create a Service with manual selector/ports/type — pick THIS when you
+    know the exact pod selector and want full control over ports/type/clusterIP.
+
+    For the common case "make my Deployment reachable", prefer
+    `expose_workload` — it reads the Deployment's selector for you (kubectl
+    expose equivalent). For inbound HTTP routing into an existing Service,
+    use `create_ingress`. For raw YAML control (multi-port, headless, etc.),
+    use `apply_yaml` directly.
 
     Args:
         name: service name.
@@ -87,7 +94,14 @@ def create_ingress(
     annotations: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
 ) -> str:
-    """Create an Ingress.
+    """Create an Ingress that routes external HTTP(S) traffic to existing
+    Services — pick THIS for inbound routing (host/path → Service:port).
+
+    Each rule's `service_name` MUST already exist as a Service in the same
+    namespace. The Service must be reachable on the listed `service_port`.
+    Default `ingress_class_name="nginx"` — for Traefik / HAProxy / other
+    controllers, override explicitly. For raw YAML control (custom backends,
+    default backends, multiple TLS), use `apply_yaml` directly.
 
     Args:
         name: ingress name.
@@ -151,10 +165,13 @@ def expose_workload(
     target_port: int | None = None,
     service_type: str = "ClusterIP",
 ) -> str:
-    """Create a Service that targets an existing workload.
+    """Auto-build a Service targeting an existing Deployment / StatefulSet /
+    DaemonSet — pick THIS when you already have a workload and just want it
+    reachable. Reads the workload's `selector.matchLabels` for you.
 
-    Reads the workload's selector labels and creates a matching Service.
-    Equivalent to `kubectl expose`.
+    Equivalent to `kubectl expose <kind>/<name> --port=...`. Use `create_service`
+    instead when you need a custom selector, multi-port Service, headless
+    Service, or a Service not backed by an existing workload.
     """
     _read_only_guard()
     _ensure_ns(namespace)

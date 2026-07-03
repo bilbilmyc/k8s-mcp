@@ -61,7 +61,11 @@ def update_configmap(
     data: dict[str, str],
     merge: bool = False,
 ) -> str:
-    """Replace (or merge) a ConfigMap's `data` field.
+    """⚠️ WRITE — replace (or merge) a ConfigMap's `data` field.
+
+    ⚠️ When `merge=False` (default), the entire `data` field is REPLACED with
+    `data` — keys not present in `data` are WIPED. Pass `merge=True` to
+    overwrite only the supplied keys and keep the rest.
 
     Args:
         name, namespace: ConfigMap identity.

@@ -113,7 +113,9 @@ def rollout_undo(
     kind: str, name: str, namespace: str = "default",
     to_revision: int | None = None,
 ) -> str:
-    """Roll back a Deployment or StatefulSet.
+    """⚠️ WRITE / ⚠️ SILENT ROLLBACK — by default rolls back to the previous
+    revision (no prompt). Pass `to_revision=N` to target a specific revision;
+    use `rollout_history` first to see what's available.
 
     Args:
         kind: "Deployment" or "StatefulSet".

@@ -24,7 +24,10 @@ def create_pvc(
     storage_class: str | None = None,
     labels: dict[str, str] | None = None,
 ) -> str:
-    """Create a PersistentVolumeClaim.
+    """⚠️ WRITE / ⚠️ PROVISIONS STORAGE — claims a PersistentVolume from the
+    cluster. On cloud providers this is a billable resource (GB-month cost);
+    ensure the size and storage_class are right before confirming with the
+    user.
 
     Args:
         name: PVC name.

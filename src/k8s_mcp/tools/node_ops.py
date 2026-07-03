@@ -49,12 +49,14 @@ def _read_only_guard():
 
 
 def cordon_node(name: str) -> str:
-    """Mark a Node as unschedulable (no new pods will land on it).
+    """⚠️ WRITE — patches Node `spec.unschedulable=true`; new Pods will NOT
+    be scheduled onto this node. Existing Pods are NOT evicted.
+
+    Equivalent to `kubectl cordon <name>`. To also evict existing workloads,
+    use `drain_node` instead. To reverse, use `uncordon_node`.
 
     Args:
         name: node name.
-
-    Equivalent to `kubectl cordon <name>`.
     """
     _read_only_guard()
     core = _core_v1()
@@ -93,7 +95,8 @@ def drain_node(
     grace_period_seconds: int = -1,
     timeout_seconds: int = 60,
 ) -> str:
-    """Drain a Node: cordon + evict all evictable pods.
+    """⚠️ WRITE / ⚠️ DISRUPTIVE — cordon + evict all evictable Pods from a
+    Node. Removes running workloads; PDBs are bypassed when `force=True`.
 
     Args:
         name: node name.
@@ -106,7 +109,7 @@ def drain_node(
 
     Mirrors `kubectl drain`. Returns a summary of what happened.
 
-    Safety notes:
+    Safety:
       - Without --ignore-daemonsets / --delete-emptydir-data we refuse to evict
         those pods and report them, so you can decide whether to retry with
         flags set.

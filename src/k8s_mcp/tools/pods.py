@@ -29,7 +29,10 @@ def list_pods(
     field_selector: str | None = None,
     include_all: bool = False,
 ) -> str:
-    """List Pods in a namespace (or all namespaces).
+    """List Pods with Pod-specific columns (PHASE / RESTARTS / NODE). For a
+    generic cross-kind list, prefer `list_resources(kind="Pod", ...)` — that
+    one works on any kind (including CRDs); use THIS tool only when you need
+    Pod-specific columns or the `include_all` Succeeded/Failed filter.
 
     Args:
         namespace: namespace to list; None = all namespaces.

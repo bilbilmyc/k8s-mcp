@@ -234,13 +234,15 @@ def describe_resource(
 
 
 def replace_resource(yaml_content: str) -> str:
-    """Replace a resource (HTTP PUT semantics) — ResourceVersion is enforced.
+    """⚠️ WRITE — PUT (full replace) a resource with optimistic concurrency.
+    The current `resourceVersion` is read first and stamped into the manifest,
+    so the apiserver will REFUSE the update with a conflict error if anyone
+    else has modified the resource since we read it.
 
-    Unlike `apply_yaml` (create-or-patch), this tool sends a real PUT with
-    the resource's current `resourceVersion` attached, so the apiserver
-    will refuse the update if someone else has modified it since we read it.
-    This is the right tool when multiple agents / humans edit the same
-    resource concurrently.
+    Use this when multiple agents / humans edit the same resource concurrently
+    and you want a hard "no silent overwrite" guarantee. For the more common
+    create-or-patch flow, use `apply_yaml` instead. To preview what would
+    change without writing, use `diff_resource` first.
 
     Raises PermissionError when read-only / allowlist blocks writes.
     Raises RuntimeError when the cluster reports a version conflict.
@@ -310,14 +312,15 @@ def replace_resource(yaml_content: str) -> str:
 
 
 def diff_resource(yaml_content: str) -> str:
-    """Preview the changes `apply_yaml` would make, without applying.
-
-    For each manifest in the YAML:
+    """Read-only preview of what `apply_yaml` would change, without writing
+    anything to the cluster. For each manifest:
       - If the resource doesn't exist → "CREATE"
       - If it exists → show added/removed/changed top-level paths
 
-    Use this before apply to confirm what will change. Multi-doc YAML is
-    supported.
+    Use this BEFORE `apply_yaml` to confirm what will change. Multi-doc YAML
+    is supported. To actually apply the diff, call `apply_yaml`; if you need
+    optimistic concurrency (refuse on concurrent edits), call
+    `replace_resource` instead.
     """
     docs = [d for d in yaml.safe_load_all(yaml_content) if d is not None]
     if not docs:
@@ -409,16 +412,20 @@ def apply_yaml(yaml_content: str) -> str:
     Implements kubectl-style client-side apply:
       - If the resource does not exist → create it
       - If it exists → patch it with the supplied body
-    Server-side apply (`?fieldManager=...`) is NOT used; for our LLM-agent
-    use-case the create-or-patch flow is sufficient and more predictable.
+
+    For PREVIEW without writing, use `diff_resource` first. For optimistic-
+    concurrency PUT (refuse on concurrent edits), use `replace_resource`
+    instead. Server-side apply (`?fieldManager=...`) is NOT used; for our
+    LLM-agent use-case the create-or-patch flow is sufficient and more
+    predictable.
 
     Safety:
       - Refused when settings.read_only is True.
       - Refused when settings.namespace_allowlist is set and the manifest's
         namespace is not in the allowlist.
 
-    Best practice: ALWAYS call get_resource_yaml first to inspect current state
-    before applying, and confirm with the user.
+    Best practice: ALWAYS call `diff_resource` (or `get_resource_yaml` to
+    inspect current state) before applying, and confirm with the user.
     """
     settings = get_settings()
     if settings.read_only:

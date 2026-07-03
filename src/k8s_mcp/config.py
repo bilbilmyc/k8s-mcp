@@ -68,6 +68,13 @@ class Settings(BaseSettings):
         "https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml"
     )
 
+    # 通知 webhook 列表。JSON 字符串，每项是
+    # `{"name": "<id>", "type": "feishu|slack|wecom|generic",
+    #   "url": "https://...", "cluster_label": "<optional>"}`。
+    # 例：`K8S_MCP_NOTIFIERS='[{"name":"ops","type":"feishu",
+    #   "url":"https://open.feishu.cn/...","cluster_label":"prod"}]'`
+    notifiers: str | None = None
+
     @field_validator("namespace_allowlist", mode="before")
     @classmethod
     def _split_allowlist(cls, v: Any) -> list[str] | None:

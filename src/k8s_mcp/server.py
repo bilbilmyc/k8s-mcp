@@ -110,6 +110,7 @@ def _register_tools(mcp: FastMCP) -> None:
         metrics,
         networkpolicy,
         node_ops,
+        notifier,
         pods,
         prometheus,
         rbac,
@@ -149,6 +150,7 @@ def _register_tools(mcp: FastMCP) -> None:
     certs.register(mcp)
     health.register(mcp)
     bulk.register(mcp)
+    notifier.register(mcp)
 
 
 def main() -> None:

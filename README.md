@@ -115,6 +115,23 @@ export K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32)
 export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 ```
 
+## 通知 webhook
+
+把 `cluster_health_snapshot` / `get_certificate_expiry` 这类只读结果主动推到 IM：
+
+```bash
+export K8S_MCP_NOTIFIERS='[
+  {"name": "ops-feishu", "type": "feishu",
+   "url": "https://open.feishu.cn/open-apis/bot/v2/hook/...",
+   "cluster_label": "prod"},
+  {"name": "oncall", "type": "slack",
+   "url": "https://hooks.slack.com/services/...",
+   "cluster_label": "prod"}
+]'
+```
+
+每条 `{name, type, url, cluster_label?}`。`type` 支持 `feishu` / `slack` / `wecom` / `generic`，payload 拼装由 `notify` 工具按 type 处理，不需要 Agent 自己拼。`cluster_label` 加在消息前缀上，方便一个 webhook 多集群复用。
+
 详见 [docs/env.md](./docs/env.md)。
 
 ## 工具目录（约 50 个）
@@ -148,6 +165,7 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `explain_resource(kind, field_path?, api_version?)` — 通过 OpenAPI schema 做 `kubectl explain`
 - `get_certificate_expiry()` — 聚合查证书过期时间。**apiserver 自己的 serving cert 无法通过 K8s API 查**，但 MCP server 看得见的 4 个源都打包读：`K8S_MCP_API_CA_CERT` / in-cluster SA bundle / kubeconfig CA / kubeconfig client cert（最后那个仅当 kubeconfig 用证书认证时存在）。每个证书给出 Subject / Issuer / NotBefore / NotAfter / 剩余天数 / 状态（✅ valid / ⚠️<30d / ❌<7d / ❌EXPIRED），按天数升序排，最近的过期先显示，并自动追加 "Action needed" 段落提醒。**不靠 apiserver 也不发请求**——纯本地解析。
 - `cluster_health_snapshot(namespaces=None, events_minutes=60, restart_threshold=3)` — ⭐ **AI 运维的入口工具**：一次调用返回 7 维度的集群体检报告（Nodes / Pending Pods / 异常重启 / HPA / Orphan PVs / 证书 / 最近告警事件），顶部带 `✅ HEALTHY` / `⚠️ ATTENTION` 一行汇总。**每节独立容错**，单节 apiserver 报错不会让整份报告空白。被问「集群现在怎么样？」时一次调这个就够；要钻细节再用 `describe_resource` / `get_pod_logs` 跟进。
+- `notify(message, level="info", notifier_name=None, title=None)` — 📤 **主动推送**：把任意消息（典型用法是把 `cluster_health_snapshot` 的输出）POST 到一个或多个 webhook。**webhook 列表走 env 配置**（`K8S_MCP_NOTIFIERS='[{name, type, url, cluster_label?}, ...]'`），type 支持 `feishu` / `slack` / `wecom` / `generic`，payload 拼装工具内部按 type 处理。返回每条 webhook 的 `✅/❌` 结果 + 错误细节，失败不抛异常（webhook 死了不能把主流程拖垮）。`notifier_name` 指定只发给某个；不指定就 broadcast。
 
 ### 写（受 read-only 和 namespace-allowlist 限制）
 
@@ -450,7 +468,8 @@ src/k8s_mcp/
     ├── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
     ├── certs.py      # get_certificate_expiry（CRD + 内置 kind 都用 DynamicClient）
     ├── health.py     # cluster_health_snapshot（7 维集群体检）
-    └── bulk.py       # bulk_set_image / bulk_restart / bulk_scale
+    ├── bulk.py       # bulk_set_image / bulk_restart / bulk_scale
+    └── notifier.py   # notify 推送 webhook
 ```
 
 `generic.py` 还额外暴露 `replace_resource`（PUT 带 ResourceVersion）和

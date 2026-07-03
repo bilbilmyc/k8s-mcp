@@ -111,6 +111,27 @@ export K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32)
 export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 ```
 
+## Notifier webhooks
+
+Push the output of read-only tools (typically `cluster_health_snapshot` /
+`get_certificate_expiry`) to IM channels:
+
+```bash
+export K8S_MCP_NOTIFIERS='[
+  {"name": "ops-feishu", "type": "feishu",
+   "url": "https://open.feishu.cn/open-apis/bot/v2/hook/...",
+   "cluster_label": "prod"},
+  {"name": "oncall", "type": "slack",
+   "url": "https://hooks.slack.com/services/...",
+   "cluster_label": "prod"}
+]'
+```
+
+Each entry: `{name, type, url, cluster_label?}`. `type` is `feishu` /
+`slack` / `wecom` / `generic`; the `notify` tool assembles the per-type
+JSON payload so the agent doesn't have to. `cluster_label` is prefixed
+on the message so a single webhook can multiplex multiple clusters.
+
 ## Tool catalog (~50 tools)
 
 ### Read (always safe)
@@ -141,6 +162,7 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 - `explain_resource(kind, field_path?, api_version?)` — `kubectl explain` over the OpenAPI schema
 - `get_certificate_expiry()` — aggregate cluster-certificate expiry report. **The apiserver's own serving cert isn't queryable via the K8s API**, but the 4 sources the MCP server can see (`K8S_MCP_API_CA_CERT` / in-cluster SA bundle / kubeconfig CA / kubeconfig client cert — last one only when the kubeconfig uses cert auth) are read in one shot. Each row gives Subject / Issuer / NotBefore / NotAfter / days-left / status (✅ valid / ⚠️<30d / ❌<7d / ❌EXPIRED). Sorted ascending by days-left, with an "Action needed" block highlighting anything not yet expiring safely. **Local parse — no apiserver calls.**
 - `cluster_health_snapshot(namespaces=None, events_minutes=60, restart_threshold=3)` — ⭐ **AI-ops entry point**: one call returns a 7-section cluster health report (Nodes / Pending Pods / Abnormal Restarts / HPA / Orphan PVs / Certificates / Recent Warning Events), with a `✅ HEALTHY` / `⚠️ ATTENTION` one-liner at the top. **Each section is independently error-bounded** — a single apiserver hiccup won't blank the whole report. Use this when asked "how's the cluster?"; drill into details with `describe_resource` / `get_pod_logs`.
+- `notify(message, level="info", notifier_name=None, title=None)` — 📤 **proactive push**: POST any message (typically the output of `cluster_health_snapshot`) to one or more webhooks. **Webhook list is env-configured** (`K8S_MCP_NOTIFIERS='[{name, type, url, cluster_label?}, ...]'`); types `feishu` / `slack` / `wecom` / `generic` are supported, payload assembly is per-type. Returns a per-notifier `✅/❌` results table; HTTP errors don't raise (a dead webhook shouldn't take down the caller). `notifier_name` scopes to one; default broadcasts.
 
 ### Write (subject to read-only and namespace-allowlist)
 - `apply_yaml(yaml_content)` — apply single or multi-doc manifest
@@ -428,7 +450,8 @@ src/k8s_mcp/
     ├── storage.py    # create_pvc
     ├── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
     ├── health.py     # cluster_health_snapshot (7-section cluster health)
-    └── bulk.py       # bulk_set_image / bulk_restart / bulk_scale
+    ├── bulk.py       # bulk_set_image / bulk_restart / bulk_scale
+    └── notifier.py   # notify (webhook push to feishu/slack/wecom/generic)
 ```
 
 `generic.py` additionally exposes `replace_resource` (PUT with ResourceVersion)

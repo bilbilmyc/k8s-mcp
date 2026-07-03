@@ -57,14 +57,14 @@ k8s-mcp 通过 pydantic-settings 读取环境变量，所有变量以 `K8S_MCP_`
 
 ### Prometheus（可选，监控查询）
 
-Prometheus 的 URL 解析有 4 层优先级，**由高到低**：
+**URL 解析 4 层优先级（由高到低）**：
 
 1. **工具参数 `prometheus_url=`** — Agent 用 `find_prometheus_service()`
    找到的 URL 直接传给 `prometheus_query` / `prometheus_query_range` /
-   `pod_metrics`。这是不同集群差异最大的场景的**主要协议**（每个集群
-   把 Prometheus 装在不同 namespace / 不同 Service 名）。
-2. **环境变量 `K8S_MCP_PROMETHEUS_URL`** — 全局兜底；设了就跳过发现，
-   适合 Prometheus 在固定地址的环境。
+   `pod_metrics`。这是不同集群差异最大的场景的**主要协议**。
+2. **`K8S_MCP_PROMETHEUS_URL`** — 全局兜底；设了就跳过发现，
+   适合 Prometheus 在固定地址的环境。**注意**：如果设的是 ClusterIP
+   （`10.96.x.x`），从外部访问会被 RST。
 3. **硬编码小候选名单自动扫描** — `monitoring` /
    `kube-prometheus` / `prometheus` / `observability` 这几个 namespace
    里名为 `kube-prometheus-stack-prometheus` / `prometheus-operated` /
@@ -72,57 +72,39 @@ Prometheus 的 URL 解析有 4 层优先级，**由高到低**：
    安装。
 4. **找不到** — 工具返回中文友好提示，引导用户给 URL。
 
-Agent 工作流推荐（**两套 ClusterIP 桥接，按场景选**）：
+Agent 推荐的 ClusterIP 桥接 3 步协议详见
+[tools.md → Prometheus 端点发现 + 桥接协议](./tools.md#prometheus-工具prometheus_query-prometheus_query_range-pod_metrics)：
 
 ```
 find_prometheus_service(namespace=None)
   ↓ 拿到 NAMESPACE / NAME / TYPE / RECOMMENDED / URL 表
-  ↓ RECOMMENDED 列直接是下一步的字面调用签名，Agent 照抄即可
+  ↓ RECOMMENDED 列字面写明下一步调用，Agent 照抄
   ↓
-  ├── TYPE=NodePort / LoadBalancer?
-  │      ↓ RECOMMENDED 列是 "✅ direct ..."
-  │   prometheus_query(promql, prometheus_url=<URL>)
-  │      （URL 里的 <node-ip> / <lb-ip> 通过 list_resources(kind=Node)
-  │       或 Service.status.loadBalancer.ingress 替换）
-  │
-  ├── TYPE=ClusterIP，节点 IP 可路由到 MCP 客户端？（⭐ 推荐）
-  │      ↓ RECOMMENDED 列是
-  │      ↓   expose_prometheus_as_nodeport(namespace='<ns>',
-  │      ↓                              service_name='<name>')
-  │      ↓ 直接照抄
-  │   expose_prometheus_as_nodeport(namespace, service_name)
-  │      ↓ 返回 nodePort 数字
-  │   list_resources(kind='Node') 拿节点 IP
-  │      ↓
-  │   prometheus_query(promql, prometheus_url='http://<node-ip>:<nodePort>')
-  │
-  └── TYPE=ClusterIP，节点 IP 不可路由？（兜底）
-         ↓ 依赖 PATH 上的 kubectl；macOS 沙箱下偶尔出
-         ↓ "[Errno 61] Connection refused"（IPv6 绑定问题）
-      start_prometheus_port_forward(namespace, service_name)
-         ↓ 返回 http://127.0.0.1:<port>
-      prometheus_query(promql, prometheus_url='http://127.0.0.1:<port>')
+  ├── TYPE=NodePort / LoadBalancer → 直接用 URL（替换 <node-ip> / <lb-ip>）
+  ├── TYPE=ClusterIP, 节点 IP 可路由
+  │     → expose_prometheus_as_nodeport(namespace, service_name)
+  │     → list_resources(kind="Node") 拿节点 IP
+  │     → prometheus_query(promql, prometheus_url='http://<node-ip>:<nodePort>')
+  └── TYPE=ClusterIP, 节点 IP 不可路由（公有云托管 K8s 等）
+        → 没有兜底；用户自行解决（SSH-tunnel / in-cluster MCP server 模式）
 ```
-
-> ⚠️ `find_prometheus_service()` 的 ClusterIP 行 URL 列里会标注
-> "cluster-internal — NOT reachable from MCP client"，目的是**阻断
-> Agent 直接拿 `http://10.96.x.x:9090` 去查**——这种虚拟 IP 只能在集
-> 群 pod 内路由，MCP server 跑在用户机器（Cherry Studio 客户端内），
-> 从外面访问 10.x 在路由层就 RST。两条桥接路：
-> - ⭐ `expose_prometheus_as_nodeport()` — 创建 K8s 一等公民 NodePort，
->   原 ClusterIP Service 保持不动；适合节点 IP 内网可达的环境（VPC /
->   on-prem / dev box / minikube / kind）。**nodePort 由 apiserver
->   atomic 分配，不会冲突**（避免客户端 scan-then-create 的 TOCTOU
->   race）。**不依赖任何外部命令**。
-> - `start_prometheus_port_forward()` — 起 `kubectl port-forward`，返
->   回 127.0.0.1 URL；适合节点 IP 不可达的环境。**要求 `kubectl` 在 PATH**，
->   macOS 沙箱下偶尔出 `[Errno 61] Connection refused`（IPv6 绑定问题），
->   看到错误时考虑重启 MCP server 或换 NodePort。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `K8S_MCP_PROMETHEUS_URL` | (空) | 完整 URL，例如 `http://prometheus.monitoring.svc.cluster.local:9090`。设了就跳过自动探测。注意：如果设的是 ClusterIP，从外部访问会失败。 |
+| `K8S_MCP_PROMETHEUS_URL` | (空) | 完整 URL，例如 `http://prometheus.monitoring.svc.cluster.local:9090`。设了就跳过自动探测。 |
 | `K8S_MCP_PROMETHEUS_BEARER_TOKEN` | (空) | 可选 bearer token。多数本地 Prometheus 不需要。 |
+
+### 通知 webhook
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `K8S_MCP_NOTIFIERS` | (空) | JSON 数组，每条 `{name, type, url, cluster_label?}`。`type` 支持 `feishu` / `slack` / `wecom` / `generic`，由 `notify` 工具按 type 拼 payload。 |
+
+### dev / 离线
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `K8S_MCP_LOCAL_PATH_PROVISIONER_URL` | Rancher 官方 manifest URL | `bootstrap_local_path_provisioner` 离线 / 内网场景下指向自托管镜像的 manifest。 |
 
 ## 完整示例（`~/.zshrc` 或 `.env`）
 

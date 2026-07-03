@@ -1,7 +1,7 @@
 [project]
 name = "k8s-mcp-bilbilmyc"
-version = "0.1.2"
-description = "Kubernetes MCP server for LLM agents — 74 tools covering CRUD on workloads/services/storage/RBAC, logs/events, Prometheus queries, bulk ops with HMAC 2-step confirmation."
+version = "0.1.3"
+description = "Kubernetes MCP server for LLM agents — 70 tools covering CRUD on workloads/services/storage/RBAC, logs/events, Prometheus queries, bulk ops with HMAC 2-step confirmation."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [

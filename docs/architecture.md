@@ -50,7 +50,7 @@ src/k8s_mcp/
 
 每个 `tools/*.py` 模块暴露一个 `register(mcp)` 函数。新增工具模块只要在
 `server.py` 的 `_register_tools` 里 import + 调用一次，**不需要**改其他模块。
-74 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
+70 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
 
 ### 配置 + 守门分层
 
@@ -83,7 +83,7 @@ LLM Agent（Cherry Studio / Claude Desktop）的 UI 重启**不会**重启 MCP s
 
 ### 测试策略
 
-419 个测试覆盖所有写 / 读 / 守门路径。模式：
+416 个测试覆盖所有写 / 读 / 守门路径。模式：
 
 - **mock ApiClient** —— 在 tool 模块级别 monkeypatch `_core_v1` / `_apps_v1` 等
   为 recording fake，捕获调用 + 模拟 404 / Forbidden。

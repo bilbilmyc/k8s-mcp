@@ -12,22 +12,9 @@ from k8s_mcp.tools import prometheus
 def _clear():
     reset_settings_cache()
     prometheus.reset_prometheus_discovery_cache()
-    prometheus._PF_REGISTRY.clear()
     yield
     reset_settings_cache()
     prometheus.reset_prometheus_discovery_cache()
-    prometheus._PF_REGISTRY.clear()
-
-
-@pytest.fixture(autouse=True)
-def _hide_real_kubectl(monkeypatch):
-    """Default no-op kubectl path; tests that need subprocess override it.
-
-    Without this, when `service_port` validation accidentally hits a real
-    kubectl in `/usr/local/bin` the test could spawn one. The validation
-    path doesn't reach `shutil.which`, but defence in depth.
-    """
-    monkeypatch.setattr(prometheus.shutil, "which", lambda name: None)
 
 
 # =============================================================================
@@ -271,6 +258,90 @@ def test_query_empty_returns_helpful_notice(monkeypatch):
     assert "no data points" in out
     # Don't return empty string — many MCP clients hide it
     assert out.strip() != ""
+
+
+def test_extract_promql_metric_name_handles_functions_and_ranges():
+    """Metric extraction must skip topk/sum/rate and pick the real name."""
+    assert prometheus._extract_promql_metric_name(
+        'topk(5, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{container!=""}[5m])))'
+    ) == "container_cpu_usage_seconds_total"
+    assert prometheus._extract_promql_metric_name('up{job="nope"}') == "up"
+    assert prometheus._extract_promql_metric_name(
+        "sum(rate(node_cpu_seconds_total[5m]))"
+    ) == "node_cpu_seconds_total"
+    assert prometheus._extract_promql_metric_name("vector(0)") == ""
+    assert prometheus._extract_promql_metric_name("") == ""
+
+
+def test_empty_non_cadvisor_does_not_extra_probe(monkeypatch):
+    """A bare `up{...}` empty must NOT trigger the cAdvisor diagnostic probe —
+    that would mean a needless second API call on the common case.
+    """
+    _fake_settings(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_get(path, params, base_url, bearer_token):
+        calls["n"] += 1
+        return {"status": "success", "data": {"resultType": "vector", "result": []}}
+
+    monkeypatch.setattr(prometheus, "_prom_get", fake_get)
+    out = prometheus.prometheus_query('up{job="nope"}')
+    assert "no data points" in out
+    assert "kubelet" not in out
+    assert calls["n"] == 1  # only the original query, no diagnostic probe
+
+
+def test_empty_cadvisor_query_probes_jobs_and_prompts_kubelet(monkeypatch):
+    """The cAdvisor empty-result path must (a) probe actual jobs and (b)
+    surface the `job="kubelet"` narrowing filter in its output.
+    """
+    _fake_settings(monkeypatch)
+    calls: list[str] = []
+
+    def fake_get(path, params, base_url, bearer_token):
+        calls.append(params.get("query", ""))
+        if "group by (job)" in calls[-1]:
+            return {
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {"metric": {"job": "kubelet"}, "value": [1, "22"]},
+                        {"metric": {"job": "prometheus"}, "value": [1, "10"]},
+                    ],
+                },
+            }
+        return {"status": "success", "data": {"resultType": "vector", "result": []}}
+
+    monkeypatch.setattr(prometheus, "_prom_get", fake_get)
+    out = prometheus.prometheus_query(
+        'topk(5, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{container!=""}[5m])))'
+    )
+    assert "no data points" in out
+    assert "kubelet" in out
+    assert "prometheus" in out
+    assert 'job="kubelet"' in out
+    assert len(calls) == 2  # original + one diagnostic probe
+    assert "group by (job) (container_cpu_usage_seconds_total)" in calls[1]
+
+
+def test_empty_cadvisor_diagnostic_silent_when_probe_errors(monkeypatch):
+    """If the diagnostic probe itself errors (e.g. Prometheus down), the
+    diagnostic must NOT mask the original empty-result message.
+    """
+    _fake_settings(monkeypatch)
+
+    def fake_get(path, params, base_url, bearer_token):
+        if "group by (job)" in params.get("query", ""):
+            raise ValueError("simulated Prometheus down")
+        return {"status": "success", "data": {"resultType": "vector", "result": []}}
+
+    monkeypatch.setattr(prometheus, "_prom_get", fake_get)
+    out = prometheus.prometheus_query(
+        'container_memory_working_set_bytes{job="kubelet"}'
+    )
+    assert "no data points" in out
+
 
 
 def test_query_prometheus_error_raises_with_details(monkeypatch):
@@ -570,10 +641,9 @@ def test_register_adds_all_tools():
     assert "prometheus_query_range" in calls
     assert "pod_metrics" in calls
     assert "find_prometheus_service" in calls
-    assert "start_prometheus_port_forward" in calls
-    assert "list_port_forwards" in calls
-    assert "stop_port_forward" in calls
     assert "expose_prometheus_as_nodeport" in calls
+    # port-forward tools were intentionally removed — see git history
+    # for the macOS/IPv6 rationale.
 
 
 # =============================================================================
@@ -835,12 +905,10 @@ def test_find_prometheus_service_clusterip_row_recommends_nodeport(monkeypatch):
     assert "http://10.96.42.7:9090" in out
     assert "NOT reachable" in out
 
-    # Guidance block — must promote the NodePort tool and warn against
-    # port-forward on macOS.
+    # Guidance block — must promote the NodePort tool (the port-forward
+    # warning lived here before; it's now in NodePort's docstring).
     assert "RECOMMENDED" in out
     assert "expose_prometheus_as_nodeport" in out
-    # Guidance mentions the port-forward caveat only when ClusterIP rows exist.
-    assert "macOS" in out or "sandbox" in out
 
 
 def test_find_prometheus_service_nodeport_row_says_direct(monkeypatch):
@@ -962,231 +1030,7 @@ def test_find_prometheus_service_guidance_omits_portforward_warning_when_only_no
     assert "[Errno 61]" not in out
 
 
-# =============================================================================
-# port_forward — ClusterIP bridge
-# =============================================================================
 
-
-class _FakeProc:
-    """Mimics enough of subprocess.Popen for the port-forward tests."""
-
-    def __init__(self, pid=4242, returncode=None, stderr=b""):
-        self.pid = pid
-        self.returncode = returncode
-        self._stderr = stderr
-        self._waited: list[float | None] = []
-        self.killed = False
-        self.terminated = False
-
-    def poll(self):
-        return self.returncode
-
-    def wait(self, timeout=None):
-        self._waited.append(timeout)
-        return self.returncode or 0
-
-    def terminate(self):
-        self.terminated = True
-
-    def stderr_read(self):
-        return self._stderr
-
-
-def _install_fake_kubectl(monkeypatch, proc_to_return):
-    """Make `which('kubectl')` truthy AND `Popen` return our fake proc."""
-    monkeypatch.setattr(prometheus.shutil, "which", lambda name: "/fake/kubectl" if name == "kubectl" else None)
-
-
-def test_port_forward_starts_and_returns_url(monkeypatch):
-    """Happy path: kubectl exists, Popen succeeds, port comes up → URL returned."""
-    fake_proc = _FakeProc(pid=1234)
-
-    _install_fake_kubectl(monkeypatch, fake_proc)
-    # Popen returns the fake proc
-    monkeypatch.setattr(
-        prometheus.subprocess, "Popen",
-        lambda *a, **kw: fake_proc,
-    )
-    # Skip the actual TCP probe — pretend port is bound immediately
-    monkeypatch.setattr(prometheus, "_wait_port_ready", lambda *a, **kw: None)
-
-    out = prometheus.start_prometheus_port_forward(
-        namespace="monitoring",
-        service_name="kube-prometheus-stack-prometheus",
-    )
-    assert "127.0.0.1" in out
-    assert "monitoring/kube-prometheus-stack-prometheus:9090→127.0.0.1:" in out
-    assert "prometheus_url=" in out  # the explicit breadcrumb
-    # Registered
-    assert len(prometheus._PF_REGISTRY) == 1
-    fid = next(iter(prometheus._PF_REGISTRY))
-    assert "kube-prometheus-stack-prometheus" in fid
-
-
-def test_port_forward_idempotent_returns_existing(monkeypatch):
-    """Asking for the same forward twice doesn't spawn a second subprocess."""
-    fake_proc = _FakeProc(pid=1234)
-    _install_fake_kubectl(monkeypatch, fake_proc)
-    call_counts = {"popen": 0}
-
-    def counting_popen(*a, **kw):
-        call_counts["popen"] += 1
-        return fake_proc
-
-    monkeypatch.setattr(prometheus.subprocess, "Popen", counting_popen)
-    monkeypatch.setattr(prometheus, "_wait_port_ready", lambda *a, **kw: None)
-
-    prometheus.start_prometheus_port_forward("ns1", "svc1")
-    out = prometheus.start_prometheus_port_forward("ns1", "svc1")
-    assert call_counts["popen"] == 1
-    assert "already active" in out
-
-
-def test_port_forward_without_kubectl_raises(monkeypatch):
-    """If kubectl isn't installed, surface a clear message — don't crash."""
-    # `_hide_real_kubectl` fixture leaves which() returning None
-    with pytest.raises(RuntimeError, match="kubectl"):
-        prometheus.start_prometheus_port_forward("monitoring", "prometheus")
-
-
-def test_port_forward_kubectl_exits_immediately_raises(monkeypatch):
-    """If kubectl spawns and immediately dies, the tool must report it."""
-    fake_proc = _FakeProc(pid=1234, returncode=1, stderr=b"connection refused")
-    _install_fake_kubectl(monkeypatch, fake_proc)
-    monkeypatch.setattr(prometheus.subprocess, "Popen", lambda *a, **kw: fake_proc)
-    # Simulate port never coming up
-    def never(*a, **kw):
-        raise TimeoutError("not ready in 10s")
-    monkeypatch.setattr(prometheus, "_wait_port_ready", never)
-
-    with pytest.raises(RuntimeError, match="failed to come up"):
-        prometheus.start_prometheus_port_forward("monitoring", "prometheus")
-    # Must NOT have left a zombie in the registry
-    assert prometheus._PF_REGISTRY == {}
-
-
-def test_port_forward_rejects_unsafe_namespace(monkeypatch):
-    """Namespace input is validated — prevents `kubectl -- foo` style abuse."""
-    fake_proc = _FakeProc()
-    _install_fake_kubectl(monkeypatch, fake_proc)
-    monkeypatch.setattr(prometheus.subprocess, "Popen", lambda *a, **kw: fake_proc)
-    monkeypatch.setattr(prometheus, "_wait_port_ready", lambda *a, **kw: None)
-
-    with pytest.raises(ValueError, match="invalid namespace"):
-        prometheus.start_prometheus_port_forward(
-            namespace="moni;toring && rm -rf /",
-            service_name="prometheus",
-        )
-
-
-def test_port_forward_validates_port_range(monkeypatch):
-    fake_proc = _FakeProc()
-    _install_fake_kubectl(monkeypatch, fake_proc)
-    monkeypatch.setattr(prometheus.subprocess, "Popen", lambda *a, **kw: fake_proc)
-
-    with pytest.raises(ValueError, match="outside 1..65535"):
-        prometheus.start_prometheus_port_forward(
-            "monitoring", "prom", service_port=99999,
-        )
-    with pytest.raises(ValueError, match="not an integer"):
-        prometheus.start_prometheus_port_forward(
-            "monitoring", "prom", service_port="abc",
-        )
-
-
-def test_list_port_forwards_empty(monkeypatch):
-    monkeypatch.setattr(prometheus, "_prune_dead_forwards", lambda: None)
-    out = prometheus.list_port_forwards()
-    assert "No active port-forwards" in out
-    assert "start_prometheus_port_forward" in out
-
-
-def test_list_port_forwards_shows_active(monkeypatch):
-    """Active forwards are listed with FORWARD_ID / URL / PID / AGE."""
-    monkeypatch.setattr(prometheus, "_prune_dead_forwards", lambda: None)
-    fake_proc = _FakeProc(pid=9999)
-    monkeypatch.setattr(prometheus, "_PF_REGISTRY", {
-        "ns/svc:9090→127.0.0.1:34567": {
-            "proc": fake_proc,
-            "namespace": "ns",
-            "service": "svc",
-            "service_port": 9090,
-            "local_port": 34567,
-            "url": "http://127.0.0.1:34567",
-            "started_at": prometheus.time.time() - 30,
-            "pid": 9999,
-        },
-    })
-    out = prometheus.list_port_forwards()
-    assert "ns/svc:9090→127.0.0.1:34567" in out
-    assert "http://127.0.0.1:34567" in out
-    assert "9999" in out
-    assert "AGE" in out
-
-
-def test_stop_port_forward_terminates_proc(monkeypatch):
-    fake_proc = _FakeProc(pid=9999)  # still alive
-    monkeypatch.setattr(prometheus, "_PF_REGISTRY", {
-        "ns/svc:9090→127.0.0.1:34567": {
-            "proc": fake_proc,
-            "namespace": "ns",
-            "service": "svc",
-            "service_port": 9090,
-            "local_port": 34567,
-            "url": "http://127.0.0.1:34567",
-            "started_at": prometheus.time.time(),
-            "pid": 9999,
-        },
-    })
-    sigterm_calls: list[int] = []
-    monkeypatch.setattr(
-        prometheus.os, "killpg",
-        lambda pid, sig: sigterm_calls.append((pid, sig)),
-    )
-
-    out = prometheus.stop_port_forward("ns/svc:9090→127.0.0.1:34567")
-    assert "Stopped" in out
-    assert sigterm_calls == [(9999, prometheus.signal.SIGTERM)]
-    assert prometheus._PF_REGISTRY == {}
-
-
-def test_stop_port_forward_missing_id_is_noop(monkeypatch):
-    monkeypatch.setattr(prometheus, "_PF_REGISTRY", {})
-    out = prometheus.stop_port_forward("nonexistent")
-    assert "No port-forward" in out
-    assert "list_port_forwards" in out
-
-
-def test_stop_port_forward_already_dead_is_ok(monkeypatch):
-    """If the subprocess died on its own, stop_port_forward still returns OK."""
-    fake_proc = _FakeProc(pid=9999, returncode=137)  # already dead
-    monkeypatch.setattr(prometheus, "_PF_REGISTRY", {
-        "ns/svc:9090→127.0.0.1:34567": {
-            "proc": fake_proc,
-            "namespace": "ns", "service": "svc",
-            "service_port": 9090, "local_port": 34567,
-            "url": "http://127.0.0.1:34567",
-            "started_at": 0.0, "pid": 9999,
-        },
-    })
-    out = prometheus.stop_port_forward("ns/svc:9090→127.0.0.1:34567")
-    assert "Stopped" in out
-    assert prometheus._PF_REGISTRY == {}
-
-
-def test_prune_dead_forwards_removes_dead(monkeypatch):
-    live = _FakeProc(pid=10)  # poll() → None (alive)
-    dead = _FakeProc(pid=20, returncode=1)  # poll() → 1 (dead)
-    monkeypatch.setattr(prometheus, "_PF_REGISTRY", {
-        "alive-id": {"proc": live},
-        "dead-id": {"proc": dead},
-    })
-    prometheus._prune_dead_forwards()
-    assert "alive-id" in prometheus._PF_REGISTRY
-    assert "dead-id" not in prometheus._PF_REGISTRY
-
-
-# =============================================================================
 # expose_prometheus_as_nodeport — ClusterIP → NodePort clone
 # =============================================================================
 

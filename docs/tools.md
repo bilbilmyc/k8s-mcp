@@ -250,12 +250,10 @@ k8s-mcp 走"三层发现 + 两套桥接"：
      但提交之间被别的客户端先占了，导致 422）。Agent 通过
      `list_resources(kind=Node)` 拿到节点 IP，然后用
      `http://<node-ip>:<node_port>` 去查。**不依赖 kubectl**。
-   - **`TYPE=ClusterIP` 但节点 IP 不可路由**（远程 / 多层 NAT / 严格防
-     火墙，常见于公有云托管 K8s）→ 退到兜底：`start_prometheus_port_forward(ns, svc)`
-     起 kubectl port-forward，拿 `http://127.0.0.1:<local>` 给工具。
-     **前提：PATH 上有 `kubectl`**；macOS 沙箱下偶尔会撞 IPv6 绑定
-     问题，Agent 看到 `[Errno 61] Connection refused` 时考虑重启 MCP
-     或换 NodePort。
+   - **`TYPE=ClusterIP` 但节点 IP 不可路由**（远程 / 多层 NAT / 严格
+     防火墙，常见于公有云托管 K8s）→ 没有 ClusterIP → NodePort 之外的
+     兜底。用户在这种场景下需自己解决节点 IP 的可达性，例如直接
+     SSH-tunnel 或改用 in-cluster 的 MCP server 模式。
 
 3. **Agent 拿 URL 调 Prometheus 工具** —— `prometheus_query(promql,
    prometheus_url=<URL>)` / `prometheus_query_range(...)` /
@@ -265,14 +263,14 @@ k8s-mcp 走"三层发现 + 两套桥接"：
 否则有一个"小候选名单"兜底（`monitoring/kube-prometheus-stack-prometheus`
 等常用组合），兜底失败就返回中文友好的"问用户"提示。
 
-### 两种桥接的对比
+### 桥接方案（ClusterIP → 集群外可达）
 
-| 方案 | 推荐度 | 外部依赖 | 是否需要持续进程 | 生命周期 | 谁负责 |
-| --- | --- | --- | --- | --- | --- |
-| `expose_prometheus_as_nodeport` | ⭐ ClusterIP 默认 | 无 | 否（K8s 原语） | 创建后一直在集群里 | 用 `delete_resource(Service)` 清理 |
-| `start_prometheus_port_forward` | 节点 IP 不可达时兜底 | `kubectl` 二进制 | 是（subprocess） | MCP server 重启时自动 kill | 用 `stop_port_forward` 显式清理 |
+`expose_prometheus_as_nodeport` 是 ClusterIP Prometheus 的唯一推荐桥接：
+
+| 方案 | 推荐度 | 外部依赖 | 是否需要持续进程 | 生命周期 |
+| --- | --- | --- | --- | --- |
+| `expose_prometheus_as_nodeport` | ⭐ ClusterIP 默认 | 无 | 否（K8s 原语） | 创建后一直在集群里，delete_resource(Service) 清理 |
 
 **`expose_prometheus_as_nodeport` 在 read-only 模式下不可用**——它创建
-新 Service，read-only 整个写流程都被拒。`start_prometheus_port_forward`
-**也不依赖**读/写权限（它只是起本地端口转发）。两种桥接都要尊重
-`K8S_MCP_NAMESPACE_ALLOWLIST`：Service 创建或 port-forward 都校验目标 namespace。
+新 Service，read-only 整个写流程都被拒。仍然要尊重
+`K8S_MCP_NAMESPACE_ALLOWLIST`：Service 创建校验目标 namespace。

@@ -56,7 +56,7 @@ k8s 不会自动按 hostPath path 匹配）。
 ## 写工具返回 `Forbidden`？
 
 调 `whoami(namespace="<目标 ns>")` 看身份 + 有效权限——能直接定位是 SA
-权限不够还是 namespace 选错。详见 [tools.md → `whoami`](./tools.md#whominamespacedefault)。
+权限不够还是 namespace 选错。详见 [tools.md → `whoami`](./tools.md#whoaminamespacedefault)。
 
 ---
 
@@ -65,7 +65,7 @@ k8s 不会自动按 hostPath path 匹配）。
 1. `find_prometheus_service(namespace=None)` 先扫一遍。
 2. 看 `RECOMMENDED` 列的字面签名，照抄下一步调用。
 3. 三种 TYPE 三种走法（NodePort / ClusterIP / ClusterIP 不可路由）详见
-   [tools.md → Prometheus 端点发现 + 桥接协议](./tools.md#prometheus-工具prometheus_query--prometheus_query_range--pod_metrics)。
+   [tools.md → Prometheus 端点发现 + 桥接协议](./tools.md#prometheus-工具prometheus_query-prometheus_query_range-pod_metrics)。
 
 ---
 

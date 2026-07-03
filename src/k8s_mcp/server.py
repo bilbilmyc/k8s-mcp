@@ -13,12 +13,55 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+
+class _K8sMCP(FastMCP):
+    """FastMCP subclass that defaults structured_output=None → False.
+
+    FastMCP 1.28.1 wraps tools that have a typed return (incl. `-> str`) in
+    a `{"result": ...}` envelope and emits an outputSchema. Cherry Studio
+    then JSON-encodes that envelope into `content[0].text`, forcing agent
+    code to unwrap a second layer just to read the table string. With
+    structured_output=False, outputSchema is None and `content[0].text`
+    is the raw string — what Claude Desktop / spec-compliant clients
+    show anyway.
+
+    Tools that genuinely want structured content can opt in explicitly
+    with `@mcp.tool(structured_output=True)`.
+    """
+
+    def add_tool(
+        self,
+        fn,
+        name=None,
+        title=None,
+        description=None,
+        annotations=None,
+        icons=None,
+        meta=None,
+        structured_output: bool | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if structured_output is None:
+            structured_output = False
+        super().add_tool(
+            fn,
+            name=name,
+            title=title,
+            description=description,
+            annotations=annotations,
+            icons=icons,
+            meta=meta,
+            structured_output=structured_output,
+            **kwargs,
+        )
 
 
 def create_server(settings: Settings | None = None) -> FastMCP:
@@ -35,7 +78,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     )
     logger.info("k8s-mcp starting (read_only=%s)", settings.read_only)
 
-    mcp = FastMCP("k8s-mcp")
+    mcp = _K8sMCP("k8s-mcp")
 
     @mcp.tool()
     def ping() -> str:

@@ -77,6 +77,10 @@ def get_pod_logs(
     (default_tail_lines), `max_bytes` 1 MiB (16 MiB hard cap — the response
     is truncated past the cap with a footer notice telling you to narrow).
 
+    Note: prefer reusing the most recent result for the same query rather
+    than re-calling if the underlying state is unlikely to have changed. New
+    calls remain valid when verifying a mutation's effect.
+
     ⚠️ BLOCKING on `since_time` / `since_seconds` — K8s streams the entire
     log from the start of the pod (not from the lower bound); the bound is
     applied server-side AFTER the stream finishes. For very chatty pods,

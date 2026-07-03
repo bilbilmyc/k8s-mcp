@@ -228,7 +228,12 @@ def describe_resource(
     namespace: str | None = None,
     api_version: str | None = None,
 ) -> str:
-    """Return a kubectl-describe-style text summary. Supports CRDs."""
+    """Return a kubectl-describe-style text summary. Supports CRDs.
+
+    Note: prefer reusing the most recent result for the same query rather
+    than re-calling if the underlying state is unlikely to have changed. New
+    calls remain valid when verifying a mutation's effect.
+    """
     obj = _fetch(kind, name, namespace, api_version=api_version)
     return describe_fmt(obj)
 

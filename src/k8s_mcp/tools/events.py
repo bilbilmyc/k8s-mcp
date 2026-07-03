@@ -26,6 +26,10 @@ def list_events(
 ) -> str:
     """List Kubernetes Events.
 
+    Note: prefer reusing the most recent result for the same query rather
+    than re-calling if the underlying state is unlikely to have changed. New
+    calls remain valid when verifying a mutation's effect.
+
     Args:
         namespace: namespace to list events from; None = all namespaces.
         field_selector: e.g. "involvedObject.name=my-pod",

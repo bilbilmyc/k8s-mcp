@@ -284,6 +284,10 @@ def cluster_health_snapshot(
     Itself does NOT make any cluster modifications — safe to call from
     any namespace, even in read-only mode.
 
+    Note: prefer reusing the most recent result for the same query rather
+    than re-calling if the underlying state is unlikely to have changed. New
+    calls remain valid when verifying a mutation's effect.
+
     Args:
         namespaces: limit pod/HPA/event sections to these namespaces.
             Nodes, certificates, and orphan-PV are always cluster-wide.

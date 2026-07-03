@@ -2,10 +2,11 @@
 
 [English version](./README.en.md)
 
-面向 LLM Agent 的 Kubernetes MCP server。提供 30+ 工具，覆盖 Pod /
-Deployment / StatefulSet / DaemonSet / Service / Ingress / ConfigMap
-等资源的增删改查，加上日志 / 事件 / 节点运维 / top / rollout / wait /
-批量 YAML apply。
+面向 LLM Agent 的 Kubernetes MCP server。提供 **74 个**工具，覆盖 Pod /
+Deployment / StatefulSet / DaemonSet / Job / CronJob / Service / Ingress
+/ ConfigMap / PVC / RBAC / NetworkPolicy 等资源的增删改查，加上日志 /
+事件 / 节点运维 / top / rollout / wait / 批量 YAML apply / Prometheus
+查询 / 健康巡检 / 主动推送。
 
 设计目标：让日常 K8s 运维通过自然语言驱动（Claude Desktop、Cursor、
 Cline、Cherry Studio…），用结构化 tool 调用替代 `kubectl` 文本解析。
@@ -94,7 +95,7 @@ EOF
 想用模式 A 就把 `K8S_MCP_API_SERVER` 和 `K8S_MCP_API_TOKEN` 加到 `env`
 块里。模式 C 不需要任何 env——它读 pod 自己的 SA token。
 
-重启 Agent，应该看到 "k8s" 下挂着约 46 个工具。
+重启 Agent，应该看到 "k8s" 下挂着约 **74 个**工具。
 
 完整环境变量清单见 [docs/env.md](./docs/env.md)。
 
@@ -134,9 +135,15 @@ export K8S_MCP_NOTIFIERS='[
 
 详见 [docs/env.md](./docs/env.md)。
 
-## 工具目录（约 50 个）
+## 工具目录（74 个）
 
 ### 读（始终安全）
+
+> **新会话开局协议**：前两件事一定是 `cluster_info()` → `whoami(namespace="<目标 ns>")`。
+> 一个告诉你 apiserver 是什么、K8s 什么版本、Pod/Node 数量；一个告诉你
+> 这个身份在目标 namespace 里能对哪些资源做什么。前者让 Agent 知道兼容性边界
+> （PodDisruptionBudget v1 需 1.21+、IngressClass 需 1.18+ 等），后者让
+> `Forbidden` 类错误在写之前就被预测到。
 
 - `list_resources(kind, namespace?, label_selector?, api_version=None)` — 列出任意 Kind；**支持 CRD**（传 `api_version='cert-manager.io/v1'` 等；同名 kind 在多个 group 时**必须**显式传）
 - `get_resource(kind, name, namespace?, api_version=None)` — 完整 JSON 对象（支持 CRD）
@@ -166,6 +173,10 @@ export K8S_MCP_NOTIFIERS='[
 - `get_certificate_expiry()` — 聚合查证书过期时间。**apiserver 自己的 serving cert 无法通过 K8s API 查**，但 MCP server 看得见的 4 个源都打包读：`K8S_MCP_API_CA_CERT` / in-cluster SA bundle / kubeconfig CA / kubeconfig client cert（最后那个仅当 kubeconfig 用证书认证时存在）。每个证书给出 Subject / Issuer / NotBefore / NotAfter / 剩余天数 / 状态（✅ valid / ⚠️<30d / ❌<7d / ❌EXPIRED），按天数升序排，最近的过期先显示，并自动追加 "Action needed" 段落提醒。**不靠 apiserver 也不发请求**——纯本地解析。
 - `cluster_health_snapshot(namespaces=None, events_minutes=60, restart_threshold=3)` — ⭐ **AI 运维的入口工具**：一次调用返回 7 维度的集群体检报告（Nodes / Pending Pods / 异常重启 / HPA / Orphan PVs / 证书 / 最近告警事件），顶部带 `✅ HEALTHY` / `⚠️ ATTENTION` 一行汇总。**每节独立容错**，单节 apiserver 报错不会让整份报告空白。被问「集群现在怎么样？」时一次调这个就够；要钻细节再用 `describe_resource` / `get_pod_logs` 跟进。
 - `notify(message, level="info", notifier_name=None, title=None)` — 📤 **主动推送**：把任意消息（典型用法是把 `cluster_health_snapshot` 的输出）POST 到一个或多个 webhook。**webhook 列表走 env 配置**（`K8S_MCP_NOTIFIERS='[{name, type, url, cluster_label?}, ...]'`），type 支持 `feishu` / `slack` / `wecom` / `generic`，payload 拼装工具内部按 type 处理。返回每条 webhook 的 `✅/❌` 结果 + 错误细节，失败不抛异常（webhook 死了不能把主流程拖垮）。`notifier_name` 指定只发给某个；不指定就 broadcast。
+- `cluster_info()` — ℹ️ **身份 + 版本 + 计数**（新会话第一调）：apiserver URL、是否带 bearer token、`GitVersion` / `Platform` / Major.Minor、Nodes / Namespaces / Pods / Services / Deployments 的实时计数。**每节独立容错**——一个 apiserver 查询失败不会让整份报告空白，单独显示 `error: <status> <reason>`。看集群版本一眼判断功能兼容性（v1.21+ / v1.18+ 之类）。
+- `whoami(namespace="default")` — 👤 **身份 + 有效权限**：当前 ServiceAccount / User、UID、所属组、然后用 `SelfSubjectRulesReview` 列出在这个 namespace 里能对哪些 apiGroup / resources / verbs 做什么。写工具返回 `Forbidden` 时，**先调这个**就能知道是 SA 权限不够、还是 namespace 选错，省一轮试错。集群级 ClusterRole 不在这里，单独用 `get_role_bindings` 看。
+- `find_images(image_substring, namespace=None, kinds=None)` — 🔍 **反向查镜像**："哪些工作负载还在用 `nginx:1.21`？"或"哪些引用了 `registry.internal/library/`？"——一次调完成 `list_resources` + N × `get_resource_yaml` 的工作。默认扫 Deployment / StatefulSet / DaemonSet 的 containers 和 initContainers，**case-insensitive 子串匹配**，返回 KIND / NAMESPACE / NAME / CONTAINER / IMAGE 表，init container 行加 `[init]` 前缀。
+- `get_events_for_object(kind, name, namespace=None, limit=50)` — 📜 **对象范围事件**：用 `field_selector=involvedObject.kind=...,involvedObject.name=...` 一次拉完这个对象的所有 Event，按 `lastTimestamp` 倒序排。被问"为什么 X 挂？"时一次调就够，不用扫整个 namespace 的事件流再人脑 grep。无事件时返回 `(no events for Pod/web-1 in namespace app)` 而不是空表，避免 Agent 把"没数据"误读成"工具挂了"。
 
 ### 写（受 read-only 和 namespace-allowlist 限制）
 
@@ -183,6 +194,8 @@ export K8S_MCP_NOTIFIERS='[
 - `create_pvc(name, namespace, size, access_modes?, storage_class?, volume_name?, labels?)` — `volume_name` 用于把 PVC 显式绑到指定 PV（hostPath / local 的本地卷场景）
 - `validate_pv_hostpath_paths()` — 列出全部 hostPath PV + 对应节点 + 一键 `ssh` 检查 / 创建命令（见下方"排错与开发场景"）
 - `bootstrap_local_path_provisioner(set_as_default=True, apply_immediately=True)` — 一键给无 SC 的 dev/test 集群装 Rancher local-path provisioner(见下方"排错与开发场景")
+- `create_job(name, image, namespace="default", command?, args?, env?, resources?, image_pull_policy?, restart_policy="Never", backoff_limit?, labels?)` — 一次性 Job（DB 迁移、ad-hoc 批处理、一次性脚本）；等价 `kubectl create job`，`restart_policy` 默认 Never（Job Pod 几乎不该 Always）
+- `create_cronjob(name, image, schedule, namespace="default", command?, args?, env?, resources?, image_pull_policy?, restart_policy="OnFailure", labels?)` — 定时 Job（夜间备份、周期清理、每 N 分钟同步），`schedule` 接受标准 5 段 cron 表达式（`0 2 * * *` / `*/15 * * * *` 等）
 - `scale_workload(kind, name, namespace, replicas)`
 - `restart_workload(kind, name, namespace)`
 - `set_image(kind, name, namespace, container, image)`
@@ -193,13 +206,28 @@ export K8S_MCP_NOTIFIERS='[
 - `rollout_undo(kind, name, namespace?, to_revision?)`
 - `cordon_node(name)`, `uncordon_node(name)` — 节点调度
 - `drain_node(name, ignore_daemonsets=False, delete_emptydir_data=False, force=False, grace_period_seconds=-1, timeout_seconds=60)`
-- `delete_pod(name, namespace, grace_period_seconds=30)` — 恢复 / 重启原语，绕过二次确认
 - `wait_resource(kind, name, namespace?, for_condition=Ready|..., for_jsonpath=expr?, jsonpath_value?, timeout_seconds=60)`
 - `update_configmap(name, namespace, data, merge=False)`
 
-### 删除（二次确认）
+### 删除
 
-- `delete_resource(kind, name, namespace?, confirm=False, confirmation_token?, grace_period_seconds=30)`
+按"风险 / 确认级别"分三组。
+
+**通用（二次确认）—— Secret / 任何会级联删资源的 Kind 都走这条：**
+
+- `delete_resource(kind, name, namespace?, confirm=False, confirmation_token?, grace_period_seconds=30)` — `confirm=False` 返回 YAML 预览 + HMAC token；用户确认后再用 `confirm=True` + token 真正删
+
+**一步删除（恢复友好，无级联）—— 可重立的资源，不强制二次确认：**
+
+- `delete_pod(name, namespace, grace_period_seconds=30)` — 恢复 / 重启原语（Pod 删了 Deployment 会拉新的）
+- `delete_pvc(name, namespace)` — PVC 删了工作负载只是 Pending 等待重新绑定；同 name 重建即恢复
+- `delete_configmap(name, namespace="default")` — CM 是松耦合配置数据，删了会让 Pod 起不来（CrashLoopBackOff），但 CM 可重建
+- `delete_service(name, namespace="default")` — Service 是流量路由规则不是工作负载，删了 Pod 继续跑、只是 inbound 断流
+- `delete_ingress(name, namespace="default")` — 同上，外部 HTTP(S) 路由断、Pod / Service 不动
+
+**批量删除（dry-run → token → confirm）—— 一次影响一批：**
+
+- `bulk_delete_pvc(label_selector, namespace=None, dry_run=True, confirm=False, confirmation_token?)` — 走与 `bulk_set_image` 一样的三步流程，专清孤儿 PVC（典型场景：StatefulSet 删了但 PVC 留下来了）
 
 ### 重点工具说明
 
@@ -265,6 +293,54 @@ Token payload 把每个危险参数（image / container / replicas / label_selec
 匹配工作负载类型：
 - `bulk_set_image` / `bulk_restart` 支持 Deployment / StatefulSet / DaemonSet
 - `bulk_scale` 只支持 Deployment / StatefulSet（DaemonSet 没 replicas 字段）
+
+**`bulk_delete_pvc`** 走**完全一样**的 dry-run → token → confirm 三步流程，
+专门清孤儿 PVC。StatefulSet / Stateful workload 删了之后留下的 `app=db`
+标签 PVC 是最常见的清理目标。token payload 签名的是
+`op` / `label_selector` / `namespace` / `matched_names` 四个字段——预览到
+确认之间**新冒出来的同名 label PVC 不会被删**（token 的 `matched_names`
+是权威范围）。资源已不在（`404`）会被记为 `SKIPPED (already gone)` 不算
+错误。
+
+**`whoami` / `cluster_info`（新会话开局协议）**：
+
+新对话开始时调两次比之后一直 `Forbidden` 试错要省一轮：
+
+- `cluster_info()` 返回 apiserver URL、是否带 bearer、K8s `GitVersion`、
+  `Platform`、Nodes / Namespaces / Pods / Services / Deployments 计数。
+  看版本一眼判断兼容性边界（`PodDisruptionBudget v1` 需 1.21+、
+  `IngressClass` 需 1.18+、Gateway API 是 opt-in 等）。每节独立容错——
+  `list_pod_for_all_namespaces` 失败不会让整份报告空白，单独显示
+  `error: 403 Forbidden`。
+- `whoami(namespace="<目标 ns>")` 先拉 `SelfSubjectReview`（拿到 user /
+  UID / groups），再拉 `SelfSubjectRulesReview`（这个身份在目标 namespace
+  里能对哪些 apiGroup / resources / verbs 做什么）。**写工具返回
+  `Forbidden` 时先调这个**——能直接定位是 SA 权限不够还是 namespace
+  选错。ClusterRole 集群级权限**不在这里**（`SelfSubjectRulesReview`
+  只看 namespace-scoped 规则），要看那些用
+  `get_role_bindings` / `list_resources(kind="ClusterRoleBinding")`。
+
+**`find_images`** 在 `list_resources` + N × `get_resource_yaml` 的组合
+场景里替 Agent 节省 N 次往返：
+
+- 一次调扫遍 Deployment / StatefulSet / DaemonSet（`kinds=` 可缩窄）的
+  `containers` 和 `initContainers`，做 case-insensitive 子串匹配。
+- init container 行加 `[init]` 前缀（`[init] migrate`），避免和主容器
+  同名时的歧义。
+- 没匹配时返回 `(no workloads reference an image matching 'xxx')`——
+  友好提示而不是空表。
+- 适合"哪个工作负载还在用 1.21" / "哪些引用了内部 registry" / "升镜像
+  之前先看影响面"。
+
+**`get_events_for_object`** 在 "这个对象最近有什么问题？" 场景里替
+Agent 节省一轮全 namespace 事件流扫描：
+
+- 用 `field_selector=involvedObject.kind=...,involvedObject.name=...` 走
+  apiserver 端过滤——比 Agent 拉全 namespace events 再 `grep` 快。
+- cluster-scoped kind（`Node` / `PersistentVolume`）传 `namespace=None`，
+  工具会走 `list_event_for_all_namespaces`。
+- 空结果返回 `(no events for Pod/web-1 in namespace app)`——避免 Agent
+  把"无事件"误读成"工具坏了"。
 
 **`drain_node`** 镜像 `kubectl drain`：
 
@@ -382,6 +458,10 @@ k8s 不会自动按 hostPath path 匹配）。
 
 ## 端到端示例（Claude 会话）
 
+> 你："连上 prod 帮我看看。"（新会话开头）
+>
+> Claude → `cluster_info()` 拿 apiserver / 版本 / 计数 → `whoami(namespace="prod")` 拿身份和有效权限 → 据此判断能做什么。
+
 > 你："部署 nginx 1.25，Deployment 3 副本，再加 Service 和 Ingress 暴露。"
 >
 > Claude → `create_deployment`, `expose_workload`, `create_ingress`。
@@ -395,6 +475,27 @@ k8s 不会自动按 hostPath path 匹配）。
 >
 > Claude → `get_resource_jsonpath("HorizontalPodAutoscaler",
 > "status.currentMetrics", name="web", namespace="default")`。
+>
+> 你："还有谁在用 nginx:1.21？我想升级影响面看清楚。"
+>
+> Claude → `find_images("nginx:1.21")` → 一张表列出所有引用 1.21 的
+> Deployment / StatefulSet / DaemonSet 及其容器。
+>
+> 你："api-1 起来了吗？给我看相关事件。"
+>
+> Claude → `get_events_for_object(kind="Pod", name="api-1", namespace="prod")`
+> → 拿到该 Pod 的所有 Warning / Normal 事件按时间倒序。
+>
+> 你："跑一个 DB 迁移任务，image 用 postgres:16-alpine，命令 pg_dump。"
+>
+> Claude → `create_job(name="migrate-2026-07-03", image="postgres:16-alpine",
+> namespace="db", command=["pg_dump", "-U", "postgres"], env={"PGHOST": "db"},
+> backoff_limit=2)`。
+>
+> 你："每天凌晨 2 点清一次临时表，搞成定时任务。"
+>
+> Claude → `create_cronjob(name="tidy-temp", image="alpine:3",
+> schedule="0 2 * * *", command=["sh", "-c", "psql ... -c 'TRUNCATE temp_events'"])`。
 >
 > 你："等 Deployment rollout 完成，然后把镜像升到 1.27。"
 >
@@ -416,6 +517,13 @@ k8s 不会自动按 hostPath path 匹配）。
 > `pod_metrics("api-1", "default", "memory",
 > prometheus_url="http://10.20.30.40:31245")`。
 >
+> 你："把 prod namespace 里所有 `app=db` 标签的孤儿 PVC 清掉。"
+>
+> Claude → `bulk_delete_pvc(label_selector="app=db", namespace="prod")`
+> （dry-run，列出来）→ 用户确认 →
+> `bulk_delete_pvc(..., confirm=False, dry_run=False)` 拿 token →
+> `bulk_delete_pvc(..., confirm=True, confirmation_token=token)` 真删。
+>
 > 你："把它删了。"
 >
 > Claude → `delete_resource(confirm=False)` → 给你看 YAML 预览。
@@ -428,7 +536,7 @@ k8s 不会自动按 hostPath path 匹配）。
 
 ```bash
 uv sync
-uv run pytest              # 182 个测试
+uv run pytest              # 419 个测试
 uv run ruff check .        # lint
 uv run k8s-mcp             # stdio 启动
 uv build                   # 生成 dist/*.whl + .tar.gz
@@ -469,6 +577,7 @@ src/k8s_mcp/
     ├── certs.py      # get_certificate_expiry（CRD + 内置 kind 都用 DynamicClient）
     ├── health.py     # cluster_health_snapshot（7 维集群体检）
     ├── bulk.py       # bulk_set_image / bulk_restart / bulk_scale
+    ├── cluster_info.py # cluster_info（apiserver / 版本 / 计数）
     └── notifier.py   # notify 推送 webhook
 ```
 

@@ -1,8 +1,10 @@
 # k8s-mcp
 
-Kubernetes MCP server for LLM agents. Exposes 30+ tools covering CRUD on
-Pods, Deployments, StatefulSets, DaemonSets, Services, Ingresses, ConfigMaps
-plus logs/events, node ops, top, rollout, wait, and bulk YAML apply.
+Kubernetes MCP server for LLM agents. Exposes **74 tools** covering CRUD on
+Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services,
+Ingresses, ConfigMaps, PVCs, RBAC, NetworkPolicies, plus logs/events, node
+ops, top, rollout, wait, bulk YAML apply, Prometheus queries, health
+snapshots, and proactive webhooks.
 
 The goal is to drive day-to-day K8s operations from natural language
 (Claude Desktop, Cursor, Cline, …) with structured tool calls instead of
@@ -92,7 +94,7 @@ To use Mode A instead, add `"K8S_MCP_API_SERVER"` and `"K8S_MCP_API_TOKEN"`
 to the `env` block. Mode C (in-cluster) needs no env at all — it reads the
 pod's SA token automatically.
 
-Restart the agent. You should see ~46 tools listed under "k8s".
+Restart the agent. You should see **~74 tools** listed under "k8s".
 
 ## Safety flags
 
@@ -132,9 +134,16 @@ Each entry: `{name, type, url, cluster_label?}`. `type` is `feishu` /
 JSON payload so the agent doesn't have to. `cluster_label` is prefixed
 on the message so a single webhook can multiplex multiple clusters.
 
-## Tool catalog (~50 tools)
+## Tool catalog (74 tools)
 
 ### Read (always safe)
+
+> **New-session opening protocol**: the first two calls should always be
+> `cluster_info()` → `whoami(namespace="<target ns>")`. The first tells
+> you which apiserver, which K8s version, and the live counts; the second
+> tells you which user/SA you are and exactly which resources/verbs you
+> can touch in the target namespace. Knowing both upfront prevents the
+> `Forbidden` round-trip on every later write.
 - `list_resources(kind, namespace?, label_selector?, api_version=None)` — list any Kind; **CRDs supported** (pass `api_version='cert-manager.io/v1'` etc.; required when the same Kind exists in multiple groups)
 - `get_resource(kind, name, namespace?, api_version=None)` — full JSON object (CRD-aware)
 - `get_resource_yaml(kind, name, namespace?, reveal_secrets=False, api_version=None)` — YAML manifest; Secrets are masked by default (CRD-aware)
@@ -163,6 +172,10 @@ on the message so a single webhook can multiplex multiple clusters.
 - `get_certificate_expiry()` — aggregate cluster-certificate expiry report. **The apiserver's own serving cert isn't queryable via the K8s API**, but the 4 sources the MCP server can see (`K8S_MCP_API_CA_CERT` / in-cluster SA bundle / kubeconfig CA / kubeconfig client cert — last one only when the kubeconfig uses cert auth) are read in one shot. Each row gives Subject / Issuer / NotBefore / NotAfter / days-left / status (✅ valid / ⚠️<30d / ❌<7d / ❌EXPIRED). Sorted ascending by days-left, with an "Action needed" block highlighting anything not yet expiring safely. **Local parse — no apiserver calls.**
 - `cluster_health_snapshot(namespaces=None, events_minutes=60, restart_threshold=3)` — ⭐ **AI-ops entry point**: one call returns a 7-section cluster health report (Nodes / Pending Pods / Abnormal Restarts / HPA / Orphan PVs / Certificates / Recent Warning Events), with a `✅ HEALTHY` / `⚠️ ATTENTION` one-liner at the top. **Each section is independently error-bounded** — a single apiserver hiccup won't blank the whole report. Use this when asked "how's the cluster?"; drill into details with `describe_resource` / `get_pod_logs`.
 - `notify(message, level="info", notifier_name=None, title=None)` — 📤 **proactive push**: POST any message (typically the output of `cluster_health_snapshot`) to one or more webhooks. **Webhook list is env-configured** (`K8S_MCP_NOTIFIERS='[{name, type, url, cluster_label?}, ...]'`); types `feishu` / `slack` / `wecom` / `generic` are supported, payload assembly is per-type. Returns a per-notifier `✅/❌` results table; HTTP errors don't raise (a dead webhook shouldn't take down the caller). `notifier_name` scopes to one; default broadcasts.
+- `cluster_info()` — ℹ️ **identity + version + counts** (first call in any new session): apiserver URL, whether a bearer token is in use, `GitVersion` / `Platform` / Major.Minor, and live counts of Nodes / Namespaces / Pods / Services / Deployments. **Each section is independently error-bounded** — one failing apiserver query shows `error: <status> <reason>` and the rest still render. Version informs compatibility decisions (PodDisruptionBudget v1 needs 1.21+, IngressClass 1.18+, Gateway API is opt-in, etc.).
+- `whoami(namespace="default")` — 👤 **identity + effective permissions**: current ServiceAccount / User, UID, groups, and a `SelfSubjectRulesReview` listing which apiGroup / resources / verbs are reachable in the target namespace. **When a write tool returns `Forbidden`, call this first** — the rules table usually pinpoints whether the SA is missing a binding or you picked the wrong namespace. ClusterRole-bound cluster-wide permissions are **not** listed here (use `get_role_bindings` / `list_resources(kind="ClusterRoleBinding")` for those).
+- `find_images(image_substring, namespace=None, kinds=None)` — 🔍 **reverse image lookup**: "which workloads are still on `nginx:1.21`?" or "which ones reference `registry.internal/library/`?" — one call replaces `list_resources` + N × `get_resource_yaml`. Walks `containers` and `initContainers` on Deployment / StatefulSet / DaemonSet (configurable via `kinds=`), case-insensitive substring match, returns a KIND / NAMESPACE / NAME / CONTAINER / IMAGE table with `[init]` prefix on init-container rows.
+- `get_events_for_object(kind, name, namespace=None, limit=50)` — 📜 **object-scoped events**: uses `field_selector=involvedObject.kind=...,involvedObject.name=...` to filter at the apiserver, sorted by `lastTimestamp` desc. When triaging "why is X failing?" one call beats scanning a namespace-wide event stream + mental grep. Empty result returns `(no events for Pod/web-1 in namespace app)` rather than a blank table, so the agent doesn't misread "no data" as "tool failed".
 
 ### Write (subject to read-only and namespace-allowlist)
 - `apply_yaml(yaml_content)` — apply single or multi-doc manifest
@@ -179,6 +192,8 @@ on the message so a single webhook can multiplex multiple clusters.
 - `create_pvc(name, namespace, size, access_modes?, storage_class?, volume_name?, labels?)` — `volume_name` pins the PVC to a specific PV (hostPath / local volumes on dev/test clusters)
 - `validate_pv_hostpath_paths()` — lists every hostPath PV with its target node + a one-line `ssh` check / create command (see "Troubleshooting & dev scenarios" below)
 - `bootstrap_local_path_provisioner(set_as_default=True, apply_immediately=True)` — one-shot install of Rancher local-path provisioner for SC-less dev/test clusters (see "Troubleshooting & dev scenarios" below)
+- `create_job(name, image, namespace="default", command?, args?, env?, resources?, image_pull_policy?, restart_policy="Never", backoff_limit?, labels?)` — one-off Job (DB migration, ad-hoc batch, one-time script); `restart_policy` defaults to `Never` (Job Pods almost never want `Always`)
+- `create_cronjob(name, image, schedule, namespace="default", command?, args?, env?, resources?, image_pull_policy?, restart_policy="OnFailure", labels?)` — scheduled Job (nightly backups, periodic cleanup, every-N-min sync); `schedule` is a standard 5-field cron expression (`0 2 * * *`, `*/15 * * * *`, etc.)
 - `scale_workload(kind, name, namespace, replicas)`
 - `restart_workload(kind, name, namespace)`
 - `set_image(kind, name, namespace, container, image)`
@@ -189,12 +204,25 @@ on the message so a single webhook can multiplex multiple clusters.
 - `rollout_undo(kind, name, namespace?, to_revision?)`
 - `cordon_node(name)`, `uncordon_node(name)` — Node scheduling
 - `drain_node(name, ignore_daemonsets=False, delete_emptydir_data=False, force=False, grace_period_seconds=-1, timeout_seconds=60)`
-- `delete_pod(name, namespace, grace_period_seconds=30)` — recovery / restart primitive, bypasses 2-step confirm
 - `wait_resource(kind, name, namespace?, for_condition=Ready|..., for_jsonpath=expr?, jsonpath_value?, timeout_seconds=60)`
 - `update_configmap(name, namespace, data, merge=False)`
 
-### Delete (two-step confirmation)
-- `delete_resource(kind, name, namespace?, confirm=False, confirmation_token?, grace_period_seconds=30)`
+### Delete
+
+Three groups, by risk / confirmation level.
+
+**Generic (two-step) — Secrets and anything that cascades:**
+- `delete_resource(kind, name, namespace?, confirm=False, confirmation_token?, grace_period_seconds=30)` — `confirm=False` returns a YAML preview + HMAC token; user confirms, then re-call with `confirm=True` + token to actually delete
+
+**One-step (recoverable, no cascade) — rebuildable resources skip the second prompt:**
+- `delete_pod(name, namespace, grace_period_seconds=30)` — recovery / restart primitive (Deployment re-creates the Pod)
+- `delete_pvc(name, namespace)` — workload goes Pending until a new PVC is bound; same name recreates it
+- `delete_configmap(name, namespace="default")` — losing a CM makes mounting Pods fail to start (CrashLoopBackOff), but the CM is re-creatable
+- `delete_service(name, namespace="default")` — a Service is a routing rule, not a workload; Pods keep running, inbound just drops
+- `delete_ingress(name, namespace="default")` — same as Service: external HTTP(S) drops, Pods / Services untouched
+
+**Bulk (dry-run → token → confirm) — touches many at once:**
+- `bulk_delete_pvc(label_selector, namespace=None, dry_run=True, confirm=False, confirmation_token?)` — same three-step flow as `bulk_set_image` / `bulk_restart` / `bulk_scale`; cleans up orphan PVCs (typical case: StatefulSet deleted but `app=db`-tagged PVCs left behind)
 
 ### Notes on key tools
 
@@ -233,6 +261,55 @@ The token payload signs every "dangerous" parameter (image / container / replica
 Workload type coverage:
 - `bulk_set_image` / `bulk_restart`: Deployment / StatefulSet / DaemonSet
 - `bulk_scale`: Deployment / StatefulSet only (DaemonSet has no `replicas` field — caller gets a clear ValueError pointing at `bulk_restart` instead)
+
+**`bulk_delete_pvc`** follows the **same** dry-run → token → confirm flow,
+specialized for orphan-PVC cleanup. Token payload signs `op` /
+`label_selector` / `namespace` / `matched_names`. **New PVCs matching the
+same label between preview and confirm are NOT deleted** — the token's
+`matched_names` is the authoritative scope. Resources already gone
+(`404`) are recorded as `SKIPPED (already gone)`, not as errors.
+
+**`whoami` / `cluster_info` (new-session opening protocol):**
+
+Two calls at the start of every session beat a `Forbidden` round-trip later:
+
+- `cluster_info()` returns apiserver URL, bearer-token presence, K8s
+  `GitVersion` / `Platform`, and live counts of Nodes / Namespaces / Pods /
+  Services / Deployments. Version informs compatibility decisions (v1.21+ /
+  v1.18+ / etc.). Each section is independently error-bounded — a failed
+  `list_pod_for_all_namespaces` doesn't blank the rest, it just shows
+  `error: 403 Forbidden` for that line.
+- `whoami(namespace="<target ns>")` first calls `SelfSubjectReview` (user /
+  UID / groups) then `SelfSubjectRulesReview` (which apiGroup / resources /
+  verbs are reachable in that namespace). **When a write tool returns
+  `Forbidden`, call this first** — the rules table pinpoints whether the
+  SA is missing a binding or you picked the wrong namespace. ClusterRole
+  cluster-wide bindings are **not** enumerated here (use
+  `get_role_bindings` / `list_resources(kind="ClusterRoleBinding")`).
+
+**`find_images`** replaces `list_resources` + N × `get_resource_yaml`:
+
+- One call walks Deployment / StatefulSet / DaemonSet (narrow with
+  `kinds=`) `containers` and `initContainers` for a case-insensitive
+  substring match.
+- init-container rows are prefixed `[init]` (e.g. `[init] migrate`) to
+  avoid ambiguity when names collide with main containers.
+- Empty result returns `(no workloads reference an image matching 'xxx')`
+  — a friendly message, not a blank table.
+- Typical use: "who's still on 1.21?" / "which workloads reference our
+  internal registry?" / "scope an image bump before flipping it."
+
+**`get_events_for_object`** replaces "scan the namespace event stream +
+mental grep":
+
+- Filters at the apiserver via
+  `field_selector=involvedObject.kind=...,involvedObject.name=...` — far
+  faster than the agent pulling all events for a namespace and filtering
+  client-side.
+- For cluster-scoped kinds (`Node` / `PersistentVolume`) pass
+  `namespace=None`; the tool switches to `list_event_for_all_namespaces`.
+- Empty result returns `(no events for Pod/web-1 in namespace app)` —
+  prevents the agent from misreading "no events" as "tool failed".
 
 **`drain_node`** mirrors `kubectl drain`:
 
@@ -364,6 +441,12 @@ when no StorageClass is involved.
 
 ## End-to-end example (Claude session)
 
+> You: "Connect to prod and give me a rundown." (start of a new session)
+>
+> Claude → `cluster_info()` (apiserver / version / counts) →
+> `whoami(namespace="prod")` (identity + effective rules) → then reasons
+> about what's safe to do.
+
 > You: "Deploy nginx 1.25 as a Deployment with 3 replicas, expose it via Service and Ingress."
 >
 > Claude → `create_deployment`, `expose_workload`, `create_ingress`.
@@ -377,6 +460,27 @@ when no StorageClass is involved.
 >
 > Claude → `get_resource_jsonpath("HorizontalPodAutoscaler",
 > "status.currentMetrics", name="web", namespace="default")`.
+>
+> You: "Who else is still on nginx:1.21? I want to see the upgrade blast radius."
+>
+> Claude → `find_images("nginx:1.21")` → a table of every workload
+> referencing 1.21 across Deployment / StatefulSet / DaemonSet.
+>
+> You: "Is api-1 healthy? Show me its events."
+>
+> Claude → `get_events_for_object(kind="Pod", name="api-1", namespace="prod")`
+> → all events for that Pod, last-seen desc.
+>
+> You: "Run a DB migration job — image postgres:16-alpine, command pg_dump."
+>
+> Claude → `create_job(name="migrate-2026-07-03", image="postgres:16-alpine",
+> namespace="db", command=["pg_dump", "-U", "postgres"], env={"PGHOST": "db"},
+> backoff_limit=2)`.
+>
+> You: "Truncate the temp_events table every day at 2 AM — schedule it."
+>
+> Claude → `create_cronjob(name="tidy-temp", image="alpine:3",
+> schedule="0 2 * * *", command=["sh", "-c", "psql ... -c 'TRUNCATE temp_events'"])`.
 >
 > You: "Wait until the deployment rolls out, then bump to 1.27."
 >
@@ -399,6 +503,13 @@ when no StorageClass is involved.
 > `pod_metrics("api-1", "default", "memory",
 > prometheus_url="http://10.20.30.40:31245")`.
 >
+> You: "Clean up all orphan PVCs with the `app=db` label in prod."
+>
+> Claude → `bulk_delete_pvc(label_selector="app=db", namespace="prod")`
+> (dry-run, lists them) → user confirms →
+> `bulk_delete_pvc(..., confirm=False, dry_run=False)` for the token →
+> `bulk_delete_pvc(..., confirm=True, confirmation_token=token)` to actually delete.
+>
 > You: "Delete it."
 >
 > Claude → `delete_resource(confirm=False)` → shows you the YAML preview.
@@ -411,7 +522,7 @@ when no StorageClass is involved.
 
 ```bash
 uv sync
-uv run pytest              # 154 tests
+uv run pytest              # 419 tests
 uv run ruff check .        # lint
 uv run k8s-mcp             # run over stdio
 uv build                   # produce dist/*.whl + .tar.gz
@@ -451,6 +562,7 @@ src/k8s_mcp/
     ├── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
     ├── health.py     # cluster_health_snapshot (7-section cluster health)
     ├── bulk.py       # bulk_set_image / bulk_restart / bulk_scale
+    ├── cluster_info.py # cluster_info (apiserver / version / counts)
     └── notifier.py   # notify (webhook push to feishu/slack/wecom/generic)
 ```
 

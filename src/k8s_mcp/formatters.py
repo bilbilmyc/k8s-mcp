@@ -43,19 +43,47 @@ def mask_secret_data(obj: dict) -> dict:
 
 
 def short_table(items: list[dict], columns: list[str]) -> str:
-    """Render a compact table from a list of dicts."""
+    """Render a compact **markdown pipe table** from a list of dicts.
+
+    Output shape (whitespace-padded for terminal legibility, parseable
+    by any markdown renderer):
+
+        | col1 | col2 |
+        | ---- | ---- |
+        | v1   | v2   |
+        | v3   | v4   |
+
+    Why markdown instead of plain whitespace-aligned columns:
+      - `notifier._section_to_elements` walks the message looking for
+        `| header |\n| --- |\n| row |` patterns and emits them as
+        Feishu native `table` card components — pure whitespace tables
+        fall through into a `lark_md` div (which doesn't render tables),
+        so the operator sees raw columns of text on the phone.
+      - LLM/Agent readers handle markdown tables as well as they handle
+        whitespace-aligned ones — same information, same alignment,
+        plus renderer support.
+
+    `|` characters inside cell values are escaped to `\\|` so the table
+    stays structurally parseable; newlines are flattened to spaces for
+    the same reason — markdown pipe tables don't support multi-line
+    cells.
+    """
     if not items:
         return "(empty)"
-    rows = []
+    rows: list[list[str]] = []
     for item in items:
-        rows.append({c: _display_value(item.get(c)) for c in columns})
-    widths = {c: max(len(c), max(len(str(r.get(c, ""))) for r in rows)) for c in columns}
-    header = "  ".join(c.ljust(widths[c]) for c in columns)
-    sep = "  ".join("-" * widths[c] for c in columns)
-    lines = [header, sep]
-    for row in rows:
-        lines.append("  ".join(str(row.get(c, "")).ljust(widths[c]) for c in columns))
-    return "\n".join(lines)
+        rows.append([
+            _display_value(item.get(c)).replace("|", "\\|").replace("\n", " ")
+            for c in columns
+        ])
+    widths = [max(len(c), max(len(r[i]) for r in rows)) for i, c in enumerate(columns)]
+    header = "| " + " | ".join(c.ljust(widths[i]) for i, c in enumerate(columns)) + " |"
+    sep    = "| " + " | ".join("-" * widths[i] for i in range(len(columns)))   + " |"
+    body_lines = [
+        "| " + " | ".join(r[i].ljust(widths[i]) for i in range(len(columns))) + " |"
+        for r in rows
+    ]
+    return "\n".join([header, sep, *body_lines])
 
 
 def _display_value(v: Any) -> str:

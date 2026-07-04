@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -197,6 +198,141 @@ def _compose_title(
     return chosen[:60] or "Notification"
 
 
+_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+
+
+def _split_row(line: str) -> list[str] | None:
+    """Split a markdown table row into cells, or return None if not a row.
+
+    A row must start and end with `|` after stripping. The outer pipes
+    are dropped, then `|` separates cells; content within a cell is
+    trimmed of surrounding whitespace. Empty cells are preserved (so
+    `| a || c |` produces 3 cells, not 2).
+    """
+    s = line.strip()
+    if not s.startswith("|") or not s.endswith("|"):
+        return None
+    return [c.strip() for c in s[1:-1].split("|")]
+
+
+def _parse_markdown_table(
+    lines: list[str], start_idx: int,
+) -> tuple[list[str], list[list[str]], int] | None:
+    """Try to parse a markdown table starting at lines[start_idx].
+
+    Returns (headers, body_rows, lines_consumed) on success, or None if
+    the lines don't form a table. A valid table is:
+
+        | col1 | col2 |
+        | ---  | ---  |     <- separator row (alignment `:---:` ok)
+        | a    | b    |     <- one or more body rows
+        | c    | d    |
+
+    We require at least one body row — a table with only a header and a
+    separator isn't worth rendering.
+    """
+    header_cells = _split_row(lines[start_idx])
+    if header_cells is None:
+        return None
+    if start_idx + 1 >= len(lines):
+        return None
+    sep_cells = _split_row(lines[start_idx + 1])
+    if sep_cells is None or len(sep_cells) != len(header_cells):
+        return None
+    if not all(_SEPARATOR_CELL_RE.fullmatch(c) for c in sep_cells):
+        return None
+
+    body_rows: list[list[str]] = []
+    consumed = 2
+    i = start_idx + 2
+    while i < len(lines):
+        row = _split_row(lines[i])
+        if row is None:
+            break
+        body_rows.append(row)
+        consumed += 1
+        i += 1
+
+    if not body_rows:
+        return None
+    return header_cells, body_rows, consumed
+
+
+def _build_feishu_table(
+    headers: list[str], rows: list[list[str]],
+) -> dict:
+    """Build a Feishu `table` card element from markdown table parts.
+
+    Feishu treats the first row of `rows` as the header automatically
+    (renders it bold); we concatenate our markdown `headers` row in
+    front of the data rows. Short rows are padded with empty cells,
+    long rows are truncated — so a malformed markdown table still
+    renders rather than failing the whole card.
+    """
+    def cell(text: str) -> dict:
+        return {"tag": "text", "text": text[:500]}
+
+    ncols = len(headers)
+    table_rows: list[list[dict]] = [[cell(h) for h in headers]]
+    for row in rows:
+        if len(row) < ncols:
+            row = list(row) + [""] * (ncols - len(row))
+        elif len(row) > ncols:
+            row = row[:ncols]
+        table_rows.append([cell(c) for c in row])
+
+    return {"tag": "table", "rows": table_rows}
+
+
+def _section_to_elements(section_text: str) -> list[dict]:
+    """Convert a `## Heading\\nbody...` section into card elements.
+
+    Walks the body line-by-line. Whenever a markdown table is detected,
+    it is flushed as a Feishu `table` element; surrounding text is
+    accumulated into a `lark_md` div that flushes whenever a table (or
+    end-of-section) boundary is hit. This way, a section containing
+    `[intro text] + [table] + [closing text]` becomes three elements
+    in the right order — preserving the section heading at the top.
+    """
+    lines = section_text.splitlines()
+    heading_line = lines[0] if lines else ""
+    body_lines = lines[1:]
+
+    elements: list[dict] = []
+    text_buf: list[str] = [heading_line] if heading_line else []
+
+    def flush_text() -> None:
+        if not text_buf:
+            return
+        text = "\n".join(text_buf).strip()
+        if text:
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": text[:2000]},
+            })
+        text_buf.clear()
+
+    i = 0
+    while i < len(body_lines):
+        result = _parse_markdown_table(body_lines, i)
+        if result is not None:
+            flush_text()
+            headers, rows, consumed = result
+            elements.append(_build_feishu_table(headers, rows))
+            i += consumed
+        else:
+            text_buf.append(body_lines[i])
+            i += 1
+    flush_text()
+
+    if not elements:
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": heading_line[:2000] or "(empty)"},
+        })
+    return elements
+
+
 def _build_feishu_card(
     message: str, title: str | None, level: str, cluster_label: str = "",
 ) -> dict:
@@ -206,6 +342,11 @@ def _build_feishu_card(
     sections separated by `hr`. Header color is derived from `level`.
     If the message has no `## ` markers, the whole body is rendered as
     one div (the "we got something weird but it's still rendered" path).
+
+    Markdown tables inside a section are detected and emitted as native
+    Feishu `table` components instead of being dumped into the `lark_md`
+    div — `lark_md` doesn't render markdown tables, only the dedicated
+    card element does.
     """
     card_title = _compose_title(title, message, cluster_label)
     _, sections = _parse_markdown_sections(message)
@@ -213,18 +354,12 @@ def _build_feishu_card(
     elements: list[dict] = []
     if not sections:
         body = message.strip() or "(empty)"
-        elements.append({
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": body[:2000]},
-        })
+        elements.extend(_section_to_elements(body))
     else:
         for i, s in enumerate(sections):
             if i > 0:
                 elements.append({"tag": "hr"})
-            elements.append({
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": s[:2000]},
-            })
+            elements.extend(_section_to_elements(s))
 
     return {
         "msg_type": "interactive",

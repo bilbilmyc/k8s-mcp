@@ -158,7 +158,7 @@ export K8S_MCP_NOTIFIERS='[
 ]'
 ```
 
-每条 `{name, type, url, cluster_label?}`。`type` 支持 `feishu`（纯文本） / `feishu_post`（飞书富文本） / **`feishu_card`**（飞书交互卡片 — 生产推荐：header 颜色随 `level` 变化，每个 `## 章节` 渲染成独立 lark_md 块）/ `slack` / `wecom` / `generic`，payload 拼装由 `notify` 工具按 type 处理，不需要 Agent 自己拼。`cluster_label` 加在卡片 header / 消息前缀上，方便一个 webhook 多集群复用。
+每条 `{name, type, url, cluster_label?}`。`type` 支持 `feishu`（纯文本） / `feishu_post`（飞书富文本） / **`feishu_card`**（飞书交互卡片 — 生产推荐：header 颜色随 `level` 变化，每个 `## 章节` 渲染成独立 lark_md 块，**section 内的 markdown 表格自动转成飞书原生 `table` 组件**）/ `slack` / `wecom` / `generic`，payload 拼装由 `notify` 工具按 type 处理，不需要 Agent 自己拼。`cluster_label` 加在卡片 header / 消息前缀上，方便一个 webhook 多集群复用。
 
 ## 文档索引
 

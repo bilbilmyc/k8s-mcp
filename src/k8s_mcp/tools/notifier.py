@@ -10,7 +10,7 @@ nobody saw it" loop on local AI-ops setups.
 Notifiers are configured via env (no secret store needed):
 
     K8S_MCP_NOTIFIERS='[
-      {"name": "ops-feishu",  "type": "feishu",
+      {"name": "ops-feishu",  "type": "feishu_card",
        "url": "https://open.feishu.cn/open-apis/bot/v2/hook/...",
        "cluster_label": "prod"},
       {"name": "ops-slack",   "type": "slack",
@@ -18,15 +18,30 @@ Notifiers are configured via env (no secret store needed):
        "cluster_label": "prod"}
     ]'
 
-Each entry: name (id used in `notifier_name=`), type (feishu/slack/
-wecom/generic), url, optional cluster_label (prefixed in the message
-header so the same webhook can multiplex clusters).
+Each entry: name (id used in `notifier_name=`), type (one of feishu /
+feishu_post / feishu_card / slack / wecom / generic), url, optional
+cluster_label (prefixed in the message header so the same webhook can
+multiplex clusters).
 
 Message format per type:
-  - feishu:  {"msg_type":"text","content":{"text":...}}
-  - wecom:   {"msgtype":"text","text":{"content":...,"mentioned_list":[]}}
-  - slack:   {"text":...}
-  - generic: POST raw JSON {"text":..., "level":..., "cluster_label":...}
+  - feishu:        {"msg_type":"text","content":{"text":...}}  (plain)
+  - feishu_post:   {"msg_type":"post","content":{"post":{...}}}  (rich text)
+  - feishu_card:   {"msg_type":"interactive","card":{...}}       (card with color header)
+  - wecom:         {"msgtype":"text","text":{"content":...,"mentioned_list":[]}}
+  - slack:         {"text":...}
+  - generic:       POST raw JSON {"text":..., "level":..., "cluster_label":...}
+
+`feishu_post` is the middle ground: rich text with title + paragraphs,
+no buttons, no color header. `feishu_card` is the full interactive
+card — header color follows `level` (info=blue, warning=orange,
+critical=red), each `## section` block in the message becomes a
+`div` element with `lark_md` content, sections separated by `hr`.
+
+Both rich variants parse the message into sections using the
+`## Heading` convention that `cluster_health_snapshot` already
+produces — so an Agent that pipes a snapshot straight into
+`notify(message=snapshot_text)` gets a readable card without
+having to format anything itself.
 
 Failure handling: any non-2xx response is captured and reported back to
 the agent (so a dead webhook doesn't silently lose the message but also
@@ -35,8 +50,11 @@ doesn't bring down the calling tool). Timeouts default to 10s.
 中文说明：
 AI 运维场景里 MCP 跑在后台巡检、但人不一定盯着 Cherry Studio ——
 本工具把巡检结果主动推送到 IM。webhook 列表走 env 配置，工具描述
-里写明支持的 type（飞书 / Slack / 企微 / generic）以及每个 type 的
-JSON 格式差异，Agent 选 type 即可，payload 拼装工具内部处理。
+里写明支持的 type（飞书文本 / 飞书富文本 post / 飞书交互卡片 card /
+Slack / 企微 / generic）以及每个 type 的 JSON 格式差异，Agent 选
+type 即可，payload 拼装工具内部处理。`feishu_card` 是推荐的
+生产用法：header 颜色随 level 变化，每个 `## 章节` 渲染成独立块，
+飞书原生支持排版，operator 在手机上扫一眼就能定位异常段落。
 """
 from __future__ import annotations
 
@@ -86,8 +104,9 @@ def _validate_notifier(n: dict, idx: int) -> str | None:
     """Return an error message if `n` is missing required fields, else None."""
     if "name" not in n or not isinstance(n["name"], str) or not n["name"]:
         return f"notifier[{idx}]: missing or empty 'name'"
-    if "type" not in n or n["type"] not in {"feishu", "slack", "wecom", "generic"}:
-        return f"notifier[{idx}] ({n.get('name','?')}): 'type' must be one of feishu|slack|wecom|generic"
+    if "type" not in n or n["type"] not in {"feishu", "feishu_post", "feishu_card",
+                                            "slack", "wecom", "generic"}:
+        return f"notifier[{idx}] ({n.get('name','?')}): 'type' must be one of feishu|feishu_post|feishu_card|slack|wecom|generic"
     if "url" not in n or not isinstance(n["url"], str) or not n["url"]:
         return f"notifier[{idx}] ({n.get('name','?')}): missing or empty 'url'"
     return None
@@ -96,13 +115,190 @@ def _validate_notifier(n: dict, idx: int) -> str | None:
 # ---------- payload building ----------------------------------------------
 
 
-def _build_payload(notifier: dict, message: str, level: str) -> dict:
+_LEVEL_HEADER_COLOR = {
+    "info": "blue",
+    "warning": "orange",
+    "critical": "red",
+}
+
+
+def _parse_markdown_sections(message: str) -> tuple[str, list[str]]:
+    """Split a `## section\\n...` message into (pre_heading_text, [section_blocks]).
+
+    `pre_heading_text` is any text that appears BEFORE the first `## `
+    heading (used as a fallback title when the caller didn't pass one
+    explicitly). Empty when the message starts with a heading.
+
+    `section_blocks` is the list of `## Name\\n...` blocks. Returns
+    `([], [])` when the message has no `## ` markers at all — the caller
+    then renders the whole message as a single block (fallback path).
+
+    Designed for the output shape of `cluster_health_snapshot` (markdown
+    sections delimited by `## `).
+    """
+    lines = message.splitlines()
+
+    # Skip leading blank lines to find the first content line.
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return "", []
+
+    # Locate the first `## ` heading (anywhere from the first content line).
+    first_heading_idx: int | None = None
+    for j in range(i, len(lines)):
+        if lines[j].startswith("## "):
+            first_heading_idx = j
+            break
+
+    if first_heading_idx is None:
+        # No headings anywhere — the whole message is the title/fallback.
+        return lines[i].strip(), []
+
+    # Anything between the first content line and the first heading is
+    # pre-section text. If the first content line IS the first heading,
+    # pre-section text is empty (the heading itself is the start of
+    # section_blocks below).
+    pre = "\n".join(lines[i:first_heading_idx]).strip() if first_heading_idx > i else ""
+
+    sections: list[str] = []
+    current: list[str] = []
+    for ln in lines[first_heading_idx:]:
+        if ln.startswith("## "):
+            if current:
+                sections.append("\n".join(current).strip())
+                current = []
+            current.append(ln)
+        else:
+            current.append(ln)
+    if current:
+        sections.append("\n".join(current).strip())
+
+    return pre, [s for s in sections if s]
+
+
+def _compose_title(
+    title: str | None, message: str, cluster_label: str = "",
+) -> str:
+    """Pick the title to put in card / post header.
+
+    Priority: explicit `title` arg > first non-empty line of `message`.
+    `cluster_label` is prepended in brackets so multi-cluster notifiers
+    stay disambiguated; truncated to 60 chars (Feishu card header limit).
+    """
+    chosen = (title or "").strip()
+    if not chosen:
+        first, _ = _parse_markdown_sections(message)
+        chosen = first
+    chosen = chosen.strip()
+    if cluster_label:
+        chosen = f"[{cluster_label}] {chosen}" if chosen else f"[{cluster_label}]"
+    return chosen[:60] or "Notification"
+
+
+def _build_feishu_card(
+    message: str, title: str | None, level: str, cluster_label: str = "",
+) -> dict:
+    """Build a Feishu interactive card payload from a structured message.
+
+    Each `## section` block becomes a card `div` with `lark_md` content;
+    sections separated by `hr`. Header color is derived from `level`.
+    If the message has no `## ` markers, the whole body is rendered as
+    one div (the "we got something weird but it's still rendered" path).
+    """
+    card_title = _compose_title(title, message, cluster_label)
+    _, sections = _parse_markdown_sections(message)
+
+    elements: list[dict] = []
+    if not sections:
+        body = message.strip() or "(empty)"
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": body[:2000]},
+        })
+    else:
+        for i, s in enumerate(sections):
+            if i > 0:
+                elements.append({"tag": "hr"})
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": s[:2000]},
+            })
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": card_title},
+                "template": _LEVEL_HEADER_COLOR.get(level, "blue"),
+            },
+            "elements": elements,
+        },
+    }
+
+
+def _build_feishu_post(
+    message: str, title: str | None, cluster_label: str = "",
+) -> dict:
+    """Build a Feishu post (rich text) payload — middle ground between
+    plain text and full cards. First non-empty line is the title;
+    remaining lines become content paragraphs. `lark_md` is not
+    supported in post format, so we just emit plain text lines (the
+    `## ` heading markers are kept — they're harmless in plain text).
+    """
+    post_title = _compose_title(title, message, cluster_label)
+
+    content_lines: list[list[dict]] = []
+    # If the message has `## ` sections, emit one paragraph per line so
+    # blank lines visually separate sections in Feishu. Otherwise emit
+    # the whole message line by line.
+    _, sections = _parse_markdown_sections(message)
+    source = sections if sections else [message]
+    for blk in source:
+        for ln in blk.splitlines():
+            stripped = ln.strip()
+            if stripped:
+                content_lines.append([{"tag": "text", "text": stripped[:200]}])
+    if not content_lines:
+        content_lines.append([{"tag": "text", "text": "(empty)"}])
+
+    return {
+        "msg_type": "post",
+        "content": {
+            "post": {
+                "zh_cn": {
+                    "title": post_title,
+                    "content": content_lines[:50],  # Feishu post limit
+                }
+            }
+        },
+    }
+
+
+def _build_payload(
+    notifier: dict, message: str, level: str, title: str | None = None,
+) -> dict:
     """Assemble the JSON body for the notifier's webhook.
 
-    The header line `[LEVEL] [cluster] — ts` is prepended so the IM
-    message is self-describing without the agent having to format it.
+    For rich Feishu variants (`feishu_post` / `feishu_card`) the message
+    is parsed into sections; the title is used in the card/post header
+    instead of being prepended to a body blob.
+
+    For text-style formats (`feishu` / `wecom` / `slack` / `generic`) the
+    header line `[LEVEL] [cluster] — ts` is prepended so the IM message
+    is self-describing without the agent having to format it.
     """
+    typ = notifier["type"]
     cluster_label = notifier.get("cluster_label", "").strip()
+
+    if typ == "feishu_card":
+        return _build_feishu_card(message, title, level, cluster_label)
+    if typ == "feishu_post":
+        return _build_feishu_post(message, title, cluster_label)
+
+    # Text-style formats.
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     prefix_bits = [_LEVEL_PREFIX.get(level, "[INFO]")]
     if cluster_label:
@@ -110,8 +306,9 @@ def _build_payload(notifier: dict, message: str, level: str) -> dict:
     prefix_bits.append(ts)
     header = " ".join(prefix_bits)
     body = f"{header}\n{message}"
+    if title:
+        body = f"**{title}**\n{body}" if typ == "slack" else f"{title}\n{body}"
 
-    typ = notifier["type"]
     if typ == "feishu":
         return {"msg_type": "text", "content": {"text": body}}
     if typ == "wecom":
@@ -195,9 +392,20 @@ def notify(
 
     Returns:
         A per-notifier results table:
-          NOTIFIER  TYPE      STATUS  DETAIL
-          ops       feishu    ✅      200 OK — body: {"StatusCode":0,...}
-          oncall    slack     ❌      HTTP 401 — body: invalid_token
+          NOTIFIER  TYPE         STATUS  DETAIL
+          ops       feishu_card  ✅      200 OK — body: {"StatusCode":0,...}
+          oncall    slack        ❌      HTTP 401 — body: invalid_token
+
+    Output type per notifier config (set at deploy time, not per call):
+      - `feishu`         plain text (`msg_type=text`)
+      - `feishu_post`    Feishu rich text (`msg_type=post`) — title +
+                         paragraph lines, no color header, no buttons
+      - `feishu_card`    Feishu interactive card (`msg_type=interactive`) —
+                         color header tied to `level`, each `## section`
+                         block in the message becomes a `div` with `lark_md`
+                         content, sections separated by `hr`. **Recommended**
+                         for health-snapshot pushes.
+      - `wecom` / `slack` / `generic`  text only.
 
         On configuration errors (no notifiers, bad name, bad JSON),
         returns a clear Chinese error message naming the fix path
@@ -207,9 +415,9 @@ def notify(
     if not notifiers:
         return (
             "❌ No notifiers configured. Set `K8S_MCP_NOTIFIERS` to a JSON "
-            "list of `{\"name\":..., \"type\": feishu|slack|wecom|generic, "
+            "list of `{\"name\":..., \"type\": feishu|feishu_post|feishu_card|slack|wecom|generic, "
             "\"url\":...}` and restart the MCP server. Example:\n"
-            "  K8S_MCP_NOTIFIERS='[{\"name\":\"ops\",\"type\":\"feishu\","
+            "  K8S_MCP_NOTIFIERS='[{\"name\":\"ops\",\"type\":\"feishu_card\","
             "\"url\":\"https://open.feishu.cn/open-apis/bot/v2/hook/...\"}]'"
         )
 
@@ -244,16 +452,14 @@ def notify(
         return "❌ All configured notifiers are invalid:\n  " + \
             "\n  ".join(validation_errors)
 
-    # Prepend the title if given
-    if title:
-        message = f"**{title}**\n{message}" if any(
-            n["type"] == "slack" for n in valid
-        ) else f"{title}\n{message}"
-
-    # Send
+    # Title handling: for rich Feishu variants the title lands in the
+    # card/post header; for text formats it goes at the top of the body
+    # (Slack mrkdwn, plain for the rest). `_build_payload` decides per
+    # notifier — keep `message` and `title` separate so we don't pollute
+    # one channel's body with another channel's prefix.
     rows: list[dict] = []
     for n in valid:
-        payload = _build_payload(n, message, level)
+        payload = _build_payload(n, message, level, title)
         ok, detail = _post(n["url"], payload)
         rows.append({
             "NOTIFIER": n["name"],

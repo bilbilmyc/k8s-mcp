@@ -49,10 +49,43 @@ def test_short_table_columns_and_alignment():
     out = short_table(rows, ["NAME", "STATUS"])
     lines = out.split("\n")
     header = lines[0].rstrip()
-    assert header.startswith("NAME")
-    assert header.endswith("STATUS")
+    assert header.lstrip().startswith("|")
+    assert header.rstrip().endswith("|")
     assert "a" in lines[2]
     assert "longer-name" in lines[3]
+
+
+def test_short_table_separator_row():
+    """Line 2 is the markdown separator: pure `---` between boundary
+    pipes — no cell text. This row is what `notifier._parse_markdown_table`
+    keys on for table detection."""
+    rows = [{"NAME": "a", "STATUS": "Running"}]
+    out = short_table(rows, ["NAME", "STATUS"])
+    sep = out.split("\n")[1]
+    assert sep.count("|") == 3
+    assert "NAME" not in sep and "STATUS" not in sep
+    assert "---" in sep
+
+
+def test_short_table_escapes_pipes_in_cell_values():
+    """A literal `|` inside a cell value would break table parsing — it
+    gets escaped to `\\|` so the column structure stays intact."""
+    rows = [{"MSG": "alpha | bravo", "TAG": "x"}]
+    out = short_table(rows, ["MSG", "TAG"])
+    body = out.split("\n")[-1]
+    assert r"alpha \| bravo" in body
+    border_pipes = body.replace(r"\|", "").count("|")
+    assert border_pipes == 3
+
+
+def test_short_table_flattens_newlines_in_cell_values():
+    """Markdown pipe-table cells can't span multiple lines; embedded
+    `\\n` is squashed to a space so the row stays one line."""
+    rows = [{"MSG": "line1\nline2", "TAG": "x"}]
+    out = short_table(rows, ["MSG", "TAG"])
+    body = out.split("\n")[-1]
+    assert "\n" not in body
+    assert "line1 line2" in body
 
 
 def test_describe_basic():

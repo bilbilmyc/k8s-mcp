@@ -639,13 +639,11 @@ def test_section_resource_usage_truncates_large_tables(monkeypatch):
     assert "n-09" not in out
 
 
-def test_section_resource_usage_degrades_when_metrics_server_absent(monkeypatch):
-    """When metrics-server isn't installed, metrics.top_nodes raises
-    RuntimeError with a specific message — we catch it and emit a
-    one-liner install hint instead of crashing the snapshot. The pod
-    subsection is implied (installing metrics-server fixes both) so
-    we early-return with the combined hint rather than emitting two
-    duplicated install instructions."""
+def test_section_resource_usage_falls_back_to_prometheus(monkeypatch):
+    """When metrics-server isn't installed AND Prometheus is reachable,
+    the snapshot falls back to PromQL (node-exporter for cluster-wide
+    node CPU%/MEM%, kubelet-cAdvisor for top-N pod CPU + memory) so
+    operators get usable numbers instead of an install hint."""
     def boom():
         raise RuntimeError(
             "metrics-server is NOT installed in the cluster. "
@@ -653,10 +651,78 @@ def test_section_resource_usage_degrades_when_metrics_server_absent(monkeypatch)
         )
     monkeypatch.setattr(health.metrics, "top_nodes", boom)
     monkeypatch.setattr(health.metrics, "top_pods", boom)
+
+    # Fake Prometheus reachable + canned responses
+    monkeypatch.setattr(
+        health.prometheus, "_resolve_prometheus_url",
+        lambda settings: "http://fake-prom:9090",
+    )
+    def fake_prom_get(path, params, base_url, bearer):
+        q = params["query"]
+        if "node_cpu_seconds_total" in q:
+            return {"data": {"resultType": "vector", "result": [
+                {"metric": {"instance": "n-1:9100"}, "value": [1, "2.7"]},
+            ]}}
+        if "node_memory_MemAvailable_bytes" in q:
+            return {"data": {"resultType": "vector", "result": [
+                {"metric": {"instance": "n-1:9100"}, "value": [1, "31.1"]},
+            ]}}
+        if "container_cpu_usage_seconds_total" in q:
+            return {"data": {"resultType": "vector", "result": [
+                {"metric": {"namespace": "kube-system", "pod": "api"},
+                 "value": [1, "0.0553"]},
+                {"metric": {"namespace": "default", "pod": "redis"},
+                 "value": [1, "0.0041"]},
+            ]}}
+        if "container_memory_working_set_bytes" in q:
+            return {"data": {"resultType": "vector", "result": [
+                {"metric": {"namespace": "kube-system", "pod": "api"},
+                 "value": [1, str(678 * 1024 * 1024)]},
+            ]}}
+        return {"data": {"resultType": "vector", "result": []}}
+    monkeypatch.setattr(health.prometheus, "_prom_get", fake_prom_get)
+
+    out = health._section_resource_usage(namespaces=None)
+    # Prometheus-tagged section header (not the metrics-server one)
+    assert "## Resource Usage (Prometheus)" in out
+    # Node table rendered with INSTANCE / CPU% / MEM% columns
+    assert "### Nodes (Prometheus)" in out
+    assert "INSTANCE" in out and "CPU%" in out and "MEM%" in out
+    assert "n-1:9100" in out and "2.7" in out and "31.1" in out
+    # Top-Pods CPU table populated from kubelet-cAdvisor
+    assert "### Top Pods by CPU" in out
+    assert "api" in out and "55m" in out
+    # Top-Pods Memory with Mi suffix
+    assert "### Top Pods by Memory" in out
+    assert "678Mi" in out
+
+
+def test_section_resource_usage_degrades_when_both_backends_unreachable(monkeypatch):
+    """When neither metrics-server nor Prometheus is reachable, the
+    section shows an actionable install hint naming both options +
+    the Prometheus diagnostic."""
+    def boom():
+        raise RuntimeError(
+            "metrics-server is NOT installed in the cluster. "
+            "Either install it..."
+        )
+    monkeypatch.setattr(health.metrics, "top_nodes", boom)
+    monkeypatch.setattr(health.metrics, "top_pods", boom)
+    # Simulate Prometheus discovery failure
+    monkeypatch.setattr(
+        health.prometheus, "_resolve_prometheus_url",
+        lambda settings: (_ for _ in ()).throw(
+            LookupError("Prometheus is not auto-discoverable in this cluster.")
+        ),
+    )
+
     out = health._section_resource_usage(namespaces=None)
     assert "## Resource Usage" in out
-    assert "metrics-server not installed" in out
-    assert "kubectl apply" in out
+    assert "neither metrics-server nor Prometheus" in out
+    assert "metrics-server:" in out and "kubectl apply" in out
+    assert "kube-prometheus-stack" in out
+    # The Prometheus diagnostic surfaces the underlying reason
+    assert "Prometheus diagnostic" in out
 
 
 # ---------- _section_pod_distribution --------------------------------------

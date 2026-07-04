@@ -9,8 +9,13 @@ What it covers (each section is independently error-bounded — one
 failing section won't blank the whole report):
 
   1. Nodes — Ready vs NotReady, pressure conditions
-  2. Resource Usage — top CPU/mem nodes + pods (metrics-server path;
-     degrades to a one-liner install hint when metrics-server absent)
+  2. Resource Usage — top CPU/mem nodes + pods; metrics-server is the
+     fast path. When metrics-server is absent (the common case on
+     clusters running kube-prometheus-stack only), the section
+     transparently falls back to Prometheus PromQL (node-exporter for
+     cluster-wide node CPU%/MEM%, kubelet-cAdvisor for top-N pods) so
+     the snapshot still ships usable numbers. Both unavailable → an
+     actionable install hint naming both options.
   3. Pending Pods + 4. Abnormal restarts (CrashLoopBackOff etc.)
   5. Pod Distribution — count by phase (Running/Pending/Failed/Succeeded)
   6. Image Pull Issues — pods stuck on ErrImagePull / ImagePullBackOff
@@ -46,7 +51,7 @@ from typing import Any
 
 from ..client import get_api_client
 from ..formatters import short_table
-from . import certs, events, metrics
+from . import certs, events, metrics, prometheus
 
 logger = logging.getLogger(__name__)
 
@@ -267,13 +272,26 @@ def _section_recent_warnings(minutes: int, namespaces: list[str] | None) -> str:
 
 
 def _section_resource_usage(namespaces: list[str] | None, top_n: int = 5) -> str:
-    """Top CPU/memory consumers among Nodes + Pods (metrics-server).
+    """Top CPU/memory consumers among Nodes + Pods.
 
-    Falls back to a one-liner with the metrics-server install hint when
-    metrics-server isn't deployed — common on dev clusters. Pod query
-    scope honors `namespaces`; nodes are always cluster-wide.
+    Two backends, tried in order:
+      1. **metrics-server** — fast, apiserver aggregation; works in any
+         cluster where it was installed. Honors `namespaces` for the pod
+         subsection (only when exactly one is given).
+      2. **Prometheus** — fallback when metrics-server is absent (the
+         common case on clusters running kube-prometheus-stack only).
+         Queries node-exporter for cluster-wide node CPU% / memory% and
+         kubelet-cAdvisor (job="kubelet") for top-N pod CPU / memory.
+         Pod queries are cluster-wide (PromQL filter for `namespaces[]`
+         would have to be repeated per query; we accept the trade-off to
+         keep the implementation simple).
+
+    When neither backend is reachable, the section shows an actionable
+    install hint for both. Each backend is individually error-bounded —
+    one failing subsection doesn't blank the rest of the report.
     """
     out: list[str] = ["## Resource Usage"]
+    metricsserver_missing = False
 
     # --- Nodes (always cluster-wide) ---
     try:
@@ -290,13 +308,12 @@ def _section_resource_usage(namespaces: list[str] | None, top_n: int = 5) -> str
                 out.append(f"(showing top {top_n} of {len(rows) - 2} nodes)")
     except RuntimeError as e:
         if "metrics-server" in str(e):
-            out.append(
-                "(metrics-server not installed — install with:\n"
-                "  kubectl apply -f https://github.com/kubernetes-sigs/"
-                "metrics-server/releases/latest/download/components.yaml)"
-            )
-            return "\n".join(out)
-        raise
+            metricsserver_missing = True
+        else:
+            raise
+
+    if metricsserver_missing:
+        return _section_resource_usage_prometheus(top_n)
 
     # --- Pods (scope = namespaces if exactly one given, else cluster-wide) ---
     out.append("")
@@ -318,10 +335,221 @@ def _section_resource_usage(namespaces: list[str] | None, top_n: int = 5) -> str
                 out.append(f"(showing top {top_n} of {len(rows) - 2} pods)")
     except RuntimeError as e:
         if "metrics-server" in str(e):
-            out.append("### Top Pods\n(metrics-server not installed — skipping)")
-            return "\n".join(out)
+            return _section_resource_usage_prometheus(top_n)
         raise
     return "\n".join(out)
+
+
+def _section_resource_usage_prometheus(top_n: int = 5) -> str:
+    """Resource-usage section rendered from Prometheus instead of
+    metrics-server. Returns either the populated section text on
+    success, or an actionable install hint when Prometheus is also
+    unreachable.
+
+    Each query is independently error-bounded — one failing subsection
+    renders as `(query failed: ...)` and the rest still ships. The
+    caller has no way to know per-query outcomes, so we degrade
+    gracefully rather than re-throwing.
+    """
+    settings = prometheus.get_settings()
+    bearer = settings.prometheus_bearer_token
+
+    try:
+        base_url = prometheus._resolve_prometheus_url(settings)
+    except Exception as e:
+        return _both_unreachable_hint(str(e))
+
+    out: list[str] = ["## Resource Usage (Prometheus)"]
+
+    # --- Nodes ---
+    try:
+        cpu_q = (
+            '100 - (avg by (instance) '
+            '(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)'
+        )
+        mem_q = (
+            '(1 - (node_memory_MemAvailable_bytes / '
+            'node_memory_MemTotal_bytes)) * 100'
+        )
+        cpu_resp = prometheus._prom_get(
+            "/api/v1/query", {"query": cpu_q}, base_url, bearer,
+        )
+        mem_resp = prometheus._prom_get(
+            "/api/v1/query", {"query": mem_q}, base_url, bearer,
+        )
+        cpu_by_inst = _prom_inst_value_dict(cpu_resp)
+        mem_by_inst = _prom_inst_value_dict(mem_resp)
+        node_rows: list[dict] = []
+        for inst in sorted(set(cpu_by_inst) | set(mem_by_inst)):
+            node_rows.append({
+                "INSTANCE": inst,
+                "CPU%": _fmt_pct(cpu_by_inst.get(inst)),
+                "MEM%": _fmt_pct(mem_by_inst.get(inst)),
+            })
+        out.append("")
+        out.append("### Nodes (Prometheus)")
+        if node_rows:
+            out.append(short_table(node_rows, ["INSTANCE", "CPU%", "MEM%"]))
+        else:
+            out.append("(no node metrics — node-exporter not scraped?)")
+    except Exception as e:
+        logger.warning("Prometheus node query failed: %s", e)
+        out.append("")
+        out.append("### Nodes (Prometheus)")
+        out.append(f"(query failed: {type(e).__name__}: {e})")
+
+    # --- Top Pods CPU ---
+    try:
+        cpu_q = (
+            'topk(10, sum by (namespace, pod) '
+            '(rate(container_cpu_usage_seconds_total{job="kubelet"}[5m])))'
+        )
+        resp = prometheus._prom_get(
+            "/api/v1/query", {"query": cpu_q}, base_url, bearer,
+        )
+        rows = sorted(
+            _prom_pod_value_rows(resp),
+            key=lambda r: r["_v"],
+            reverse=True,
+        )
+        out.append("")
+        out.append(f"### Top Pods by CPU (Prometheus, top {top_n})")
+        if rows:
+            displayed = [
+                {"NAMESPACE": r["ns"], "POD": r["pod"], "CPU": _fmt_cores(r["_v"])}
+                for r in rows[:top_n]
+            ]
+            out.append(short_table(displayed, ["NAMESPACE", "POD", "CPU"]))
+        else:
+            out.append("(no Prometheus pod CPU metrics)")
+    except Exception as e:
+        out.append("")
+        out.append(
+            f"(Prometheus pod CPU query failed: {type(e).__name__}: {e})"
+        )
+
+    # --- Top Pods Memory ---
+    try:
+        mem_q = (
+            'topk(10, sum by (namespace, pod) '
+            '(container_memory_working_set_bytes{job="kubelet"}))'
+        )
+        resp = prometheus._prom_get(
+            "/api/v1/query", {"query": mem_q}, base_url, bearer,
+        )
+        rows = sorted(
+            _prom_pod_value_rows(resp),
+            key=lambda r: r["_v"],
+            reverse=True,
+        )
+        out.append("")
+        out.append(f"### Top Pods by Memory (Prometheus, top {top_n})")
+        if rows:
+            displayed = [
+                {"NAMESPACE": r["ns"], "POD": r["pod"],
+                 "MEMORY": _fmt_bytes(r["_v"])}
+                for r in rows[:top_n]
+            ]
+            out.append(short_table(displayed, ["NAMESPACE", "POD", "MEMORY"]))
+        else:
+            out.append("(no Prometheus pod memory metrics)")
+    except Exception as e:
+        out.append("")
+        out.append(
+            f"(Prometheus pod memory query failed: {type(e).__name__}: {e})"
+        )
+
+    return "\n".join(out)
+
+
+def _both_unreachable_hint(prom_error: str) -> str:
+    """Section text when both metrics-server (the upstream caller has
+    already detected its absence) and Prometheus are unavailable —
+    gives the operator two install paths and surfaces the most useful
+    Prometheus diagnostic."""
+    first_line = prom_error.splitlines()[0] if prom_error else "no Prometheus URL"
+    return "\n".join([
+        "## Resource Usage",
+        "(neither metrics-server nor Prometheus is reachable)",
+        "",
+        "Install one of:",
+        "  metrics-server:  kubectl apply -f "
+        "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml",
+        "  kube-prometheus-stack:  helm install prometheus "
+        "prometheus-community/kube-prometheus-stack -n monitoring --create-namespace",
+        "",
+        f"Prometheus diagnostic: {first_line}",
+    ])
+
+
+def _prom_inst_value_dict(payload: dict) -> dict[str, float]:
+    """Extract `{instance_label: scalar}` from a Prometheus instant-vector
+    response. Skips series whose value can't parse as float (defensive —
+    shouldn't happen for any sane query)."""
+    out: dict[str, float] = {}
+    for r in (payload.get("data") or {}).get("result") or []:
+        m = r.get("metric") or {}
+        v = r.get("value") or []
+        if isinstance(v, list) and len(v) == 2:
+            try:
+                out[str(m.get("instance", "?"))] = float(v[1])
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _prom_pod_value_rows(payload: dict) -> list[dict]:
+    """Extract `[{ns, pod, _v}]` rows from a Prometheus `topk(...) by
+    (namespace, pod) ...` result. The caller decides sort order — we
+    keep raw series order here."""
+    rows: list[dict] = []
+    for r in (payload.get("data") or {}).get("result") or []:
+        m = r.get("metric") or {}
+        v = r.get("value") or []
+        if isinstance(v, list) and len(v) == 2:
+            try:
+                rows.append({
+                    "ns": str(m.get("namespace", "?")),
+                    "pod": str(m.get("pod", "?")),
+                    "_v": float(v[1]),
+                })
+            except (TypeError, ValueError):
+                continue
+    return rows
+
+
+def _fmt_pct(value) -> str:
+    """One decimal of percent; `?` when value is None / unparseable."""
+    if value is None:
+        return "?"
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _fmt_cores(cores: float) -> str:
+    """CPU in cores — `m` suffix for sub-core (the standard Prometheus /
+    k8s convention) so 0.0274 reads as 27m instead of 0.03."""
+    if cores < 0.001:
+        return "0"
+    if cores < 1:
+        return f"{int(cores * 1000)}m"
+    return f"{cores:.2f}"
+
+
+def _fmt_bytes(b: float) -> str:
+    """Bytes → human (Ki/Mi/Gi suffixes, base-1024). Matches the
+    format `metrics.top_nodes` / `metrics.top_pods` already use, so a
+    Feishu card reader doesn't see two different unit conventions
+    between the two backends."""
+    if b < 1024:
+        return f"{int(b)}B"
+    if b < 1024 ** 2:
+        return f"{int(b // 1024)}Ki"
+    if b < 1024 ** 3:
+        return f"{int(b // (1024 ** 2))}Mi"
+    return f"{b / (1024 ** 3):.1f}Gi"
 
 
 def _section_pod_distribution(namespaces: list[str] | None) -> str:

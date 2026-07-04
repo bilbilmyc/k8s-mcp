@@ -57,7 +57,7 @@
 
 ### 集群状态
 
-- `cluster_health_snapshot(namespaces=None, events_minutes=60, restart_threshold=3)` — ⭐ 7 维度集群体检
+- `cluster_health_snapshot(namespaces=None, events_minutes=60, restart_threshold=3)` — ⭐ 11 维度集群体检（Nodes / Resource Usage / Pending / Abnormal Restarts / Pod Distribution / Image Pull / Workloads / HPA / Orphan PVs / Certs / Events）
 - `get_certificate_expiry()` — kubeconfig / SA bundle / apiserver CA 全部证书过期
 - `rollout_status(kind, name, namespace, timeout_seconds=60, watch=False)` — Deployment / StatefulSet / DaemonSet 状态
 - `rollout_history(kind, name, namespace)` — 镜像历史（传给 `rollout_undo`）
@@ -65,7 +65,8 @@
 
 ### 主动推送
 
-- `notify(message, level="info", notifier_name=None, title=None)` — 把只读结果推到 webhook（feishu / slack / wecom / generic）
+- `notify(message, level="info", notifier_name=None, title=None)` — 把只读结果推到 webhook；按 notifier 配置的 `type` 走不同 payload：
+  - `feishu` 纯文本 / `feishu_post` 飞书富文本 / **`feishu_card`** 飞书交互卡片（header 颜色随 level 变化，每个 `## 章节` 渲染成独立 lark_md 块，生产推荐） / `slack` / `wecom` / `generic`
 
 ---
 

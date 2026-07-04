@@ -342,3 +342,207 @@ def test_register_attaches_to_mcp():
             return deco
     notifier.register(_FakeMCP())
     assert notifier.notify in calls
+
+
+# ---------- feishu_post (rich text) ----------------------------------------
+
+
+def test_feishu_post_payload_shape(monkeypatch, _patch_urlopen):
+    _set_notifiers(monkeypatch, json.dumps([
+        {"name": "ops", "type": "feishu_post", "url": "https://feishu/x",
+         "cluster_label": "staging"},
+    ]))
+    rec = _patch_urlopen["install"](_FakeResp(200))
+    out = notifier.notify(
+        "## Section A\nhello\nworld\n\n## Section B\nbye",
+        level="info", title="Daily Report",
+    )
+    assert "✅" in out
+    payload = json.loads(rec.calls[0][1])
+    assert payload["msg_type"] == "post"
+    title = payload["content"]["post"]["zh_cn"]["title"]
+    assert "Daily Report" in title
+    assert "[staging]" in title  # cluster_label prefixed
+    # Each non-empty line of the body becomes a paragraph
+    content = payload["content"]["post"]["zh_cn"]["content"]
+    flat = "".join(p[0]["text"] for p in content)
+    assert "hello" in flat
+    assert "world" in flat
+    assert "bye" in flat
+    # The `## ` heading markers should NOT be silently dropped — we keep
+    # them as plain text since Feishu post format doesn't render headings.
+    assert "## Section A" in flat
+
+
+def test_feishu_post_falls_back_to_first_line_as_title(monkeypatch, _patch_urlopen):
+    """When no `title=` is passed, the first non-empty line of the message
+    becomes the post title — mirrors what an Agent gets when it pipes a
+    snapshot straight into notify()."""
+    _set_notifiers(monkeypatch, json.dumps([
+        {"name": "ops", "type": "feishu_post", "url": "https://feishu/x"},
+    ]))
+    rec = _patch_urlopen["install"](_FakeResp(200))
+    notifier.notify("First line becomes title\n\nbody line")
+    payload = json.loads(rec.calls[0][1])
+    assert payload["content"]["post"]["zh_cn"]["title"] == "First line becomes title"
+
+
+# ---------- feishu_card (interactive) --------------------------------------
+
+
+def test_feishu_card_payload_shape(monkeypatch, _patch_urlopen):
+    """Card layout: header color from level, one div per `## section`,
+    hr separators, no `[LEVEL] [cluster] ts` prefix (that's text-only)."""
+    _set_notifiers(monkeypatch, json.dumps([
+        {"name": "ops", "type": "feishu_card", "url": "https://feishu/x",
+         "cluster_label": "prod"},
+    ]))
+    rec = _patch_urlopen["install"](_FakeResp(200))
+    msg = (
+        "k8s-dev 集群巡检\n\n"
+        "## Nodes\nTotal: 1    Ready: 1/1\n\n"
+        "## Pending Pods\n(none)"
+    )
+    notifier.notify(msg, level="warning", title="k8s-dev 集群巡检")
+    payload = json.loads(rec.calls[0][1])
+    assert payload["msg_type"] == "interactive"
+    card = payload["card"]
+    assert card["header"]["template"] == "orange"  # warning -> orange
+    assert "k8s-dev 集群巡检" in card["header"]["title"]["content"]
+    # elements: 2 divs (one per section) separated by 1 hr
+    element_tags = [e["tag"] for e in card["elements"]]
+    assert element_tags.count("div") == 2
+    assert element_tags.count("hr") == 1
+    # Each div's text uses lark_md (Feishu's markdown-ish format)
+    for e in card["elements"]:
+        if e["tag"] == "div":
+            assert e["text"]["tag"] == "lark_md"
+
+
+def test_feishu_card_color_follows_level(monkeypatch, _patch_urlopen):
+    """info=blue / warning=orange / critical=red — drives the visual
+    severity cue at the top of every card."""
+    cases = [("info", "blue"), ("warning", "orange"), ("critical", "red")]
+    for level, expected_color in cases:
+        _set_notifiers(monkeypatch, json.dumps([
+            {"name": "ops", "type": "feishu_card", "url": "https://feishu/x"},
+        ]))
+        rec = _patch_urlopen["install"](_FakeResp(200))
+        notifier.notify("hi", level=level)
+        payload = json.loads(rec.calls[0][1])
+        assert payload["card"]["header"]["template"] == expected_color, \
+            f"level={level} should map to template={expected_color}"
+
+
+def test_feishu_card_no_sections_renders_as_single_div(monkeypatch, _patch_urlopen):
+    """Edge case: message has no `## ` markers (e.g. a one-line alert).
+    We render the whole thing as a single div rather than producing an
+    empty card."""
+    _set_notifiers(monkeypatch, json.dumps([
+        {"name": "ops", "type": "feishu_card", "url": "https://feishu/x"},
+    ]))
+    rec = _patch_urlopen["install"](_FakeResp(200))
+    notifier.notify("plain text only, no markdown sections")
+    payload = json.loads(rec.calls[0][1])
+    elements = payload["card"]["elements"]
+    assert len(elements) == 1
+    assert elements[0]["tag"] == "div"
+    assert "plain text only" in elements[0]["text"]["content"]
+
+
+def test_feishu_card_does_not_include_text_prefix(monkeypatch, _patch_urlopen):
+    """The `[LEVEL] [cluster] ts` line that prefixes text-format messages
+    must NOT appear in the card body — the card already has its own
+    colored header that conveys severity + cluster, so duplicating the
+    prefix would be visual noise."""
+    _set_notifiers(monkeypatch, json.dumps([
+        {"name": "ops", "type": "feishu_card", "url": "https://feishu/x",
+         "cluster_label": "prod"},
+    ]))
+    rec = _patch_urlopen["install"](_FakeResp(200))
+    notifier.notify("## Body\nactual content", level="warning")
+    payload = json.loads(rec.calls[0][1])
+    # Serialize the whole card and assert no text-style prefix leaked in
+    flat = json.dumps(payload, ensure_ascii=False)
+    assert "[WARNING]" not in flat
+    assert "[prod]" in flat  # cluster label belongs in the header title
+
+
+# ---------- section parsing helpers ----------------------------------------
+
+
+def test_parse_markdown_sections_splits_on_heading():
+    msg = "intro line\n\n## A\nbody a\n\n## B\nbody b\nbody b2"
+    first, sections = notifier._parse_markdown_sections(msg)
+    assert first == "intro line"
+    assert len(sections) == 2
+    assert sections[0].startswith("## A")
+    assert "body a" in sections[0]
+    assert sections[1].startswith("## B")
+    assert "body b2" in sections[1]
+
+
+def test_parse_markdown_sections_handles_no_sections():
+    """A message with no `## ` markers collapses to (first_line, [])."""
+    first, sections = notifier._parse_markdown_sections("just one line\nsecond")
+    assert first == "just one line"
+    assert sections == []
+
+
+def test_compose_title_priority_title_arg_wins():
+    """Explicit title > first line of message."""
+    out = notifier._compose_title("Custom Title", "first line of msg")
+    assert out == "Custom Title"
+
+
+def test_compose_title_prepends_cluster_label():
+    """cluster_label in brackets makes multi-cluster notifiers
+    self-disambiguating in a busy channel."""
+    out = notifier._compose_title(None, "first line", cluster_label="prod")
+    assert out.startswith("[prod] ")
+    assert "first line" in out
+
+
+def test_compose_title_truncates_to_60_chars():
+    out = notifier._compose_title("x" * 100, "")
+    assert len(out) == 60
+
+
+# ---------- backward compatibility: text formats unchanged -----------------
+
+
+def test_text_format_title_still_appears_in_body(monkeypatch, _patch_urlopen):
+    """The Slack `**title**` prefix was the only way to add a title in
+    text mode; verify it still works after the refactor that moved
+    title handling from `notify()` into `_build_payload()`."""
+    _set_notifiers(monkeypatch, json.dumps([
+        {"name": "ops", "type": "slack", "url": "https://slack/x"},
+    ]))
+    rec = _patch_urlopen["install"](_FakeResp(200))
+    notifier.notify("body content", title="My Title")
+    payload = json.loads(rec.calls[0][1])
+    assert "**My Title**" in payload["text"]
+    assert "body content" in payload["text"]
+
+
+def test_mixed_text_and_card_notifiers_each_render_correctly(monkeypatch, _patch_urlopen):
+    """Broadcast with one Slack + one feishu_card notifier — verify each
+    gets its own correctly-shaped payload (the title-refactor bug we
+    just fixed used to leak `**title**` markdown into the feishu body)."""
+    _set_notifiers(monkeypatch, json.dumps([
+        {"name": "slack", "type": "slack", "url": "https://slack/x"},
+        {"name": "card",  "type": "feishu_card", "url": "https://feishu/y"},
+    ]))
+    rec = _patch_urlopen["install"](_FakeResp(200))
+    notifier.notify("## A\nbody a", level="warning", title="Header")
+    payloads = [json.loads(c[1]) for c in rec.calls]
+    # Each notifier got its own payload — 2 HTTP calls
+    assert len(payloads) == 2
+    # Card payload: msg_type=interactive, title is plain text not markdown bold
+    card_payload = next(p for p in payloads if p.get("msg_type") == "interactive")
+    flat = json.dumps(card_payload, ensure_ascii=False)
+    assert "**Header**" not in flat  # markdown bold must NOT leak into card
+    assert "Header" in flat          # but the title text itself is in the card header
+    # Slack payload: text contains the title in mrkdwn bold
+    slack_payload = next(p for p in payloads if "text" in p and "msg_type" not in p)
+    assert "**Header**" in slack_payload["text"]

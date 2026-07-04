@@ -9,11 +9,18 @@ What it covers (each section is independently error-bounded — one
 failing section won't blank the whole report):
 
   1. Nodes — Ready vs NotReady, pressure conditions
-  2. Pending Pods + 3. Abnormal restarts (CrashLoopBackOff etc.)
-  4. HPA — current vs desired
-  5. Orphan PVs (Released / Available with no claim)
-  6. Certificates (delegates to certs.get_certificate_expiry)
-  7. Recent Warning events (delegates to events.list_events)
+  2. Resource Usage — top CPU/mem nodes + pods (metrics-server path;
+     degrades to a one-liner install hint when metrics-server absent)
+  3. Pending Pods + 4. Abnormal restarts (CrashLoopBackOff etc.)
+  5. Pod Distribution — count by phase (Running/Pending/Failed/Succeeded)
+  6. Image Pull Issues — pods stuck on ErrImagePull / ImagePullBackOff
+     (a separately-actionable subset of "abnormal restarts")
+  7. Workloads — counts of Deployments / StatefulSets / DaemonSets /
+     ReplicaSets / Jobs / CronJobs
+  8. HPA — current vs desired
+  9. Orphan PVs (Released / Available with no claim)
+ 10. Certificates (delegates to certs.get_certificate_expiry)
+ 11. Recent Warning events (delegates to events.list_events)
 
 What it deliberately does NOT cover (out of scope for an MVP snapshot):
 
@@ -23,6 +30,8 @@ What it deliberately does NOT cover (out of scope for an MVP snapshot):
   - Per-container resource pressure / OOMKills — surfaced under
     "Abnormal restarts" only when restartCount crosses the threshold.
   - Network policy coverage — too many false positives on dev clusters.
+  - Per-node CPU/memory allocatable vs capacity — too noisy; the
+    Resource Usage section already surfaces the top consumers.
 
 中文说明：
 本地 AI 运维的入口工具。Agent 被问「集群现在怎么样？」时一次调这个
@@ -37,7 +46,7 @@ from typing import Any
 
 from ..client import get_api_client
 from ..formatters import short_table
-from . import certs, events
+from . import certs, events, metrics
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +73,16 @@ def _core_v1():
 def _autoscaling_v2():
     from kubernetes import client
     return client.AutoscalingV2Api(get_api_client())
+
+
+def _apps_v1():
+    from kubernetes import client
+    return client.AppsV1Api(get_api_client())
+
+
+def _batch_v1():
+    from kubernetes import client
+    return client.BatchV1Api(get_api_client())
 
 
 def _list_pods(namespaces: list[str] | None) -> list[Any]:
@@ -247,15 +266,177 @@ def _section_recent_warnings(minutes: int, namespaces: list[str] | None) -> str:
     return f"## Recent Warning Events (top {20} by last-seen)\n{out}"
 
 
+def _section_resource_usage(namespaces: list[str] | None, top_n: int = 5) -> str:
+    """Top CPU/memory consumers among Nodes + Pods (metrics-server).
+
+    Falls back to a one-liner with the metrics-server install hint when
+    metrics-server isn't deployed — common on dev clusters. Pod query
+    scope honors `namespaces`; nodes are always cluster-wide.
+    """
+    out: list[str] = ["## Resource Usage"]
+
+    # --- Nodes (always cluster-wide) ---
+    try:
+        node_table = metrics.top_nodes()
+        rows = _parse_short_table(node_table)
+        if not rows:
+            out.append("### Top Nodes\n(no node metrics)")
+        else:
+            head = rows[0:2]  # header + separator
+            body = rows[2:2 + top_n]
+            out.append("### Top Nodes (memory desc)")
+            out.append("\n".join(head + body))
+            if len(rows) - 2 > top_n:
+                out.append(f"(showing top {top_n} of {len(rows) - 2} nodes)")
+    except RuntimeError as e:
+        if "metrics-server" in str(e):
+            out.append(
+                "(metrics-server not installed — install with:\n"
+                "  kubectl apply -f https://github.com/kubernetes-sigs/"
+                "metrics-server/releases/latest/download/components.yaml)"
+            )
+            return "\n".join(out)
+        raise
+
+    # --- Pods (scope = namespaces if exactly one given, else cluster-wide) ---
+    out.append("")
+    pod_ns = namespaces[0] if namespaces and len(namespaces) == 1 else None
+    try:
+        pod_table = metrics.top_pods(namespace=pod_ns)
+        rows = _parse_short_table(pod_table)
+        if not rows:
+            out.append(
+                f"### Top Pods{' in ' + pod_ns if pod_ns else ''}\n(no pod metrics)"
+            )
+        else:
+            head = rows[0:2]
+            body = rows[2:2 + top_n]
+            scope = f" in {pod_ns}" if pod_ns else ""
+            out.append(f"### Top Pods{scope} (memory desc)")
+            out.append("\n".join(head + body))
+            if len(rows) - 2 > top_n:
+                out.append(f"(showing top {top_n} of {len(rows) - 2} pods)")
+    except RuntimeError as e:
+        if "metrics-server" in str(e):
+            out.append("### Top Pods\n(metrics-server not installed — skipping)")
+            return "\n".join(out)
+        raise
+    return "\n".join(out)
+
+
+def _section_pod_distribution(namespaces: list[str] | None) -> str:
+    """Count of pods per phase (Running / Pending / Failed / Succeeded / Unknown).
+
+    Cheaper to render than the full `list_pods` table but gives the
+    operator a "what's the cluster actually doing" one-liner.
+    """
+    counts: dict[str, int] = {
+        "Running": 0, "Pending": 0, "Failed": 0,
+        "Succeeded": 0, "Unknown": 0,
+    }
+    for p in _list_pods(namespaces):
+        phase = p.status.phase or "Unknown"
+        counts[phase if phase in counts else "Unknown"] += 1
+    total = sum(counts.values())
+    rows = [
+        {"PHASE": k, "COUNT": str(v)}
+        for k, v in sorted(counts.items(), key=lambda kv: -kv[1]) if v > 0
+    ]
+    if not rows:
+        return "## Pod Distribution\n(no pods)"
+    return f"## Pod Distribution (total {total})\n" + \
+        short_table(rows, ["PHASE", "COUNT"])
+
+
+def _section_image_pull(namespaces: list[str] | None) -> str:
+    """Pods stuck on image-pull failures (distinct actionable signal).
+
+    Separate from "Abnormal Restarts" because image-pull pods typically
+    have `restartCount=0` (the container never ran) and a `waiting.reason`
+    of `ErrImagePull` / `ImagePullBackOff` / `InvalidImageName`. The fix
+    is usually edit the image reference or check `imagePullSecrets` /
+    registry creds — different from the restart-thrash category.
+    """
+    rows: list[dict] = []
+    for p in _list_pods(namespaces):
+        for cs in (p.status.container_statuses or []):
+            waiting = (cs.state.waiting.reason if cs.state.waiting else None)
+            if waiting in ("ErrImagePull", "ImagePullBackOff", "InvalidImageName"):
+                rows.append({
+                    "POD": f"{p.metadata.namespace}/{p.metadata.name}",
+                    "CONTAINER": cs.name,
+                    "REASON": waiting,
+                    "MESSAGE": (cs.state.waiting.message or "")[:100],
+                })
+    if not rows:
+        return "## Image Pull Issues\n(none — all images resolved)"
+    rows.sort(key=lambda r: (r["REASON"], r["POD"]))
+    return f"## Image Pull Issues ({len(rows)})\n" + \
+        short_table(rows[:20], ["POD", "CONTAINER", "REASON", "MESSAGE"])
+
+
+def _section_workloads(namespaces: list[str] | None) -> str:
+    """Count of Deployments / StatefulSets / DaemonSets / ReplicaSets
+    / Jobs / CronJobs — a "how many workloads am I responsible for"
+    one-glance summary.
+
+    Each kind's list call is wrapped independently so one bad call
+    (e.g. RBAC denied on CronJobs) shows as `?` rather than blanking
+    the section.
+    """
+    apps = _apps_v1()
+    batch = _batch_v1()
+    nss = namespaces
+
+    def _count(ns_fn, all_fn):
+        try:
+            if nss:
+                return sum(len(ns_fn(ns).items) for ns in nss)
+            return len(all_fn().items)
+        except Exception:  # noqa: BLE001
+            return "?"
+
+    pairs = [
+        ("Deployment",  apps.list_namespaced_deployment,
+                       apps.list_deployment_for_all_namespaces),
+        ("StatefulSet", apps.list_namespaced_stateful_set,
+                       apps.list_stateful_set_for_all_namespaces),
+        ("DaemonSet",   apps.list_namespaced_daemon_set,
+                       apps.list_daemon_set_for_all_namespaces),
+        ("ReplicaSet",  apps.list_namespaced_replica_set,
+                       apps.list_replica_set_for_all_namespaces),
+        ("Job",         batch.list_namespaced_job,
+                       batch.list_job_for_all_namespaces),
+        ("CronJob",     batch.list_namespaced_cron_job,
+                       batch.list_cron_job_for_all_namespaces),
+    ]
+    rows = [
+        {"KIND": label, "COUNT": str(_count(ns_fn, all_fn))}
+        for label, ns_fn, all_fn in pairs
+    ]
+    return "## Workloads\n" + short_table(rows, ["KIND", "COUNT"])
+
+
+def _parse_short_table(table_str: str) -> list[str]:
+    """Split a `short_table` string into lines, dropping any blanks.
+
+    Used by Resource Usage to truncate to top-N while preserving the
+    header + separator + first N body rows.
+    """
+    return [ln for ln in table_str.splitlines() if ln.strip()]
+
+
 # ---------- headline summary -------------------------------------------------
 
 
 def _headline(
     node_total: int, not_ready: int, pending: int,
-    abnormal: int, expiring_certs: int, hpa_off: int, orphan_pvs: int,
+    abnormal: int, image_pull: int, expiring_certs: int,
+    hpa_off: int, orphan_pvs: int,
 ) -> str:
     """Top-of-report one-liner. Color-coded plain text — no ANSI."""
-    if (not_ready + pending + abnormal + expiring_certs + hpa_off + orphan_pvs) == 0:
+    if (not_ready + pending + abnormal + image_pull
+            + expiring_certs + hpa_off + orphan_pvs) == 0:
         overall = "✅ HEALTHY"
     else:
         overall = "⚠️  ATTENTION"
@@ -263,6 +444,7 @@ def _headline(
         f"Nodes: {node_total - not_ready}/{node_total} Ready",
         f"Pending Pods: {pending}",
         f"Abnormal Restarts: {abnormal}",
+        f"Image Pull: {image_pull}",
         f"HPA off-target: {hpa_off}",
         f"Orphan PVs: {orphan_pvs}",
         f"Certs expiring: {expiring_certs}",
@@ -314,16 +496,26 @@ def cluster_health_snapshot(
     sections: list[str] = []
     headline_counts = {
         "node_total": 0, "not_ready": 0, "pending": 0,
-        "abnormal": 0, "expiring_certs": 0, "hpa_off": 0, "orphan_pvs": 0,
+        "abnormal": 0, "image_pull": 0, "expiring_certs": 0,
+        "hpa_off": 0, "orphan_pvs": 0,
     }
 
     section_builders = [
         ("Nodes", _section_nodes, lambda s: _count_from_section(s, "NotReady:") and "  "),
+        ("Resource Usage", lambda: _section_resource_usage(namespaces),
+         lambda s: 0),  # informational; no headline contribution
         ("Pending Pods", lambda: _section_pending_pods(namespaces),
          lambda s: _int_after(s, "## Pending Pods (")),
         ("Abnormal Restarts",
          lambda: _section_abnormal_restarts(namespaces, restart_threshold),
          lambda s: _int_after(s, "## Abnormal Restarts (")),
+        ("Pod Distribution", lambda: _section_pod_distribution(namespaces),
+         lambda s: 0),  # informational
+        ("Image Pull Issues", lambda: _section_image_pull(namespaces),
+         lambda s: _int_after(s, "## Image Pull Issues (")
+         if "all images resolved" not in s else 0),
+        ("Workloads", lambda: _section_workloads(namespaces),
+         lambda s: 0),  # informational
         ("HPA", lambda: _section_hpa(namespaces),
          lambda s: _int_after(s, "## HPA (") if "not at desired" in s else 0),
         ("Orphan PVs", _section_orphan_pvs,
@@ -351,6 +543,8 @@ def cluster_health_snapshot(
                 headline_counts["pending"] = c
             elif name == "Abnormal Restarts":
                 headline_counts["abnormal"] = c
+            elif name == "Image Pull Issues":
+                headline_counts["image_pull"] = c
             elif name == "HPA":
                 headline_counts["hpa_off"] = c
             elif name == "Orphan PVs":

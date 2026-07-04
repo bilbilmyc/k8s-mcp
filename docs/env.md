@@ -98,7 +98,7 @@ find_prometheus_service(namespace=None)
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `K8S_MCP_NOTIFIERS` | (空) | JSON 数组，每条 `{name, type, url, cluster_label?}`。`type` 支持 `feishu` / `slack` / `wecom` / `generic`，由 `notify` 工具按 type 拼 payload。 |
+| `K8S_MCP_NOTIFIERS` | (空) | JSON 数组，每条 `{name, type, url, cluster_label?}`。`type` 支持 `feishu` / `feishu_post` / `feishu_card` / `slack` / `wecom` / `generic`，由 `notify` 工具按 type 拼 payload。生产推荐 `feishu_card`：交互卡片 + header 颜色随 `level` 变化 + 每个 `## 章节` 独立渲染。 |
 
 ### dev / 离线
 

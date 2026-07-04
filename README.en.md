@@ -149,7 +149,7 @@ Push the output of read-only tools (typically `cluster_health_snapshot` /
 
 ```bash
 export K8S_MCP_NOTIFIERS='[
-  {"name": "ops-feishu", "type": "feishu",
+  {"name": "ops-feishu", "type": "feishu_card",
    "url": "https://open.feishu.cn/open-apis/bot/v2/hook/...",
    "cluster_label": "prod"},
   {"name": "oncall", "type": "slack",
@@ -158,10 +158,14 @@ export K8S_MCP_NOTIFIERS='[
 ]'
 ```
 
-Each entry: `{name, type, url, cluster_label?}`. `type` is `feishu` /
-`slack` / `wecom` / `generic`; the `notify` tool assembles the per-type
-JSON payload so the agent doesn't have to. `cluster_label` is prefixed on
-the message so a single webhook can multiplex multiple clusters.
+Each entry: `{name, type, url, cluster_label?}`. `type` is `feishu`
+(plain text) / `feishu_post` (Feishu rich text) / **`feishu_card`**
+(Feishu interactive card — recommended for production: header color
+follows `level`, each `## section` block renders as its own `lark_md`
+card element) / `slack` / `wecom` / `generic`; the `notify` tool
+assembles the per-type JSON payload so the agent doesn't have to.
+`cluster_label` is prefixed on the card header / message so a single
+webhook can multiplex multiple clusters.
 
 ## Documentation index
 

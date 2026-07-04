@@ -70,7 +70,9 @@ class _FakeContainerState:
 
 
 class _FakeWaiting:
-    def __init__(self, reason): self.reason = reason
+    def __init__(self, reason="", message=""):
+        self.reason = reason
+        self.message = message
 
 
 class _FakeRunning:
@@ -561,3 +563,336 @@ def test_register_attaches_to_mcp(monkeypatch):
             return deco
     health.register(_FakeMCP())
     assert health.cluster_health_snapshot in calls
+
+
+# ---------- _section_resource_usage ----------------------------------------
+
+
+class _FakeCustomObjectsApi:
+    """Stub for kubernetes CustomObjectsApi (metrics.k8s.io/v1beta1)."""
+
+    def __init__(self, nodes=(), pods=()):
+        self._nodes = list(nodes)
+        self._pods = list(pods)
+
+    def list_cluster_custom_object(self, group, version, plural, **kw):
+        if plural == "nodes":
+            return {"items": self._nodes}
+        if plural == "pods":
+            return {"items": self._pods}
+        raise RuntimeError(f"unexpected plural: {plural}")
+
+    def list_namespaced_custom_object(self, group, version, ns, plural, **kw):
+        if plural == "pods":
+            return {"items": self._pods}
+        raise RuntimeError(f"unexpected plural: {plural}")
+
+
+def _stub_metrics(monkeypatch, nodes=(), pods=()):
+    """Patch metrics.top_nodes / metrics.top_pods to return canned data."""
+    monkeypatch.setattr(
+        health.metrics, "top_nodes",
+        lambda: "NAME      CPU    MEMORY\n--------  -----  ------\nn-1       100m   4Gi\n",
+    )
+    monkeypatch.setattr(
+        health.metrics, "top_pods",
+        lambda namespace=None: (
+            "NAME       NAMESPACE  CPU    MEMORY\n"
+            "---------  ---------  -----  ------\n"
+            "app-pod-1  default    50m    1Gi\n"
+        ),
+    )
+
+
+def test_section_resource_usage_renders_top_nodes_and_pods(monkeypatch):
+    """Happy path: both top_nodes and top_pods return data; both
+    subsections render inside the same `## Resource Usage` block."""
+    _stub_metrics(monkeypatch)
+    out = health._section_resource_usage(namespaces=None, top_n=5)
+    assert "## Resource Usage" in out
+    assert "### Top Nodes" in out
+    assert "n-1" in out
+    assert "### Top Pods" in out
+    assert "app-pod-1" in out
+
+
+def test_section_resource_usage_truncates_large_tables(monkeypatch):
+    """When metrics returns > top_n rows, render only the top N + an
+    explicit count of the hidden rows so the operator knows there's more."""
+    def fake_top_nodes():
+        rows = ["NAME      CPU    MEMORY\n", "--------  -----  ------\n"]
+        for i in range(10):
+            rows.append(f"n-{i:02d}      100m   {10 - i}Gi\n")
+        return "".join(rows)
+    def fake_top_pods(namespace=None):
+        rows = ["NAME  NAMESPACE  CPU  MEMORY\n", "----  ---------  ---  ------\n"]
+        for i in range(10):
+            rows.append(f"p-{i:02d}  default    10m  {10 - i}Gi\n")
+        return "".join(rows)
+    monkeypatch.setattr(health.metrics, "top_nodes", fake_top_nodes)
+    monkeypatch.setattr(health.metrics, "top_pods", fake_top_pods)
+    out = health._section_resource_usage(namespaces=None, top_n=3)
+    assert "showing top 3 of 10 nodes" in out
+    assert "showing top 3 of 10 pods" in out
+    # Only first 3 data rows visible
+    assert "n-00" in out and "n-01" in out and "n-02" in out
+    assert "n-09" not in out
+
+
+def test_section_resource_usage_degrades_when_metrics_server_absent(monkeypatch):
+    """When metrics-server isn't installed, metrics.top_nodes raises
+    RuntimeError with a specific message — we catch it and emit a
+    one-liner install hint instead of crashing the snapshot. The pod
+    subsection is implied (installing metrics-server fixes both) so
+    we early-return with the combined hint rather than emitting two
+    duplicated install instructions."""
+    def boom():
+        raise RuntimeError(
+            "metrics-server is NOT installed in the cluster. "
+            "Either install it..."
+        )
+    monkeypatch.setattr(health.metrics, "top_nodes", boom)
+    monkeypatch.setattr(health.metrics, "top_pods", boom)
+    out = health._section_resource_usage(namespaces=None)
+    assert "## Resource Usage" in out
+    assert "metrics-server not installed" in out
+    assert "kubectl apply" in out
+
+
+# ---------- _section_pod_distribution --------------------------------------
+
+
+def test_section_pod_distribution_counts_phases(_stub_apis):
+    pods = [
+        _FakePod("default", "run-1", _FakePodStatus("Running")),
+        _FakePod("default", "run-2", _FakePodStatus("Running")),
+        _FakePod("default", "stuck", _FakePodStatus("Pending")),
+        _FakePod("default", "done", _FakePodStatus("Succeeded")),
+        _FakePod("default", "bad", _FakePodStatus("Failed")),
+    ]
+    _stub_apis(core=_FakeCoreV1(pods_all=pods))
+    out = health._section_pod_distribution(namespaces=None)
+    assert "## Pod Distribution (total 5)" in out
+    assert "Running" in out and "2" in out  # highest count first
+    assert "Pending" in out
+    assert "Succeeded" in out
+    assert "Failed" in out
+
+
+def test_section_pod_distribution_handles_empty_cluster(_stub_apis):
+    _stub_apis(core=_FakeCoreV1(pods_all=[]))
+    out = health._section_pod_distribution(namespaces=None)
+    assert "no pods" in out
+
+
+# ---------- _section_image_pull --------------------------------------------
+
+
+def test_section_image_pull_lists_pulling_pods(_stub_apis):
+    """Pods in ErrImagePull / ImagePullBackOff / InvalidImageName are
+    listed separately from the abnormal-restarts section."""
+    pods = [
+        _FakePod("default", "bad-image", _FakePodStatus(
+            "Pending", container_statuses=[
+                _FakeContainerStatus("app", restart_count=0,
+                                     waiting_reason="ImagePullBackOff"),
+            ])),
+        _FakePod("default", "typo-image", _FakePodStatus(
+            "Pending", container_statuses=[
+                _FakeContainerStatus("app", restart_count=0,
+                                     waiting_reason="ErrImagePull"),
+            ])),
+        _FakePod("default", "crashing", _FakePodStatus(
+            "Running", container_statuses=[
+                _FakeContainerStatus("app", restart_count=10,
+                                     waiting_reason="CrashLoopBackOff"),
+            ])),
+    ]
+    _stub_apis(core=_FakeCoreV1(pods_all=pods))
+    out = health._section_image_pull(namespaces=None)
+    assert "## Image Pull Issues (2)" in out
+    assert "bad-image" in out
+    assert "typo-image" in out
+    # CrashLoopBackOff is NOT an image pull issue — should not appear here
+    assert "crashing" not in out
+
+
+def test_section_image_pull_clean_when_no_issues(_stub_apis):
+    _stub_apis(core=_FakeCoreV1(pods_all=[
+        _FakePod("default", "ok", _FakePodStatus("Running", container_statuses=[
+            _FakeContainerStatus("app", restart_count=0, running=True),
+        ])),
+    ]))
+    out = health._section_image_pull(namespaces=None)
+    assert "all images resolved" in out
+
+
+# ---------- _section_workloads ---------------------------------------------
+
+
+class _FakeListResp:
+    def __init__(self, items): self.items = items
+
+
+class _FakeAppsV1:
+    def __init__(self, deployments=(), statefulsets=(), daemonsets=(),
+                 replicasets=()):
+        self._d, self._s, self._ds, self._rs = (
+            deployments, statefulsets, daemonsets, replicasets,
+        )
+    def list_deployment_for_all_namespaces(self):
+        return _FakeListResp(self._d)
+    def list_stateful_set_for_all_namespaces(self):
+        return _FakeListResp(self._s)
+    def list_daemon_set_for_all_namespaces(self):
+        return _FakeListResp(self._ds)
+    def list_replica_set_for_all_namespaces(self):
+        return _FakeListResp(self._rs)
+    # The namespaced_* methods are referenced (attribute access) by
+    # `_section_workloads` regardless of `namespaces=` — provide no-op
+    # stubs so the attribute lookup succeeds. They should NOT be called
+    # in tests where `namespaces=None`.
+    def list_namespaced_deployment(self, ns):
+        raise AssertionError("namespaced call leaked into cluster-wide test")
+    def list_namespaced_stateful_set(self, ns):
+        raise AssertionError("namespaced call leaked into cluster-wide test")
+    def list_namespaced_daemon_set(self, ns):
+        raise AssertionError("namespaced call leaked into cluster-wide test")
+    def list_namespaced_replica_set(self, ns):
+        raise AssertionError("namespaced call leaked into cluster-wide test")
+
+
+class _FakeBatchV1:
+    def __init__(self, jobs=(), cronjobs=()):
+        self._j, self._cj = jobs, cronjobs
+    def list_job_for_all_namespaces(self):
+        return _FakeListResp(self._j)
+    def list_cron_job_for_all_namespaces(self):
+        return _FakeListResp(self._cj)
+    def list_namespaced_job(self, ns):
+        raise AssertionError("namespaced call leaked into cluster-wide test")
+    def list_namespaced_cron_job(self, ns):
+        raise AssertionError("namespaced call leaked into cluster-wide test")
+
+
+class _WorkloadMeta:
+    """Tiny workload meta — just needs a name; avoids colliding with
+    the richer `_FakeMeta` defined earlier (which carries namespace
+    + creation_timestamp)."""
+    def __init__(self, name):
+        self.name = name
+
+
+def _w(name):
+    """Tiny fake workload object: just needs .metadata.name for counting."""
+    o = type("W", (), {})()
+    o.metadata = _WorkloadMeta(name)
+    return o
+
+
+def test_section_workloads_counts_each_kind(monkeypatch):
+    monkeypatch.setattr(health, "_apps_v1", lambda: _FakeAppsV1(
+        deployments=[_w("d1"), _w("d2")],
+        statefulsets=[_w("s1")],
+        daemonsets=[_w("ds1"), _w("ds2"), _w("ds3")],
+        replicasets=[_w("rs1")],
+    ))
+    monkeypatch.setattr(health, "_batch_v1", lambda: _FakeBatchV1(
+        jobs=[_w("j1")], cronjobs=[_w("cj1"), _w("cj2")],
+    ))
+    out = health._section_workloads(namespaces=None)
+    assert "## Workloads" in out
+    assert "Deployment" in out and "2" in out
+    assert "StatefulSet" in out and "1" in out
+    assert "DaemonSet" in out and "3" in out
+    assert "ReplicaSet" in out and "1" in out
+    assert "Job" in out and "1" in out
+    assert "CronJob" in out and "2" in out
+
+
+def test_section_workloads_handles_rbac_denied_independently(monkeypatch):
+    """If one kind's list call raises (e.g. RBAC denied), the others
+    still render — counts show `?` for the failing kind."""
+    class _BrokenApps:
+        def list_deployment_for_all_namespaces(self):
+            raise RuntimeError("forbidden")
+        def list_stateful_set_for_all_namespaces(self):
+            return _FakeListResp([_w("s1")])
+        def list_daemon_set_for_all_namespaces(self):
+            return _FakeListResp([])
+        def list_replica_set_for_all_namespaces(self):
+            return _FakeListResp([])
+        # namespaced_* are referenced (attribute access) but not called
+        # when namespaces=None — provide stubs so the attribute lookup
+        # doesn't AttributeError before _count() decides to skip them.
+        def list_namespaced_deployment(self, ns):
+            raise AssertionError("namespaced call leaked")
+        def list_namespaced_stateful_set(self, ns):
+            raise AssertionError("namespaced call leaked")
+        def list_namespaced_daemon_set(self, ns):
+            raise AssertionError("namespaced call leaked")
+        def list_namespaced_replica_set(self, ns):
+            raise AssertionError("namespaced call leaked")
+    monkeypatch.setattr(health, "_apps_v1", lambda: _BrokenApps())
+    monkeypatch.setattr(health, "_batch_v1", lambda: _FakeBatchV1())
+    out = health._section_workloads(namespaces=None)
+    assert "Deployment" in out and "?" in out
+    # StatefulSet still counted even though Deployment call failed
+    assert "StatefulSet" in out and "1" in out
+
+
+# ---------- end-to-end: new sections show up in the report ----------------
+
+
+def test_cluster_health_snapshot_includes_new_sections(_stub_apis, monkeypatch):
+    """End-to-end: when cluster_health_snapshot runs, the new sections
+    appear in the output and their counts feed into the headline."""
+    nodes = [_FakeNode("n-1", [_FakeCondition("Ready", "True")])]
+    pods = [
+        _FakePod("default", "ok", _FakePodStatus("Running", container_statuses=[
+            _FakeContainerStatus("app", restart_count=0, running=True),
+        ])),
+    ]
+    _stub_apis(core=_FakeCoreV1(nodes=nodes, pods_all=pods))
+    monkeypatch.setattr(
+        health.certs, "get_certificate_expiry",
+        lambda: "## Certificates\n(none)",
+    )
+    monkeypatch.setattr(health.events, "list_events", lambda **kw: "(no events)")
+    _stub_metrics(monkeypatch)
+    monkeypatch.setattr(health, "_apps_v1", lambda: _FakeAppsV1())
+    monkeypatch.setattr(health, "_batch_v1", lambda: _FakeBatchV1())
+
+    out = health.cluster_health_snapshot()
+
+    # New sections present in the report
+    assert "## Resource Usage" in out
+    assert "## Pod Distribution" in out
+    assert "## Image Pull Issues" in out
+    assert "## Workloads" in out
+
+    # Headline now includes Image Pull count
+    assert "Image Pull: 0" in out
+
+
+def test_cluster_health_snapshot_image_pull_triggers_attention(_stub_apis, monkeypatch):
+    """At least one ImagePullBackOff pod → headline ATTENTION (not HEALTHY)
+    AND the new `Image Pull` count is non-zero in the headline line."""
+    nodes = [_FakeNode("n-1", [_FakeCondition("Ready", "True")])]
+    pods = [
+        _FakePod("default", "bad-image", _FakePodStatus(
+            "Pending", container_statuses=[
+                _FakeContainerStatus("app", restart_count=0,
+                                     waiting_reason="ImagePullBackOff"),
+            ])),
+    ]
+    _stub_apis(core=_FakeCoreV1(nodes=nodes, pods_all=pods))
+    monkeypatch.setattr(
+        health.certs, "get_certificate_expiry",
+        lambda: "## Certificates\n(none)",
+    )
+    monkeypatch.setattr(health.events, "list_events", lambda **kw: "(no events)")
+
+    out = health.cluster_health_snapshot()
+    assert "ATTENTION" in out
+    assert "Image Pull: 1" in out

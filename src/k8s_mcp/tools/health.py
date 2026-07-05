@@ -402,39 +402,39 @@ def _section_workloads(namespaces: list[str] | None) -> str:
     / Jobs / CronJobs — a "how many workloads am I responsible for"
     one-glance summary.
 
+    Cluster-wide list + client-side filter, same pattern as
+    `_section_hpa`. Avoids the N+1 `list_namespaced_*` loop that
+    previously turned a 50-namespace snapshot into ~300 apiserver
+    calls (6 kinds × 50 namespaces).
+
     Each kind's list call is wrapped independently so one bad call
     (e.g. RBAC denied on CronJobs) shows as `?` rather than blanking
     the section.
     """
     apps = _apps_v1()
     batch = _batch_v1()
-    nss = namespaces
+    ns_filter = set(namespaces) if namespaces else None
 
-    def _count(ns_fn, all_fn):
+    def _count(all_fn):
         try:
-            if nss:
-                return sum(len(ns_fn(ns).items) for ns in nss)
-            return len(all_fn().items)
+            items = list(all_fn().items)
+            if ns_filter is not None:
+                items = [it for it in items if it.metadata.namespace in ns_filter]
+            return len(items)
         except Exception:  # noqa: BLE001
             return "?"
 
     pairs = [
-        ("Deployment",  apps.list_namespaced_deployment,
-                       apps.list_deployment_for_all_namespaces),
-        ("StatefulSet", apps.list_namespaced_stateful_set,
-                       apps.list_stateful_set_for_all_namespaces),
-        ("DaemonSet",   apps.list_namespaced_daemon_set,
-                       apps.list_daemon_set_for_all_namespaces),
-        ("ReplicaSet",  apps.list_namespaced_replica_set,
-                       apps.list_replica_set_for_all_namespaces),
-        ("Job",         batch.list_namespaced_job,
-                       batch.list_job_for_all_namespaces),
-        ("CronJob",     batch.list_namespaced_cron_job,
-                       batch.list_cron_job_for_all_namespaces),
+        ("Deployment",  apps.list_deployment_for_all_namespaces),
+        ("StatefulSet", apps.list_stateful_set_for_all_namespaces),
+        ("DaemonSet",   apps.list_daemon_set_for_all_namespaces),
+        ("ReplicaSet",  apps.list_replica_set_for_all_namespaces),
+        ("Job",         batch.list_job_for_all_namespaces),
+        ("CronJob",     batch.list_cron_job_for_all_namespaces),
     ]
     rows = [
-        {"KIND": label, "COUNT": str(_count(ns_fn, all_fn))}
-        for label, ns_fn, all_fn in pairs
+        {"KIND": label, "COUNT": str(_count(all_fn))}
+        for label, all_fn in pairs
     ]
     return "## Workloads\n" + short_table(rows, ["KIND", "COUNT"])
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import UTC
 from typing import Any
 
 import yaml
@@ -27,7 +26,7 @@ from kubernetes.dynamic.exceptions import ResourceNotFoundError, ResourceNotUniq
 from ..client import get_api_client
 from ..config import get_settings
 from ..formatters import describe as describe_fmt
-from ..formatters import mask_secret_data, short_table, to_yaml
+from ..formatters import format_age, mask_secret_data, short_table, to_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +189,7 @@ def list_resources(
             "NAME": md.get("name"),
             "NAMESPACE": md.get("namespace", ""),
             "STATUS": _status_for(kind, status),
-            "AGE": _age(md.get("creationTimestamp")),
+            "AGE": format_age(md.get("creationTimestamp")),
         }
         for col, fn in wide_cols:
             row[col] = fn(obj)
@@ -249,15 +248,30 @@ def get_resource_yaml(
 
 
 # Server-managed metadata keys: stamped by the apiserver on every resource,
-# never user-edited, and `managedFields` in particular is the loudest noise
-# in any kubectl-style YAML dump of a real cluster.
-_MANAGED_METADATA_KEYS = (
+# never user-edited. The full set is used by `_structural_diff` (to ignore
+# fields that change on every read); a subset of these are pure noise we
+# hide in YAML output (`_strip_managed_metadata`). `managedFields` in
+# particular is the loudest noise in any kubectl-style YAML dump of a
+# real cluster.
+_SERVER_MANAGED_METADATA_KEYS: frozenset[str] = frozenset({
     "managedFields",
     "resourceVersion",
     "uid",
     "generation",
     "selfLink",
-)
+    "creationTimestamp",
+})
+
+# Fields we actively hide in YAML output.creationTimestamp is intentionally
+# NOT in this set — it's useful to humans ("when was this created?"), even
+# though the apiserver stamps it.
+_YAML_NOISE_METADATA_KEYS: frozenset[str] = frozenset({
+    "managedFields",
+    "resourceVersion",
+    "uid",
+    "generation",
+    "selfLink",
+})
 
 
 def _strip_managed_metadata(obj: dict, *, include_managed_fields: bool) -> dict:
@@ -266,10 +280,10 @@ def _strip_managed_metadata(obj: dict, *, include_managed_fields: bool) -> dict:
     md = obj.get("metadata")
     if not isinstance(md, dict):
         return obj
-    if not any(k in md for k in _MANAGED_METADATA_KEYS):
+    if not any(k in md for k in _YAML_NOISE_METADATA_KEYS):
         return obj  # nothing to strip — avoid a needless copy
     out = dict(obj)
-    out["metadata"] = {k: v for k, v in md.items() if k not in _MANAGED_METADATA_KEYS}
+    out["metadata"] = {k: v for k, v in md.items() if k not in _YAML_NOISE_METADATA_KEYS}
     return out
 
 
@@ -425,17 +439,13 @@ def _structural_diff(old: dict, new: dict, prefix: str = "") -> list[str]:
     Ignores server-managed fields (metadata.resourceVersion, .uid, .managedFields,
     .creationTimestamp, .generation, status) so the diff stays meaningful.
     """
-    server_managed_metadata = {
-        "resourceVersion", "uid", "managedFields",
-        "creationTimestamp", "generation", "selfLink",
-    }
     server_managed_top_level = {"status"}
 
     def strip(d):
         if isinstance(d, dict):
             md = d.get("metadata")
             if isinstance(md, dict):
-                for k in server_managed_metadata:
+                for k in _SERVER_MANAGED_METADATA_KEYS:
                     md.pop(k, None)
         return d
 
@@ -482,6 +492,40 @@ def apply_yaml(yaml_content: str) -> str:
 
     Best practice: ALWAYS call `diff_resource` (or `get_resource_yaml` to
     inspect current state) before applying, and confirm with the user.
+
+    Returns one line per applied resource in the form
+    "{kind}/{namespace}/{name}: <action>" where `<action>` is one of
+    `created` / `configured (patched)` / `unchanged`. Internal callers
+    that need the structured per-doc result should use `_apply_yaml_records`.
+    """
+    records = _apply_yaml_records(yaml_content)
+    if records == ["(empty manifest)"]:
+        return "(empty manifest)"
+    # Match the legacy "kind/name: action" shape (no namespace prefix) for
+    # backward compat with downstream callers / tests. The structured form
+    # is available via `_apply_yaml_records`.
+    lines = [
+        f"{r['kind']}/{r['name']}: {r['action']}"
+        for r in records
+    ]
+    return "\n".join(lines)
+
+
+def _apply_yaml_records(yaml_content: str) -> list[dict] | list[str]:
+    """Structured version of `apply_yaml`.
+
+    Returns either `["(empty manifest)"]` for the empty-doc sentinel, or a
+    list of per-doc records:
+        {
+            "kind": str,
+            "name": str,
+            "namespace": str | None,
+            "action": "created" | "configured (patched)" | "unchanged",
+            "error": str | None,
+        }
+
+    Raises PermissionError for read_only / allowlist violations,
+    ValueError for unknown kinds, RuntimeError for resource conflicts.
     """
     settings = get_settings()
     if settings.read_only:
@@ -491,7 +535,7 @@ def apply_yaml(yaml_content: str) -> str:
 
     docs = [d for d in yaml.safe_load_all(yaml_content) if d is not None]
     if not docs:
-        return "(empty manifest)"
+        return ["(empty manifest)"]
 
     # Validate namespace allowlist BEFORE touching the cluster client.
     for doc in docs:
@@ -502,7 +546,7 @@ def apply_yaml(yaml_content: str) -> str:
             )
 
     dc = _dyn_client()
-    results = []
+    records: list[dict] = []
     for doc in docs:
         kind = doc.get("kind")
         ns = (doc.get("metadata") or {}).get("namespace")
@@ -512,7 +556,6 @@ def apply_yaml(yaml_content: str) -> str:
         except ResourceNotFoundError as e:
             raise ValueError(f"Unknown kind: {kind}") from e
 
-        # Try create first; on conflict (already exists), patch.
         try:
             get_kwargs = {"name": name}
             if ns:
@@ -524,22 +567,27 @@ def apply_yaml(yaml_content: str) -> str:
                 exists = False
 
             if exists:
-                # Use strategic merge patch via patch (resource.patch is the dynamic helper)
-                create_kwargs = {"body": doc}
+                patch_kwargs = {"body": doc}
                 if ns:
-                    create_kwargs["namespace"] = ns
-                resource.patch(**create_kwargs)
-                results.append(f"{kind}/{name}: configured (patched)")
+                    patch_kwargs["namespace"] = ns
+                resource.patch(**patch_kwargs)
+                records.append({
+                    "kind": kind, "name": name, "namespace": ns,
+                    "action": "configured (patched)", "error": None,
+                })
             else:
                 create_kwargs = {"body": doc}
                 if ns:
                     create_kwargs["namespace"] = ns
                 resource.create(**create_kwargs)
-                results.append(f"{kind}/{name}: created")
+                records.append({
+                    "kind": kind, "name": name, "namespace": ns,
+                    "action": "created", "error": None,
+                })
         except dynamic.exceptions.ConflictError as e:
             raise RuntimeError(f"{kind}/{name}: conflict — {e}") from e
 
-    return "\n".join(results)
+    return records
 
 
 # ---------- helpers ------------------------------------------------------------
@@ -679,25 +727,6 @@ def _status_for(kind: str, status: dict) -> str:
     if kind == "Pod":
         return status.get("phase", "")
     return ""
-
-
-def _age(created: str | None) -> str:
-    if not created:
-        return ""
-    from datetime import datetime
-    try:
-        ts = datetime.fromisoformat(created.replace("Z", "+00:00"))
-        delta = datetime.now(UTC) - ts
-    except (ValueError, TypeError):
-        return created
-    secs = int(delta.total_seconds())
-    if secs < 60:
-        return f"{secs}s"
-    if secs < 3600:
-        return f"{secs // 60}m"
-    if secs < 86400:
-        return f"{secs // 3600}h"
-    return f"{secs // 86400}d"
 
 
 def register(mcp) -> None:

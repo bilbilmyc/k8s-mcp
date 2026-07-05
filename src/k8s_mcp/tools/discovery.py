@@ -175,13 +175,22 @@ def explain_resource(
 # ---------- internals ----------------------------------------------------------
 
 
+# OpenAPI schema cache. The schema rarely changes during a session (only on
+# CRD install/upgrade) and costs one apiserver round-trip to fetch — once per
+# explain_resource call would be wasteful. We TTL the cache for 5 minutes so
+# a long-running MCP session that installs a CRD mid-flight sees the new type
+# within 5 minutes without paying the fetch cost on every explain_resource.
 _openapi_cache: dict | None = None
+_openapi_cache_at: float = 0.0
+_OPENAPI_CACHE_TTL_SECONDS = 300
 
 
 def _get_openapi_schema() -> dict:
-    """Fetch and cache the cluster's OpenAPI v3 schema (lazy)."""
-    global _openapi_cache
-    if _openapi_cache is None:
+    """Fetch and cache the cluster's OpenAPI v3 schema (lazy, TTL'd)."""
+    global _openapi_cache, _openapi_cache_at
+    import time
+    now = time.monotonic()
+    if _openapi_cache is None or (now - _openapi_cache_at) > _OPENAPI_CACHE_TTL_SECONDS:
         spec = client.OpenApiApi(get_api_client()).get_openapi_spec()
         # The spec is a nested dict under "components"/"schemas" in v3.
         _openapi_cache = (
@@ -189,7 +198,15 @@ def _get_openapi_schema() -> dict:
             if isinstance(spec, dict)
             else {}
         )
+        _openapi_cache_at = now
     return _openapi_cache
+
+
+def reset_openapi_cache() -> None:
+    """Clear the OpenAPI schema cache. Test-only helper."""
+    global _openapi_cache, _openapi_cache_at
+    _openapi_cache = None
+    _openapi_cache_at = 0.0
 
 
 def _find_kind_def(schema: dict, kind: str, api_version: str | None) -> dict | None:

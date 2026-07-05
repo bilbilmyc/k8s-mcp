@@ -33,6 +33,7 @@ import logging
 import urllib.error
 import urllib.request
 
+import yaml
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
@@ -122,7 +123,6 @@ def create_pvc(
         "metadata": md,
         "spec": spec,
     }
-    import yaml
     result = generic.apply_yaml(yaml.safe_dump(manifest))
     if volume_name:
         hint = _hostpath_pv_hint(volume_name)

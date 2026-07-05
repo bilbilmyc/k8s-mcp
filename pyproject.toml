@@ -55,12 +55,14 @@ packages = ["src/k8s_mcp"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
     "ruff>=0.5",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "--ignore=tests/integration"
 
 [tool.ruff]
 line-length = 120

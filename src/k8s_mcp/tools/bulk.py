@@ -40,6 +40,7 @@ image / replicas 都被 HMAC 签名覆盖，token 不能跨参数复用。
 """
 from __future__ import annotations
 
+import copy
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -120,7 +121,6 @@ def _container_image(workload: dict, container: str) -> str | None:
 
 def _patch_image(workload: dict, container: str, new_image: str) -> dict:
     """Return a copy of `workload` with the named container's image updated."""
-    import copy
     out = copy.deepcopy(workload)
     spec = out.get("spec", {}) or {}
     template = spec.get("template", {}) or {}
@@ -136,7 +136,6 @@ def _patch_image(workload: dict, container: str, new_image: str) -> dict:
 
 def _patch_restart_annotation(workload: dict) -> dict:
     """Trigger a rolling restart by stamping the `restartedAt` annotation."""
-    import copy
     out = copy.deepcopy(workload)
     spec = out.get("spec", {}) or {}
     template = spec.setdefault("template", {})
@@ -149,7 +148,6 @@ def _patch_restart_annotation(workload: dict) -> dict:
 
 
 def _patch_replicas(workload: dict, replicas: int) -> dict:
-    import copy
     out = copy.deepcopy(workload)
     out.setdefault("spec", {})["replicas"] = int(replicas)
     return out
@@ -501,10 +499,22 @@ def _execute_patches(
             continue
         try:
             new_manifest = patcher(resource)
-            result = generic.apply_yaml(yaml.safe_dump(new_manifest))
-            # apply_yaml returns something like "deployment.apps/x configured"
-            first_line = result.strip().split("\n", 1)[0]
-            rows.append({"NAMESPACE": ns, "NAME": name, "RESULT": first_line})
+            records = generic._apply_yaml_records(yaml.safe_dump(new_manifest))
+            # `_apply_yaml_records` returns `["(empty manifest)"]` for empty
+            # input — shouldn't happen here (we just patched a workload), but
+            # guard against it.
+            if records and isinstance(records[0], dict) and len(records) == 1:
+                rec = records[0]
+                rows.append({
+                    "NAMESPACE": ns, "NAME": name,
+                    "RESULT": f"{rec['action']} ({rec['kind']})",
+                })
+            else:
+                first_line = generic.apply_yaml(yaml.safe_dump(new_manifest))
+                rows.append({
+                    "NAMESPACE": ns, "NAME": name,
+                    "RESULT": first_line.strip().split("\n", 1)[0],
+                })
         except ApiException as e:
             rows.append({
                 "NAMESPACE": ns, "NAME": name,
@@ -516,7 +526,8 @@ def _execute_patches(
                 "RESULT": f"ERROR: {type(e).__name__}: {e}",
             })
 
-    ok = sum(1 for r in rows if r["RESULT"].startswith(("deployment", "statefulset", "daemonset")))
+    # Use the structured action rather than fragile lowercase-prefix matching.
+    ok = sum(1 for r in rows if r["RESULT"].startswith(("created", "configured", "unchanged")))
     fail = sum(1 for r in rows if r["RESULT"].startswith(("ERROR", "SKIPPED")))
     header = f"{op_label} — applied to {ok}/{len(rows)} resources"
     if fail:

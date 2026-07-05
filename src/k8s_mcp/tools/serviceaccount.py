@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 
+import yaml
+
 from . import generic
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,6 @@ def create_serviceaccount(
     sa: dict = {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": md}
     if image_pull_secrets:
         sa["imagePullSecrets"] = [{"name": n} for n in image_pull_secrets]
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(sa))
 
 

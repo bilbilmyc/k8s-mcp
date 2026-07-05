@@ -13,11 +13,13 @@
 from __future__ import annotations
 
 import logging
+import signal
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .config import Settings, get_settings
+from . import __version__
+from .config import Settings, assert_write_safety, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -76,17 +78,69 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    logger.info("k8s-mcp starting (read_only=%s)", settings.read_only)
+    logger.info(
+        "k8s-mcp %s starting (read_only=%s)", __version__, settings.read_only
+    )
+    for warning in assert_write_safety():
+        # SECURITY class — single-line and grep-friendly so support tickets
+        # always surface it.
+        logger.warning(warning)
+
+    _install_signal_handlers()
 
     mcp = _K8sMCP("k8s-mcp")
 
     @mcp.tool()
     def ping() -> str:
-        """Health check. Returns 'pong'."""
-        return "pong"
+        """Health check. Returns the k8s-mcp version (e.g. `pong (0.2.2)`)."""
+        return f"pong (k8s-mcp {__version__})"
 
     _register_tools(mcp)
     return mcp
+
+
+# ---------- graceful shutdown -------------------------------------------------
+
+
+_in_flight = 0
+
+
+def _install_signal_handlers() -> None:
+    """Install SIGTERM/SIGINT handlers that log in-flight tool count.
+
+    FastMCP already handles clean shutdown of the stdio loop; this is purely
+    a diagnostic — operators want to see "still busy with N tool calls" in
+    the logs when they Ctrl-C a long-running health snapshot or Prometheus
+    range query. We don't block the signal (FastMCP needs to be able to
+    exit promptly).
+    """
+
+    def _handler(signum, _frame):  # noqa: ANN001 — signal handler signature
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = str(signum)
+        logger.warning(
+            "received %s — %d tool call(s) still in flight", name, _in_flight
+        )
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):
+            # SIGTERM may not be installable on Windows + non-main threads.
+            pass
+
+
+def in_flight_inc() -> None:
+    global _in_flight
+    _in_flight += 1
+
+
+def in_flight_dec() -> None:
+    global _in_flight
+    if _in_flight > 0:
+        _in_flight -= 1
 
 
 def _register_tools(mcp: FastMCP) -> None:

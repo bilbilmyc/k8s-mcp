@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import yaml
+
 from . import generic
 
 logger = logging.getLogger(__name__)
@@ -68,7 +70,6 @@ def create_networkpolicy(
         "metadata": {"name": name, "namespace": namespace},
         "spec": spec,
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 

@@ -132,3 +132,33 @@ def get_settings() -> Settings:
 def reset_settings_cache() -> None:
     """清掉 Settings 单例缓存，方便测试改环境变量后重新加载。"""
     get_settings.cache_clear()
+
+
+# Literal default shipped in the source. Anything still using this string as
+# the delete-token HMAC secret on a write-enabled deployment means an
+# attacker who can read this codebase can forge tokens. Loudly warn at startup
+# so it's impossible to miss in the boot logs. CI / read-only mode is fine
+# — the secret isn't load-bearing there.
+_DEFAULT_DELETE_TOKEN_SECRET = "change-me"
+
+
+def assert_write_safety() -> list[str]:
+    """Return a list of safety warnings for the current settings.
+
+    Called from `create_server` at startup. Empty list = all good. Each
+    warning is a one-line plain-text string suitable for a startup log line
+    AND for the operator to grep for in support tickets.
+    """
+    s = get_settings()
+    warnings: list[str] = []
+    if (
+        not s.read_only
+        and s.delete_token_secret == _DEFAULT_DELETE_TOKEN_SECRET
+    ):
+        warnings.append(
+            "SECURITY: delete_token_secret is the literal default 'change-me' "
+            "while writes are ENABLED — anyone with access to the source can "
+            "forge delete/bulk confirmation tokens. Set "
+            "K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32) and restart."
+        )
+    return warnings

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -256,7 +257,6 @@ def _kubeconfig_path(settings: Settings) -> Path | None:
     """Resolve the kubeconfig file the MCP server is using, if mode B."""
     if settings.kubeconfig:
         return Path(settings.kubeconfig).expanduser()
-    import os
     env = os.environ.get("KUBECONFIG")
     if env:
         # Like kubectl: take the first colon-separated entry.

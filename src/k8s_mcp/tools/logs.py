@@ -107,6 +107,12 @@ def get_pod_logs(
             internally. K8s API does NOT support an upper bound, so this
             is enforced client-side after fetch. The `strict_time` flag
             controls how lines without parseable timestamps are handled.
+            **Cost hint**: the apiserver still streams the entire log from
+            the lower bound (`since_time`/`since_seconds` or pod start)
+            up to "now"; we trim to `until_time` after the bytes arrive.
+            If your window is large, also set `tail_lines` so the K8s API
+            applies its own tail cap server-side rather than streaming
+            millions of bytes we'll just discard.
         strict_time: when True, drop any record whose timestamp cannot be
             parsed. Default False: keep un-timestamped records (useful for
             pods whose containers don't emit RFC3339 timestamps). Only

@@ -9,14 +9,12 @@
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
 from ..client import get_api_client
 from ..config import get_settings
-from ..formatters import short_table
+from ..formatters import format_age, short_table
 
 
 def _core_v1():
@@ -72,27 +70,11 @@ def list_pods(
             "NAMESPACE": pod.metadata.namespace,
             "PHASE": phase,
             "RESTARTS": str(restarts),
-            "AGE": _age(pod.metadata.creation_timestamp),
+            "AGE": format_age(pod.metadata.creation_timestamp),
             "NODE": pod.spec.node_name or "",
         })
 
     return short_table(rows, ["NAME", "NAMESPACE", "PHASE", "RESTARTS", "AGE", "NODE"])
-
-
-def _age(ts) -> str:
-    if not ts:
-        return ""
-    if isinstance(ts, str):
-        ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    delta = datetime.now(UTC) - ts
-    secs = int(delta.total_seconds())
-    if secs < 60:
-        return f"{secs}s"
-    if secs < 3600:
-        return f"{secs // 60}m"
-    if secs < 86400:
-        return f"{secs // 3600}h"
-    return f"{secs // 86400}d"
 
 
 def delete_pod(name: str, namespace: str, grace_period_seconds: int = 30) -> str:

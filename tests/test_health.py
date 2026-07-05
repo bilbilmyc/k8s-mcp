@@ -783,10 +783,16 @@ class _WorkloadMeta:
         self.name = name
 
 
-def _w(name):
-    """Tiny fake workload object: just needs .metadata.name for counting."""
+def _w(name, ns=None):
+    """Tiny fake workload object. When `ns` is set, also expose
+    `metadata.namespace` so the multi-namespace filter in
+    `_section_workloads` can filter on it."""
     o = type("W", (), {})()
-    o.metadata = _WorkloadMeta(name)
+    if ns is None:
+        o.metadata = _WorkloadMeta(name)
+    else:
+        meta = type("M", (), {"name": name, "namespace": ns})()
+        o.metadata = meta
     return o
 
 
@@ -839,6 +845,126 @@ def test_section_workloads_handles_rbac_denied_independently(monkeypatch):
     assert "Deployment" in out and "?" in out
     # StatefulSet still counted even though Deployment call failed
     assert "StatefulSet" in out and "1" in out
+
+
+def test_section_workloads_filters_by_namespaces_without_n_plus_1(monkeypatch):
+    """Multi-namespace mode MUST go through the cluster-wide list once
+    per kind and filter client-side — NOT loop through `list_namespaced_*`
+    per namespace. On a 50-ns cluster the old code made 6 × 50 = 300
+    apiserver calls; after the fix it's 6.
+
+    Counters on each `list_*_for_all_namespaces` / `list_namespaced_*`
+    method catch any leak back to the namespaced path.
+    """
+    cluster_calls = {"deploy": 0, "sts": 0, "ds": 0, "rs": 0, "job": 0, "cj": 0}
+    leaked_namespaced = {"deploy": 0, "sts": 0, "ds": 0, "rs": 0, "job": 0, "cj": 0}
+
+    def _wrap_counter(cluster_attr, leaked_attr):
+        def list_for_all(self):
+            cluster_calls[cluster_attr] += 1
+            return _FakeListResp(self._items_for_all())
+        def list_namespaced(self, ns):
+            leaked_namespaced[leaked_attr] += 1
+            return _FakeListResp([])
+        return list_for_all, list_namespaced
+
+    class _CountingApps(_FakeAppsV1):
+        def _items_for_all(self):
+            # 3 workloads in `keep` ns, 5 in `skip` ns, 1 in an unrelated ns
+            return (
+                [_w("d-keep-1", ns="keep"), _w("d-keep-2", ns="keep"),
+                 _w("d-skip-1", ns="skip"), _w("d-skip-2", ns="skip"),
+                 _w("d-skip-3", ns="skip"), _w("d-skip-4", ns="skip"),
+                 _w("d-skip-5", ns="skip"), _w("d-other", ns="other")]
+                if self._d else []
+            )
+
+    class _CountingBatch(_FakeBatchV1):
+        def _items_for_all(self):
+            return (
+                [_w("j-keep", ns="keep"), _w("j-skip", ns="skip")]
+                if self._j else []
+            )
+
+    # Just count via monkeypatched-callable approach
+    def make_apps():
+        apps = _CountingApps(
+            deployments=[_w("d", ns="x")],  # placeholder
+            statefulsets=[], daemonsets=[], replicasets=[],
+        )
+        # Re-attach our counting wrappers
+        apps.list_deployment_for_all_namespaces = (
+            lambda: (cluster_calls.__setitem__("deploy", cluster_calls["deploy"] + 1)
+                     or _FakeListResp(apps._items_for_all()))
+        )
+        # Sts/DS/RS don't have namespace-distributed items; just record the calls.
+        apps.list_stateful_set_for_all_namespaces = (
+            lambda: (cluster_calls.__setitem__("sts", cluster_calls["sts"] + 1)
+                     or _FakeListResp(apps._s))
+        )
+        apps.list_daemon_set_for_all_namespaces = (
+            lambda: (cluster_calls.__setitem__("ds", cluster_calls["ds"] + 1)
+                     or _FakeListResp(apps._ds))
+        )
+        apps.list_replica_set_for_all_namespaces = (
+            lambda: (cluster_calls.__setitem__("rs", cluster_calls["rs"] + 1)
+                     or _FakeListResp(apps._rs))
+        )
+        # Namespaced variants MUST NOT be called in this code path — leak
+        # counter records any breach (test fails if > 0).
+        apps.list_namespaced_deployment = (
+            lambda ns: leaked_namespaced.__setitem__("deploy", leaked_namespaced["deploy"] + 1)
+        )
+        apps.list_namespaced_stateful_set = (
+            lambda ns: leaked_namespaced.__setitem__("sts", leaked_namespaced["sts"] + 1)
+        )
+        apps.list_namespaced_daemon_set = (
+            lambda ns: leaked_namespaced.__setitem__("ds", leaked_namespaced["ds"] + 1)
+        )
+        apps.list_namespaced_replica_set = (
+            lambda ns: leaked_namespaced.__setitem__("rs", leaked_namespaced["rs"] + 1)
+        )
+        return apps
+
+    def make_batch():
+        batch = _CountingBatch(
+            jobs=[_w("j", ns="keep")], cronjobs=[_w("cj", ns="keep")],
+        )
+        # The real list_job_for_all_namespaces returns _j; assert it was called
+        batch.list_job_for_all_namespaces = (
+            lambda: (cluster_calls.__setitem__("job", cluster_calls["job"] + 1)
+                     or _FakeListResp(batch._items_for_all()))
+        )
+        batch.list_cron_job_for_all_namespaces = (
+            lambda: (cluster_calls.__setitem__("cj", cluster_calls["cj"] + 1)
+                     or _FakeListResp(batch._cj))
+        )
+        batch.list_namespaced_job = (
+            lambda ns: leaked_namespaced.__setitem__("job", leaked_namespaced["job"] + 1)
+        )
+        batch.list_namespaced_cron_job = (
+            lambda ns: leaked_namespaced.__setitem__("cj", leaked_namespaced["cj"] + 1)
+        )
+        return batch
+
+    monkeypatch.setattr(health, "_apps_v1", make_apps)
+    monkeypatch.setattr(health, "_batch_v1", make_batch)
+
+    out = health._section_workloads(namespaces=["keep"])
+    assert "## Workloads" in out
+    # Each kind's cluster-wide list called exactly once (not per-ns)
+    for kind in ("deploy", "sts", "ds", "rs", "job", "cj"):
+        assert cluster_calls[kind] == 1, (
+            f"expected 1 cluster-wide call for {kind}, got {cluster_calls[kind]} "
+            f"(N+1 leak: code is still looping per-namespace)"
+        )
+    # And NO namespaced fallback was hit
+    for kind in ("deploy", "sts", "ds", "rs", "job", "cj"):
+        assert leaked_namespaced[kind] == 0, (
+            f"namespaced path was called for {kind} — code reverted to N+1"
+        )
+    # Client-side filter applied: Deployment count = 2 (only `keep` ns)
+    assert "Deployment" in out and "2" in out
 
 
 # ---------- end-to-end: new sections show up in the report ----------------

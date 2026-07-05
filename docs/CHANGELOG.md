@@ -7,10 +7,14 @@ behavior changes bump the minor (we're pre-1.0).
 ## [Unreleased]
 
 ### Changed
-- (planned) delete_pod / delete_service / delete_ingress / delete_configmap / delete_pvc deprecated → use `delete_resource(kind=...)`
 - (planned) bulk_scale / bulk_restart / bulk_set_image / bulk_delete_pvc deprecated → merged into single-tool list variants
 - (planned) tool description boundaries clarified for 6 overlapping pairs
 - (planned) shared HTTP connection pool + per-tool timeout split (prometheus / logs / notifier)
+
+## [0.3.3] — 2026-07-05
+
+### Changed
+- `delete_pod` / `delete_service` / `delete_ingress` / `delete_configmap` / `delete_pvc` deprecated. Each return is now prefixed with `⚠️ DEPRECATED: ... will be removed in v0.5.0 — use delete_resource(kind='<Kind>') for the audited two-step flow.` Migration target: `delete_resource(kind=<Kind>, confirm=False)` → show preview → `delete_resource(... confirm=True, confirmation_token=...)`. Removal scheduled for v0.5.0
 
 ## [0.3.2] — 2026-07-05
 
@@ -100,7 +104,8 @@ behavior changes bump the minor (we're pre-1.0).
 ## [0.1.1] — 2026-04-xx
 - Initial PyPI release notes.
 
-[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.3.2...HEAD
+[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.3.3...HEAD
+[0.3.3]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.3.0...v0.3.1
 [0.2.1]: https://github.com/bilbilmyc/k8s-mcp/compare/0.2.0...0.2.1

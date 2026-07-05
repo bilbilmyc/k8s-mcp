@@ -60,10 +60,12 @@ from __future__ import annotations
 
 import json
 import logging
-import urllib.error
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from ..config import get_settings
 
@@ -75,6 +77,69 @@ _LEVEL_PREFIX = {
     "warning": "⚠️  [WARNING]",
     "critical": "❌ [CRITICAL]",
 }
+
+
+# Per-IM byte limits for the serialized JSON payload. When a payload
+# exceeds its type's limit, `_post()` refuses to send it rather than
+# letting the IM gateway reject with an opaque 4xx. The agent sees a
+# clear "payload too large" error in the per-notifier result row and
+# can chunk the message or switch to a richer format (feishu_card
+# already truncates per-section to 2000 chars upstream).
+_TYPE_BYTE_LIMITS: dict[str, int] = {
+    "feishu": 30 * 1024,
+    "feishu_post": 30 * 1024,
+    "feishu_card": 30 * 1024,
+    "slack": 40 * 1024,
+    "wecom": 4 * 1024,
+    "generic": 30 * 1024,
+}
+
+
+# ---------- HTTP session (lazy, thread-safe) -----------------------------
+
+
+_SESSION: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    """Module-level requests.Session with retry + connection pool.
+
+    Lazy-initialized on first call. requests.Session is thread-safe
+    when used with mounted HTTPAdapters, so the same session is shared
+    across the ThreadPoolExecutor workers in `notify()`.
+
+    Retry policy: 3 retries (4 total attempts), exponential backoff
+    (0.5s / 1s / 2s), on 500/502/503/504 + connection errors. Total
+    wall-clock ceiling per notifier is ~3.5s in the worst case (0.5 +
+    1 + 2 sleep + 4 request timeouts), which keeps notify() responsive
+    even with 10+ notifiers being broadcast in parallel.
+    """
+    global _SESSION
+    if _SESSION is None:
+        s = requests.Session()
+        retry = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["POST"],
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry,
+            pool_connections=10,
+            pool_maxsize=20,
+        )
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+        _SESSION = s
+    return _SESSION
+
+
+def reset_session() -> None:
+    """Test helper: drop the cached session so a fresh one is built
+    on the next call. Used by tests that mock the transport layer."""
+    global _SESSION
+    _SESSION = None
 
 
 # ---------- notifier registry ---------------------------------------------
@@ -329,34 +394,56 @@ def _build_payload(
 # ---------- send -----------------------------------------------------------
 
 
-def _post(url: str, payload: dict, timeout: int = 10) -> tuple[bool, str]:
-    """POST JSON. Returns (ok, detail). detail is HTTP status + reason on
-    failure, or the HTTP status line on success."""
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={"Content-Type": "application/json", "User-Agent": "k8s-mcp/1.0"},
-    )
+def _post(
+    url: str, payload: dict, notifier_type: str, timeout: int = 10,
+) -> tuple[bool, str]:
+    """POST JSON. Returns (ok, detail).
+
+    On success: detail is the HTTP status line, plus up to 200 chars
+    of the response body (Feishu in particular puts its success ack
+    in the body — `{"StatusCode":0,"Msg":"success"}`).
+
+    On failure: detail is the HTTP error status / exception class /
+    retry-exhausted message. Payload size is checked up front against
+    `_TYPE_BYTE_LIMITS` so we don't waste 3 retry attempts on a
+    payload the IM gateway will reject regardless.
+
+    Retry is configured on the module-level session (`_get_session`):
+    3 retries (4 total attempts) on 500/502/503/504 + connection
+    errors, exponential backoff (0.5s / 1s / 2s).
+    """
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    limit = _TYPE_BYTE_LIMITS.get(notifier_type)
+    if limit and len(data) > limit:
+        return (
+            False,
+            f"payload too large: {len(data)} bytes exceeds "
+            f"{notifier_type} limit of {limit} bytes",
+        )
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = f"{resp.status} {resp.reason}"
-            # Some IM APIs (Feishu) return {"StatusCode": 0, "Msg": "success"} in body.
-            try:
-                body = resp.read().decode("utf-8", errors="replace")
-            except Exception:  # noqa: BLE001
-                body = ""
-            if 200 <= resp.status < 300:
-                return True, status + (f" — body: {body[:200]}" if body else "")
-            return False, status + (f" — body: {body[:200]}" if body else "")
-    except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode("utf-8", errors="replace")[:200]
-        except Exception:  # noqa: BLE001
-            pass
-        return False, f"HTTP {e.code} {e.reason}" + (f" — body: {body}" if body else "")
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        resp = _get_session().post(
+            url, data=data,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "k8s-mcp/1.0",
+            },
+            timeout=(5, timeout),
+        )
+    except requests.exceptions.RetryError as e:
+        return False, f"RetryError: exhausted retries — {type(e.__cause__).__name__}: {e.__cause__}"
+    except requests.exceptions.RequestException as e:
         return False, f"{type(e).__name__}: {e}"
+
+    body = ""
+    try:
+        body = (resp.text or "")[:200]
+    except Exception:  # noqa: BLE001
+        pass
+    status = f"{resp.status_code} {resp.reason}"
+    if 200 <= resp.status_code < 300:
+        return True, status + (f" — body: {body}" if body else "")
+    return False, status + (f" — body: {body}" if body else "")
 
 
 # ---------- entry point ----------------------------------------------------
@@ -415,7 +502,7 @@ def notify(
     notifiers = _parse_notifiers()
     if not notifiers:
         return (
-            "❌ No notifiers configured. Set `K8S_MCP_NOTIFIERS` to a JSON "
+            "No notifiers configured. Set `K8S_MCP_NOTIFIERS` to a JSON "
             "list of `{\"name\":..., \"type\": feishu|feishu_post|feishu_card|slack|wecom|generic, "
             "\"url\":...}` and restart the MCP server. Example:\n"
             "  K8S_MCP_NOTIFIERS='[{\"name\":\"ops\",\"type\":\"feishu_card\","
@@ -438,19 +525,19 @@ def notify(
         if not valid:
             available = sorted({n["name"] for n in notifiers if "name" in n})
             return (
-                f"❌ Notifier {notifier_name!r} not found. "
+                f"Notifier {notifier_name!r} not found. "
                 f"Available: {available or '(none)'}."
             )
 
     if level not in _LEVEL_PREFIX:
         return (
-            f"❌ Invalid level {level!r}. Must be one of: "
+            f"Invalid level {level!r}. Must be one of: "
             f"{sorted(_LEVEL_PREFIX)}."
         )
 
     if validation_errors and not valid:
         # All notifiers are malformed — refuse to do anything
-        return "❌ All configured notifiers are invalid:\n  " + \
+        return "All configured notifiers are invalid:\n  " + \
             "\n  ".join(validation_errors)
 
     # Title handling: for rich Feishu variants the title lands in the
@@ -469,7 +556,7 @@ def notify(
     rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=max(len(valid), 1)) as pool:
         futures = {
-            pool.submit(_post, n["url"], _build_payload(n, message, level, title)): n
+            pool.submit(_post, n["url"], _build_payload(n, message, level, title), n["type"]): n
             for n in valid
         }
         for fut, n in futures.items():

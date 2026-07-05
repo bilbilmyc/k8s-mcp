@@ -45,3 +45,47 @@ def test_ns_allowed_blocks_writes_in_read_only():
     s = Settings(read_only=True)
     assert s.ns_allowed("default") is False
     assert s.ns_allowed("anything") is False
+
+
+def test_prometheus_namespace_allowlist_default_none():
+    """Default = None = scan every namespace. Setting it to a list caps the
+    wide-scan surface in `find_prometheus_service` /
+    `_resolve_prometheus_url`."""
+    s = Settings()
+    assert s.prometheus_namespace_allowlist is None
+
+
+def test_prometheus_namespace_allowlist_from_comma_string(monkeypatch):
+    """Comma-separated env var parses the same way as namespace_allowlist."""
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "default,monitoring,prod")
+    s = Settings()
+    assert s.prometheus_namespace_allowlist == ["default", "monitoring", "prod"]
+
+
+def test_prometheus_namespace_allowlist_empty_string_means_none(monkeypatch):
+    """Empty string = 'unset', not 'allowlist of nothing'. The latter
+    would mean scan no namespaces and break everything."""
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "")
+    s = Settings()
+    assert s.prometheus_namespace_allowlist is None
+
+
+def test_prometheus_namespace_allowlist_direct_list():
+    s = Settings(prometheus_namespace_allowlist=["default"])
+    assert s.prometheus_namespace_allowlist == ["default"]
+
+
+def test_prometheus_namespace_allowlist_independent_of_namespace_allowlist():
+    """The two allowlists are independent fields. Setting
+    K8S_MCP_NAMESPACE_ALLOWLIST does NOT change prometheus discovery
+    scope, and vice versa. (Critical to keep tests from accidentally
+    coupling them.)"""
+    s = Settings(
+        namespace_allowlist=["app"],
+        prometheus_namespace_allowlist=["monitoring"],
+    )
+    assert s.namespace_allowlist == ["app"]
+    assert s.prometheus_namespace_allowlist == ["monitoring"]
+    # ns_allowed still gated by namespace_allowlist, not prom one
+    assert s.ns_allowed("monitoring") is False
+    assert s.ns_allowed("app") is True

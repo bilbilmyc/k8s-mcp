@@ -70,10 +70,15 @@ def _resolve_prometheus_url(settings: Settings) -> str:
 
     Resolution order:
       1. `settings.prometheus_url` (explicit env var)
-      2. Auto-scan candidate (namespace, service) pairs in the cluster
-      3. Raise LookupError with a helpful "ask the user" message
+      2. Auto-scan hardcoded (namespace, service) candidates — covers
+         ~80% of standard installs in one apiserver call.
+      3. **Wide-scan fallback** — when step 2 misses, scan every namespace
+         (bounded by `prometheus_namespace_allowlist` if set) for any
+         Service whose name matches the prometheus hints. Catches
+         non-standard installs like `default/monitor-kube-prometheus-st-prometheus`.
+      4. Raise LookupError with a helpful "ask the user" message.
 
-    The result of (2) is cached for the lifetime of the process.
+    The result of (2)/(3) is cached for the lifetime of the process.
     """
     global _DISCOVERY_CACHE, _DISCOVERY_TRIED
 
@@ -91,6 +96,8 @@ def _resolve_prometheus_url(settings: Settings) -> str:
 
     core = client.CoreV1Api()
     tried: list[str] = []
+
+    # Step 2: hardcoded small candidate list.
     for ns, svc in _PROM_CANDIDATES:
         tried.append(f"{ns}/{svc}")
         try:
@@ -117,7 +124,89 @@ def _resolve_prometheus_url(settings: Settings) -> str:
         logger.info("Auto-discovered Prometheus at %s (Service %s/%s)", url, ns, svc)
         return url
 
+    # Step 3: wide-scan fallback. Hardcoded list didn't hit, so check
+    # every namespace (or every namespace in the allowlist) for Services
+    # whose name looks like Prometheus. This catches non-standard installs
+    # that put Prometheus in `default/` or other unusual namespaces.
+    try:
+        matches = _wide_scan_prometheus_matches(core, settings)
+    except Exception as e:  # noqa: BLE001 — defensive
+        logger.debug("prom discovery: wide-scan fallback failed: %s", e)
+        matches = []
+
+    if matches:
+        ns_name, svc_obj = matches[0]
+        try:
+            url = _service_url(svc_obj)
+        except Exception as e:  # noqa: BLE001 — defensive
+            logger.debug("prom discovery: cannot build URL from %s/%s: %s", ns_name, svc_obj.metadata.name, e)
+        else:
+            _DISCOVERY_CACHE = url
+            logger.info(
+                "Auto-discovered Prometheus via wide scan at %s (Service %s/%s)",
+                url, ns_name, svc_obj.metadata.name,
+            )
+            return url
+
     raise LookupError(_not_found_message(tried=tried))
+
+
+# Service-name hint tuple is `_PROM_NAME_HINTS` (defined further below);
+# referenced lazily so order in the file doesn't matter.
+
+
+def _wide_scan_prometheus_matches(
+    core: client.CoreV1Api,
+    settings: Settings,
+) -> list[tuple[str, Any]]:
+    """Scan every namespace (or allowlist subset) for Prometheus-looking
+    Services. Returns a list of `(namespace, svc_obj)` tuples sorted by
+    preference: NodePort / LoadBalancer first (externally reachable from
+    the MCP client), ClusterIP last. Empty list = nothing found.
+
+    Used by:
+      - `_resolve_prometheus_url` as a fallback after hardcoded candidates miss
+      - `find_prometheus_service` for cluster-wide discovery
+
+    Bounded by `settings.prometheus_namespace_allowlist` when set — see
+    `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST`. None = scan every namespace.
+    """
+    allowlist = settings.prometheus_namespace_allowlist
+    namespaces = [ns.metadata.name for ns in core.list_namespace().items]
+    if allowlist is not None:
+        # Allowlist set → only scan these namespaces. Unset (None) = all.
+        namespaces = [ns for ns in namespaces if ns in allowlist]
+        if not namespaces:
+            logger.debug(
+                "prom wide-scan: allowlist %s excludes every namespace; skipping",
+                allowlist,
+            )
+            return []
+
+    nodeport_first: list[tuple[str, Any]] = []
+    clusterip_after: list[tuple[str, Any]] = []
+    for ns_name in namespaces:
+        try:
+            services = core.list_namespaced_service(namespace=ns_name).items
+        except ApiException as e:
+            logger.debug("prom wide-scan: list svc in %s failed: %s", ns_name, e)
+            continue
+        except Exception as e:  # noqa: BLE001 — defensive
+            logger.debug("prom wide-scan: unexpected error in %s: %s", ns_name, e)
+            continue
+        for svc in services:
+            name = (svc.metadata.name or "").lower()
+            if not any(hint in name for hint in _PROM_NAME_HINTS):
+                continue
+            spec = svc.spec
+            svc_type = (getattr(spec, "type", None) if spec else None) or "ClusterIP"
+            # Preference order: NodePort / LoadBalancer first (externally
+            # reachable), ClusterIP last.
+            if svc_type in ("NodePort", "LoadBalancer"):
+                nodeport_first.append((ns_name, svc))
+            else:
+                clusterip_after.append((ns_name, svc))
+    return nodeport_first + clusterip_after
 
 
 def _service_url(svc_obj: Any) -> str:
@@ -173,6 +262,10 @@ def _not_found_message(tried: list[str] | None = None) -> str:
     for t in (tried or [f"{ns}/{svc}" for ns, svc in _PROM_CANDIDATES]):
         msg += f"  - {t}\n"
     msg += (
+        "\nA cluster-wide fallback scan (looking for any Service whose "
+        "name contains `prometheus` / `kube-prometheus` / `prom`) also "
+        "found nothing. If Prometheus is in a namespace excluded by "
+        "`K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST`, widen it.\n"
         "\nTo enable Prometheus metrics, do ONE of:\n"
         "  1. Ask the user: 'What is your Prometheus URL?' — then set\n"
         "     `K8S_MCP_PROMETHEUS_URL=http://prometheus.<ns>.svc.cluster.local:9090`\n"
@@ -250,22 +343,30 @@ def find_prometheus_service(namespace: str | None = None) -> str:
     core = client.CoreV1Api()
 
     if namespace:
-        namespaces = [namespace]
-        svcs_iter = (
+        # Explicit single-ns path: allowlist does NOT apply (caller knows
+        # what they want; honoring allowlist here would silently drop the
+        # only result the agent is asking for).
+        pairs = [
             (s.metadata.namespace, s)
             for s in core.list_namespaced_service(namespace=namespace).items
-        )
+        ]
+        scanned_label = f"namespace={namespace}"
     else:
-        namespaces = [ns.metadata.name for ns in core.list_namespace().items]
-        svcs_iter = (
-            (s.metadata.namespace, s)
-            for ns_name in namespaces
-            for s in core.list_namespaced_service(namespace=ns_name).items
+        # Cluster-wide scan via shared helper. Honors
+        # `prometheus_namespace_allowlist` when set, so on multi-tenant
+        # clusters you can cap the surface (and cost) without losing the
+        # non-standard-install detection this tool is for.
+        settings = get_settings()
+        pairs = _wide_scan_prometheus_matches(core, settings)
+        scanned_label = (
+            f"{len(pairs)} match(es) across namespaces"
+            if settings.prometheus_namespace_allowlist is None
+            else f"{len(pairs)} match(es) within allowlist={settings.prometheus_namespace_allowlist}"
         )
 
     rows: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for ns_name, svc in svcs_iter:
+    for ns_name, svc in pairs:
         name = svc.metadata.name
         key = (ns_name, name)
         if key in seen:
@@ -323,11 +424,8 @@ def find_prometheus_service(namespace: str | None = None) -> str:
         )
 
     if not rows:
-        scanned = (
-            f"namespace(s)={namespace}" if namespace else f"{len(namespaces)} namespaces"
-        )
         return (
-            f"No Prometheus-looking Services found in {scanned}.\n"
+            f"No Prometheus-looking Services found ({scanned_label}).\n"
             "Hints:\n"
             "  - Install kube-prometheus-stack, the prometheus-operator, or "
             "a bare Prometheus chart.\n"

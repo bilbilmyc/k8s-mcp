@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # 显式 URL 优先；未设置则按候选 (namespace, service) 自动探测。
     prometheus_url: str | None = None
     prometheus_bearer_token: str | None = None
+    # 发现侧 namespace 白名单。None（默认）= 扫全集群；设置后，
+    # `find_prometheus_service()` 与 `_resolve_prometheus_url()` 的宽
+    # 扫描 fallback 都只扫这些 namespace。在多租户 / 大量 ns 的集群上
+    # 用它限制扫面成本 / 信息暴露面。与 `namespace_allowlist`（写守门）
+    # 是两套独立的配置：前者是**读**侧白名单。
+    prometheus_namespace_allowlist: list[str] | None = None
 
     # 引导性集群组件：local-path-provisioner 之类单 manifest 部署
     # 集群基础设施。默认指向公开 manifest，私有/离线集群可以通过
@@ -84,6 +90,16 @@ class Settings(BaseSettings):
         允许通过 `K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod` 这种
         逗号分隔写法注入列表；空字符串等价于未设置（None = 不限制）。
         """
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
+    @field_validator("prometheus_namespace_allowlist", mode="before")
+    @classmethod
+    def _split_prom_allowlist(cls, v: Any) -> list[str] | None:
+        """与 `namespace_allowlist` 同形的逗号分隔解析（独立字段，独立的解析器）。"""
         if v is None or v == "":
             return None
         if isinstance(v, str):

@@ -1432,3 +1432,245 @@ def test_nodeport_no_random_module_used(monkeypatch):
         "prometheus module still imports 'random' — re-introduced "
         "client-side port picking, which is racy."
     )
+
+
+# =============================================================================
+# _resolve_prometheus_url — wide-scan fallback (K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST)
+# =============================================================================
+#
+# When the hardcoded `_PROM_CANDIDATES` list misses (e.g. Prometheus was
+# deployed into `default/` by a non-standard installer), `_resolve_prometheus_url`
+# falls through to a cluster-wide scan filtered by `_PROM_NAME_HINTS`. The
+# fallback honors `prometheus_namespace_allowlist` so a busy cluster can
+# bound the surface.
+
+
+class _SvcList:
+    """Minimal V1ServiceList substitute (the helper iterates `.items`)."""
+
+    def __init__(self, items):
+        self.items = items
+
+
+def _svc(ns, name, ip="10.96.0.1", port=9090, svc_type=None, node_port=None):
+    """Build a fake V1Service for wide-scan tests."""
+    ports = [type("P", (), {"name": "http", "port": port, "node_port": node_port})()]
+    return type(
+        "Svc", (), {
+            "metadata": type("M", (), {"namespace": ns, "name": name})(),
+            "spec": type(
+                "S", (), {
+                    "cluster_ip": ip,
+                    "type": svc_type,
+                    "ports": ports,
+                }
+            )(),
+        }
+    )()
+
+
+class _WideScanCore:
+    """A fake CoreV1Api that backs the wide-scan code path.
+
+    Differentiates between:
+      - `read_namespaced_service(name, namespace)` → used by the hardcoded
+        candidate list (always 404 here, forcing the fallback)
+      - `list_namespace()` + `list_namespaced_service(namespace)` → used
+        by `_wide_scan_prometheus_matches` to enumerate every namespace
+    """
+
+    def __init__(self, namespaces, services_by_ns):
+        self._namespaces = [_ns_obj(n) for n in namespaces]
+        self._services_by_ns = services_by_ns
+
+    def read_namespaced_service(self, name, namespace, **kw):
+        # Hardcoded-candidate probe: every (ns, svc) miss → fallback fires.
+        raise ApiException(status=404, reason="not found")
+
+    def list_namespace(self, **kw):
+        return type("R", (), {"items": self._namespaces})()
+
+    def list_namespaced_service(self, namespace, **kw):
+        return _SvcList(self._services_by_ns.get(namespace, []))
+
+
+def test_resolve_wide_scan_finds_non_standard_namespace(monkeypatch):
+    """Hardcoded candidates miss; wide scan finds Prometheus in `default/`.
+    Regression for the case where kube-prometheus-stack was deployed into
+    a non-standard namespace — `_PROM_CANDIDATES` doesn't include
+    `default/monitor-kube-prometheus-st-prometheus`, so discovery must
+    fall through to the wide scan to find it."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", raising=False)
+    reset_settings_cache()
+
+    core = _WideScanCore(
+        namespaces=["default", "kube-system"],
+        services_by_ns={
+            "default": [
+                _svc("default", "monitor-kube-prometheus-st-prometheus",
+                     ip="10.96.3.39", port=9090),
+            ],
+            "kube-system": [_svc("kube-system", "kube-dns")],
+        },
+    )
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    url = prometheus._resolve_prometheus_url(prometheus.get_settings())
+    assert url == "http://10.96.3.39:9090"
+
+
+def test_resolve_wide_scan_prefers_nodeport_over_clusterip(monkeypatch):
+    """When both ClusterIP and NodePort Prometheus Services exist, the
+    wide scan picks NodePort first — that's the one the MCP client can
+    actually reach without bridging."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", raising=False)
+    reset_settings_cache()
+
+    core = _WideScanCore(
+        namespaces=["default", "monitoring"],
+        services_by_ns={
+            "default": [
+                _svc("default", "monitor-kube-prometheus-st-prometheus",
+                     ip="10.96.3.39", port=9090, svc_type="ClusterIP"),
+            ],
+            "monitoring": [
+                _svc("monitoring", "kube-prometheus-stack-prometheus",
+                     ip="10.96.20.5", port=9090, svc_type="NodePort",
+                     node_port=45149),
+            ],
+        },
+    )
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    url = prometheus._resolve_prometheus_url(prometheus.get_settings())
+    # NodePort's URL still goes through `_service_url` (cluster_ip:port) —
+    # the wide scan's job is to *find* the better Service; NodePort→node-ip
+    # substitution is the agent's responsibility via `find_prometheus_service`.
+    # We just verify NodePort is preferred when sorted.
+    assert url == "http://10.96.20.5:9090"
+
+
+def test_resolve_wide_scan_respects_allowlist(monkeypatch):
+    """When K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST excludes every namespace
+    containing a Prometheus-looking Service, the wide scan returns nothing
+    and the resolver raises LookupError — bounded by design."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "monitoring")
+    reset_settings_cache()
+
+    core = _WideScanCore(
+        namespaces=["default", "monitoring"],
+        services_by_ns={
+            "default": [
+                _svc("default", "monitor-kube-prometheus-st-prometheus",
+                     ip="10.96.3.39"),
+            ],
+            "monitoring": [_svc("monitoring", "kube-dns")],
+        },
+    )
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    with pytest.raises(LookupError):
+        prometheus._resolve_prometheus_url(prometheus.get_settings())
+
+
+def test_resolve_wide_scan_allowlist_includes_match(monkeypatch):
+    """Allowlist that DOES include the namespace where Prometheus lives
+    → wide scan finds it and returns the URL."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "default,monitoring")
+    reset_settings_cache()
+
+    core = _WideScanCore(
+        namespaces=["default", "kube-system", "monitoring"],
+        services_by_ns={
+            "default": [
+                _svc("default", "monitor-kube-prometheus-st-prometheus",
+                     ip="10.96.3.39", port=9090),
+            ],
+            "kube-system": [_svc("kube-system", "kube-dns")],
+            "monitoring": [_svc("monitoring", "grafana")],
+        },
+    )
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    url = prometheus._resolve_prometheus_url(prometheus.get_settings())
+    assert url == "http://10.96.3.39:9090"
+
+
+# =============================================================================
+# find_prometheus_service — allowlist filtering
+# =============================================================================
+
+
+def test_find_prometheus_service_respects_allowlist(monkeypatch):
+    """With K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST set, only those
+    namespaces appear in the result — even if Prometheus exists outside
+    the allowlist."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "monitoring")
+    reset_settings_cache()
+
+    core = _WideScanCore(
+        namespaces=["default", "monitoring"],
+        services_by_ns={
+            "default": [
+                _svc("default", "monitor-kube-prometheus-st-prometheus",
+                     ip="10.96.3.39"),
+            ],
+            "monitoring": [
+                _svc("monitoring", "kube-prometheus-stack-prometheus",
+                     ip="10.96.20.5"),
+            ],
+        },
+    )
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    out = prometheus.find_prometheus_service()
+    # Allowed ns shows up
+    assert "kube-prometheus-stack-prometheus" in out
+    assert "monitoring" in out
+    # Excluded ns is filtered out
+    assert "monitor-kube-prometheus-st-prometheus" not in out
+
+
+def test_find_prometheus_service_explicit_namespace_bypasses_allowlist(monkeypatch):
+    """An explicit `namespace=` arg is a deliberate single-ns query — it
+    should NOT be silently filtered by the allowlist. (The caller knows
+    what they're asking for.)"""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "monitoring")
+    reset_settings_cache()
+
+    class _Core:
+        def list_namespaced_service(self, namespace, **kw):
+            assert namespace == "default"
+            return _SvcList([
+                _svc("default", "monitor-kube-prometheus-st-prometheus",
+                     ip="10.96.3.39"),
+            ])
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    out = prometheus.find_prometheus_service(namespace="default")
+    assert "monitor-kube-prometheus-st-prometheus" in out
+    assert "default" in out
+
+
+def test_find_prometheus_service_empty_allowlist_surfaces_allowlist_in_message(monkeypatch):
+    """When the allowlist excludes every namespace, the empty-result
+    notice must mention the allowlist so the user knows why they got
+    nothing (vs. the default 'no Prometheus installed' message)."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "monitoring")
+    reset_settings_cache()
+
+    core = _WideScanCore(
+        namespaces=["default"],
+        services_by_ns={
+            "default": [
+                _svc("default", "monitor-kube-prometheus-st-prometheus",
+                     ip="10.96.3.39"),
+            ],
+        },
+    )
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    out = prometheus.find_prometheus_service()
+    assert "allowlist" in out.lower()
+    assert "monitoring" in out

@@ -70,7 +70,12 @@ k8s-mcp 通过 pydantic-settings 读取环境变量，所有变量以 `K8S_MCP_`
    里名为 `kube-prometheus-stack-prometheus` / `prometheus-operated` /
    `prometheus` / `prometheus-server` 的 Service。覆盖大约 80% 的标准
    安装。
-4. **找不到** — 工具返回中文友好提示，引导用户给 URL。
+4. **宽扫描 fallback** — 上面候选名单全 miss 后，扫所有 namespace
+   （受 `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST` 限制；如果设置）
+   找名字含 `prometheus` / `kube-prometheus` / `prom` 的 Service。
+   覆盖像 `default/monitor-kube-prometheus-st-prometheus` 这种
+   非标准部署。NodePort / LoadBalancer 优先于 ClusterIP。
+5. **找不到** — 工具返回中文友好提示，引导用户给 URL。
 
 Agent 推荐的 ClusterIP 桥接 3 步协议详见
 [tools.md → Prometheus 端点发现 + 桥接协议](./tools.md#prometheus-工具prometheus_query-prometheus_query_range-pod_metrics)：
@@ -93,6 +98,7 @@ find_prometheus_service(namespace=None)
 | --- | --- | --- |
 | `K8S_MCP_PROMETHEUS_URL` | (空) | 完整 URL，例如 `http://prometheus.monitoring.svc.cluster.local:9090`。设了就跳过自动探测。 |
 | `K8S_MCP_PROMETHEUS_BEARER_TOKEN` | (空) | 可选 bearer token。多数本地 Prometheus 不需要。 |
+| `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST` | (空) | 逗号分隔的 namespace 白名单。设置后，`find_prometheus_service()` 与 `_resolve_prometheus_url()` 的宽扫描 fallback **只**扫这些 namespace；硬编码候选名单不受影响（它本来就只查 `monitoring` 等几个常见 ns）。在多租户 / 大量 namespace 的集群上用它**限制扫面成本 + 信息暴露面**。空字符串 / 未设置 = 扫全集群。与 `K8S_MCP_NAMESPACE_ALLOWLIST`（**写**工具守门）独立：这是**发现侧**白名单。例如 `export K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST=monitoring,observability`。 |
 
 ### 通知 webhook
 
@@ -123,6 +129,9 @@ export K8S_MCP_READ_ONLY=false
 export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod
 export K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32)
 export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
+
+# Prometheus 发现侧白名单（多租户 / 大集群时建议设置）
+export K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST=monitoring,observability
 ```
 
 ## MCP JSON 配置里的 env 块示例
@@ -138,6 +147,7 @@ export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
         "K8S_MCP_API_TOKEN": "eyJhbGciOiJSUzI1NiIs...",
         "K8S_MCP_READ_ONLY": "false",
         "K8S_MCP_NAMESPACE_ALLOWLIST": "default,app,prod",
+        "K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST": "monitoring,observability",
         "K8S_MCP_DELETE_TOKEN_SECRET": "<32字节hex>"
       }
     }

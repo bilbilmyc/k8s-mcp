@@ -6,6 +6,11 @@ to a recording fake. Each tool has the same shape:
   2. namespace allowlist check
   3. 404 -> LookupError
   4. success path
+
+These tools are deprecated as of v0.4.0 (will be removed in v0.5.0)
+in favor of the audited two-step `delete_resource(kind=...)`. Each
+success-path test additionally asserts the deprecation marker is
+visible in the tool return so LLM agents see it.
 """
 from __future__ import annotations
 

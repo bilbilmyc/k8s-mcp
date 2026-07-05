@@ -108,6 +108,12 @@ def delete_configmap(name: str, namespace: str = "default") -> str:
     For higher-risk delete (Secret, anything that triggers a cascade),
     use the generic two-step `delete_resource` instead.
 
+    .. deprecated::
+        Use :func:`delete_resource` with ``kind='ConfigMap'`` instead.
+        This one-step wrapper will be removed in v0.5.0; the two-step
+        preview+confirm flow is the recommended path for all
+        destructive ops going forward.
+
     Args:
         name: ConfigMap name.
         namespace: ConfigMap namespace (default "default").
@@ -120,7 +126,11 @@ def delete_configmap(name: str, namespace: str = "default") -> str:
         if e.status == 404:
             raise LookupError(f"ConfigMap '{namespace}/{name}' not found") from e
         raise
-    return f"ConfigMap/{namespace}/{name} deleted"
+    return (
+        f"⚠️ DEPRECATED: delete_configmap will be removed in v0.5.0 — "
+        f"use delete_resource(kind='ConfigMap') for the audited two-step flow.\n"
+        f"ConfigMap/{namespace}/{name} deleted"
+    )
 
 
 def register(mcp) -> None:

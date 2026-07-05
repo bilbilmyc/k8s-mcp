@@ -159,6 +159,12 @@ def delete_pvc(name: str, namespace: str) -> str:
 
     For multi-PVC cleanup by label, use `bulk_delete_pvc` instead.
 
+    .. deprecated::
+        Use :func:`delete_resource` with ``kind='PersistentVolumeClaim'``
+        instead. This one-step wrapper will be removed in v0.5.0;
+        the two-step preview+confirm flow is the recommended path for
+        all destructive ops going forward.
+
     Args:
         name: PVC name.
         namespace: PVC namespace.
@@ -180,7 +186,11 @@ def delete_pvc(name: str, namespace: str) -> str:
         if e.status == 404:
             raise LookupError(f"PVC '{namespace}/{name}' not found") from e
         raise
-    return f"PVC/{namespace}/{name} deleted"
+    return (
+        f"⚠️ DEPRECATED: delete_pvc will be removed in v0.5.0 — "
+        f"use delete_resource(kind='PersistentVolumeClaim') for the audited two-step flow.\n"
+        f"PVC/{namespace}/{name} deleted"
+    )
 
 
 # ---------- bulk_delete_pvc --------------------------------------------------

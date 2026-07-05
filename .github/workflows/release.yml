@@ -4,29 +4,47 @@ name: Release
 # nothing — build & publish is intentionally not coupled to the CI on
 # every PR merge, since publishing the same version twice is a
 # PyPI rejection and we don't want the auto-merge flow to silently
-# cause that. The manual `git tag vX.Y.Z && git push --tags` step
-# is the gate.
+# cause that. The `bash scripts/bump_and_release.sh X.Y.Z` step is
+# the gate.
 #
 # Publish path: PyPI Trusted Publishing via OIDC. No PyPI API token
 # is stored in GitHub — the workflow authenticates to PyPI using a
 # short-lived OIDC token that PyPI verifies against the configured
 # Trusted Publisher (set once on the PyPI project page; see
 # docs/publishing.md).
+#
+# Three jobs:
+#   1. build     — uv build → dist/*.whl + *.tar.gz as artifact
+#   2. publish   — pypa/gh-action-pypi-publish via OIDC to PyPI
+#   3. release   — create a GitHub Release, attach the dist artifacts
+#
+# Re-running on a tag whose version already exists on PyPI is a
+# no-op for `publish` (skip-existing: true on the action), but
+# `release` still creates the GitHub Release. That's the backfill
+# path for older commits that were shipped before this workflow
+# existed.
 
 on:
   push:
     tags:
       - "v*.*.*"
 
+# Workflow-level permissions are the least-privilege default; each
+# job overrides with the scopes it actually needs.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build sdist + wheel
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
 
@@ -49,7 +67,7 @@ jobs:
           echo "Tag v${tag} matches pyproject.toml version — OK"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: dist
           path: dist/
@@ -58,10 +76,6 @@ jobs:
     name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
-    # Only publish tags we explicitly approve — never on a force-pushed
-    # tag, never on a tag that was deleted and re-created (PyPI rejects
-    # re-upload of the same filename anyway, but the extra gate makes
-    # the failure mode obvious in logs).
     environment: pypi
     permissions:
       # The two scopes below are the minimum required for PyPI's
@@ -70,11 +84,61 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: dist
           path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # No-op when the version is already on PyPI. Lets us
+          # backfill older tags without triggering a duplicate-upload
+          # 400 from PyPI.
+          skip-existing: true
         # No `password:` — OIDC handles auth.
+
+  release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract changelog section for this version
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/v}"
+          python3 - <<PY
+          import pathlib, re
+          text = pathlib.Path("docs/CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = re.compile(rf"^## \[{re.escape("$tag")}\][^\n]*\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+          m = pattern.search(text)
+          body = m.group(1).strip() if m else f"See docs/CHANGELOG.md for $tag details."
+          pathlib.Path("/tmp/release_body.md").write_text(body, encoding="utf-8")
+          print("wrote /tmp/release_body.md ({} bytes)".format(len(body)))
+          PY
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ github.ref_name }}"
+          body_path: /tmp/release_body.md
+          draft: false
+          prerelease: false
+          # generate_release_notes provides GitHub's auto-generated
+          # bullet list of commits since the previous tag as a
+          # fallback when the CHANGELOG section is thin.
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

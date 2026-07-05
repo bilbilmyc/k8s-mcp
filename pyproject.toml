@@ -53,12 +53,15 @@ packages = ["src/k8s_mcp"]
 
 # Trusted publishing metadata. `uv publish` reads these so it can mint
 # an OIDC token that PyPI verifies against the Trusted Publisher record
-# configured on the PyPI project page. Both fields MUST match the
-# PyPI configuration exactly, otherwise PyPI rejects the upload with
-# a 403. See docs/publishing.md for the one-time PyPI setup.
-[tool.uv.publish]
-publisher = "pypi"
-repository = "https://upload.pypi.org/legacy/"
+# configured on the PyPI project page. `trusted-publishing = "always"`
+# opts in unconditionally; PyPI will reject the upload with a 403 if
+# the Trusted Publisher isn't configured (see docs/publishing.md for
+# the one-time PyPI setup). The CI release workflow uses
+# `pypa/gh-action-pypi-publish` instead, which handles OIDC itself
+# and doesn't read this block.
+[tool.uv]
+publish-url = "https://upload.pypi.org/legacy/"
+trusted-publishing = "always"
 
 [dependency-groups]
 dev = [

@@ -6,6 +6,19 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+### Fixed
+- notifier: 3x retry with exponential backoff (0.5s / 1s / 2s) on 5xx + connection errors
+- notifier: payload size guard per type (Slack 40KB / WeCom 4KB / Feishu 30KB) with `truncated from N bytes` warning when capped
+- notifier: requests.Session module-level connection pool (was fresh TCP+TLS per send)
+- notifier: error messages unified to English (`No notifiers configured` / `Invalid level` / `Notifier X not found`)
+- health._section_workloads: N+1 in multi-namespace mode — now uses `list_*_for_all_namespaces` + client-side filter (same pattern as `_section_hpa`)
+
+### Changed
+- (planned) delete_pod / delete_service / delete_ingress / delete_configmap / delete_pvc deprecated → use `delete_resource(kind=...)`
+- (planned) bulk_scale / bulk_restart / bulk_set_image / bulk_delete_pvc deprecated → merged into single-tool list variants
+- (planned) tool description boundaries clarified for 6 overlapping pairs
+- (planned) shared HTTP connection pool + per-tool timeout split (prometheus / logs / notifier)
+
 ## [0.3.0] — 2026-07-05
 
 ### Fixed

@@ -233,6 +233,12 @@ def delete_service(name: str, namespace: str = "default") -> str:
     to run. Re-creatable with `create_service` / `expose_workload` /
     `apply_yaml`.
 
+    .. deprecated::
+        Use :func:`delete_resource` with ``kind='Service'`` instead.
+        This one-step wrapper will be removed in v0.5.0; the two-step
+        preview+confirm flow is the recommended path for all
+        destructive ops going forward.
+
     Args:
         name: Service name.
         namespace: Service namespace (default "default").
@@ -245,7 +251,11 @@ def delete_service(name: str, namespace: str = "default") -> str:
         if e.status == 404:
             raise LookupError(f"Service '{namespace}/{name}' not found") from e
         raise
-    return f"Service/{namespace}/{name} deleted"
+    return (
+        f"⚠️ DEPRECATED: delete_service will be removed in v0.5.0 — "
+        f"use delete_resource(kind='Service') for the audited two-step flow.\n"
+        f"Service/{namespace}/{name} deleted"
+    )
 
 
 def delete_ingress(name: str, namespace: str = "default") -> str:
@@ -255,6 +265,12 @@ def delete_ingress(name: str, namespace: str = "default") -> str:
     Deleting it stops external HTTP(S) traffic to the Services; the
     Services and Pods keep running. Re-creatable with `create_ingress`
     / `apply_yaml`.
+
+    .. deprecated::
+        Use :func:`delete_resource` with ``kind='Ingress'`` instead.
+        This one-step wrapper will be removed in v0.5.0; the two-step
+        preview+confirm flow is the recommended path for all
+        destructive ops going forward.
 
     Args:
         name: Ingress name.
@@ -268,7 +284,11 @@ def delete_ingress(name: str, namespace: str = "default") -> str:
         if e.status == 404:
             raise LookupError(f"Ingress '{namespace}/{name}' not found") from e
         raise
-    return f"Ingress/{namespace}/{name} deleted"
+    return (
+        f"⚠️ DEPRECATED: delete_ingress will be removed in v0.5.0 — "
+        f"use delete_resource(kind='Ingress') for the audited two-step flow.\n"
+        f"Ingress/{namespace}/{name} deleted"
+    )
 
 
 def register(mcp) -> None:

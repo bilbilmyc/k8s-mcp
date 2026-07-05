@@ -84,6 +84,13 @@ def delete_pod(name: str, namespace: str, grace_period_seconds: int = 30) -> str
     because deleting a Pod is a low-risk recovery / restart primitive —
     the controller (Deployment, StatefulSet, Job, …) will recreate it.
 
+    .. deprecated::
+        Use :func:`delete_resource` with ``kind='Pod'`` instead. This
+        one-step wrapper will be removed in v0.5.0; the two-step
+        preview+confirm flow is the recommended path for all
+        destructive ops going forward. Keep using ``delete_pod`` for
+        now if you specifically need the one-step behavior.
+
     Args:
         name: pod name.
         namespace: pod namespace.
@@ -105,7 +112,12 @@ def delete_pod(name: str, namespace: str, grace_period_seconds: int = 30) -> str
         if e.status == 404:
             raise LookupError(f"Pod '{namespace}/{name}' not found") from e
         raise
-    return f"Pod/{namespace}/{name} deleted (grace={grace_period_seconds}s); controller will recreate"
+    return (
+        f"⚠️ DEPRECATED: delete_pod will be removed in v0.5.0 — "
+        f"use delete_resource(kind='Pod') for the audited two-step flow.\n"
+        f"Pod/{namespace}/{name} deleted (grace={grace_period_seconds}s); "
+        f"controller will recreate"
+    )
 
 
 def register(mcp) -> None:

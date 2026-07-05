@@ -6,14 +6,16 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
-### Fixed
-- health._section_workloads: N+1 in multi-namespace mode — uses `list_*_for_all_namespaces` + client-side filter (same pattern as `_section_hpa`)
-
 ### Changed
 - (planned) delete_pod / delete_service / delete_ingress / delete_configmap / delete_pvc deprecated → use `delete_resource(kind=...)`
 - (planned) bulk_scale / bulk_restart / bulk_set_image / bulk_delete_pvc deprecated → merged into single-tool list variants
 - (planned) tool description boundaries clarified for 6 overlapping pairs
 - (planned) shared HTTP connection pool + per-tool timeout split (prometheus / logs / notifier)
+
+## [0.3.2] — 2026-07-05
+
+### Fixed
+- `cluster_health_snapshot`: `_section_workloads` no longer makes N+1 apiserver calls in multi-namespace mode (was: 6 kinds × N namespaces per call). Switches to `list_*_for_all_namespaces` once per kind + client-side filter, matching the existing `_section_hpa` pattern. On a 50-ns cluster this single section drops from ~300 calls to 6
 
 ## [0.3.1] — 2026-07-05
 
@@ -98,7 +100,8 @@ behavior changes bump the minor (we're pre-1.0).
 ## [0.1.1] — 2026-04-xx
 - Initial PyPI release notes.
 
-[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.3.1...HEAD
+[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.3.2...HEAD
+[0.3.2]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.3.0...v0.3.1
 [0.2.1]: https://github.com/bilbilmyc/k8s-mcp/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.3...0.2.0

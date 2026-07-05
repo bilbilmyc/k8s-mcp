@@ -7,17 +7,21 @@ behavior changes bump the minor (we're pre-1.0).
 ## [Unreleased]
 
 ### Fixed
-- notifier: 3x retry with exponential backoff (0.5s / 1s / 2s) on 5xx + connection errors
-- notifier: payload size guard per type (Slack 40KB / WeCom 4KB / Feishu 30KB) with `truncated from N bytes` warning when capped
-- notifier: requests.Session module-level connection pool (was fresh TCP+TLS per send)
-- notifier: error messages unified to English (`No notifiers configured` / `Invalid level` / `Notifier X not found`)
-- health._section_workloads: N+1 in multi-namespace mode — now uses `list_*_for_all_namespaces` + client-side filter (same pattern as `_section_hpa`)
+- health._section_workloads: N+1 in multi-namespace mode — uses `list_*_for_all_namespaces` + client-side filter (same pattern as `_section_hpa`)
 
 ### Changed
 - (planned) delete_pod / delete_service / delete_ingress / delete_configmap / delete_pvc deprecated → use `delete_resource(kind=...)`
 - (planned) bulk_scale / bulk_restart / bulk_set_image / bulk_delete_pvc deprecated → merged into single-tool list variants
 - (planned) tool description boundaries clarified for 6 overlapping pairs
 - (planned) shared HTTP connection pool + per-tool timeout split (prometheus / logs / notifier)
+
+## [0.3.1] — 2026-07-05
+
+### Fixed
+- notifier: 3x retry with exponential backoff (0.5s / 1s / 2s) on 5xx + connection errors (was: dropped messages on a one-off 503)
+- notifier: payload size guard per type — Slack 40 KiB / WeCom 4 KiB / Feishu 30 KiB / generic 30 KiB. Above limit returns `❌ payload too large: N bytes exceeds <type> limit of M bytes` without burning 3 retry attempts on a payload the gateway will reject regardless
+- notifier: `requests.Session` module-level + `HTTPAdapter(pool_connections=10, pool_maxsize=20)`. Was fresh TCP+TLS per `notify()` call
+- notifier: error messages unified to English (`No notifiers configured` / `Notifier X not found` / `Invalid level` / `All configured notifiers are invalid`) so LLM agents get stable parsing
 
 ## [0.3.0] — 2026-07-05
 
@@ -94,7 +98,8 @@ behavior changes bump the minor (we're pre-1.0).
 ## [0.1.1] — 2026-04-xx
 - Initial PyPI release notes.
 
-[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.2.1...HEAD
+[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.3.1...HEAD
+[0.3.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.3.0...v0.3.1
 [0.2.1]: https://github.com/bilbilmyc/k8s-mcp/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.3...0.2.0
 [0.1.3]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.2...0.1.3

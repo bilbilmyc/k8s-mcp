@@ -51,6 +51,15 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/k8s_mcp"]
 
+# Trusted publishing metadata. `uv publish` reads these so it can mint
+# an OIDC token that PyPI verifies against the Trusted Publisher record
+# configured on the PyPI project page. Both fields MUST match the
+# PyPI configuration exactly, otherwise PyPI rejects the upload with
+# a 403. See docs/publishing.md for the one-time PyPI setup.
+[tool.uv.publish]
+publisher = "pypi"
+repository = "https://upload.pypi.org/legacy/"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

@@ -62,6 +62,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from ..config import get_settings
@@ -457,16 +458,28 @@ def notify(
     # (Slack mrkdwn, plain for the rest). `_build_payload` decides per
     # notifier — keep `message` and `title` separate so we don't pollute
     # one channel's body with another channel's prefix.
+    #
+    # Concurrent send: each notifier is independent (different webhook URL),
+    # so we fan out across threads rather than paying the latency of N
+    # serial HTTP requests. With 1-2 notifiers this is negligible; with
+    # 5+ (common on AI-ops setups that broadcast to ops + oncall + audit)
+    # it cuts wall-clock time proportionally. Timeout per notifier is
+    # bounded by `_post(timeout=10)`, so even if one webhook hangs the
+    # whole broadcast completes within a few seconds.
     rows: list[dict] = []
-    for n in valid:
-        payload = _build_payload(n, message, level, title)
-        ok, detail = _post(n["url"], payload)
-        rows.append({
-            "NOTIFIER": n["name"],
-            "TYPE": n["type"],
-            "STATUS": "✅" if ok else "❌",
-            "DETAIL": detail,
-        })
+    with ThreadPoolExecutor(max_workers=max(len(valid), 1)) as pool:
+        futures = {
+            pool.submit(_post, n["url"], _build_payload(n, message, level, title)): n
+            for n in valid
+        }
+        for fut, n in futures.items():
+            ok, detail = fut.result()
+            rows.append({
+                "NOTIFIER": n["name"],
+                "TYPE": n["type"],
+                "STATUS": "✅" if ok else "❌",
+                "DETAIL": detail,
+            })
 
     if validation_errors:
         # Some succeeded, some were malformed — surface both

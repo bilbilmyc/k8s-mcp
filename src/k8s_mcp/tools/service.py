@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import yaml
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
@@ -85,7 +86,6 @@ def create_service(
         "metadata": {"name": name, "namespace": namespace, **({"labels": labels} if labels else {})},
         "spec": spec,
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 
@@ -156,7 +156,6 @@ def create_ingress(
         "metadata": md,
         "spec": spec,
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 

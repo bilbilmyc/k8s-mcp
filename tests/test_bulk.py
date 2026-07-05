@@ -95,7 +95,28 @@ def _stub_list(monkeypatch):
         except Exception:
             return "ok"
 
+    def fake_records(y):
+        # Mirror the real `_apply_yaml_records` shape so bulk's success
+        # counter (`startswith(("created","configured","unchanged"))`) hits.
+        fake_apply(y)
+        try:
+            import yaml as _y
+            obj = _y.safe_load(y)
+            return [{
+                "kind": obj.get("kind", "X"),
+                "name": obj.get("metadata", {}).get("name", "?"),
+                "namespace": obj.get("metadata", {}).get("namespace"),
+                "action": "configured (patched)",
+                "error": None,
+            }]
+        except Exception:
+            return [{
+                "kind": "X", "name": "?", "namespace": None,
+                "action": "configured (patched)", "error": None,
+            }]
+
     monkeypatch.setattr(bulk.generic, "apply_yaml", fake_apply)
+    monkeypatch.setattr(bulk.generic, "_apply_yaml_records", fake_records)
     monkeypatch.setattr(bulk.generic, "_dyn_client", lambda: _FakeDC())
 
     def install(items):

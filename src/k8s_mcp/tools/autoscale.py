@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import yaml
+
 from . import generic
 
 logger = logging.getLogger(__name__)
@@ -80,7 +82,6 @@ def create_hpa(
             "metrics": metrics,
         },
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 
@@ -126,7 +127,6 @@ def create_pdb(
         "metadata": {"name": name, "namespace": namespace},
         "spec": pdb_spec,
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 

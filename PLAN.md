@@ -321,5 +321,56 @@ K8S_MCP_DELETE_TOKEN_SECRET=change-me
 
 ---
 
+## 12. Drift Log（plan ↔ code 偏差记录）
+
+每次发现 plan 与 code 不一致、或 plan 描述已过时、需在这里登记一行。
+新功能 / 重构也要在这里追一笔，让 plan 文档保持诚实。
+
+### 12.1 实现期漂移
+
+- 2026-07-05: plan §2 tech stack 列出 `kr8s`，但代码从一开始就只用
+  `kubernetes`（DynamicClient）；`kr8s` 从未被引入。已删 `kr8s` 描述。
+- 2026-07-05: §3 描述 `crud` 一档，但实际认证"三档"是
+  apiserver+token / kubeconfig / in-cluster；§2 表格里"CRUD"是工具
+  维度、§3 描述的是 auth 维度，混在一起容易读错。auth 三档以
+  `auth.py` 为准。
+- 2026-07-05: §10.1 提到 "crud 操作" 一档，但实际实现里写操作覆盖了
+  workload / storage / RBAC / networking 等多档；这里按工具维度重新
+  分组更清楚。
+- 2026-07-05: `apply_yaml` 内部新增 `_apply_yaml_records()` 返回结构化
+  per-doc 结果（用于 `bulk_*`），但外部 `apply_yaml` 字符串格式
+  `"kind/name: action"` 保持向后兼容——plan §4 仅描述了字符串版。
+- 2026-07-05: 新增 `formatters.format_age` / `format_relative_time`
+  作为唯一时间渲染来源（取代散落在 generic / health / pods / secret
+  / events 5 个模块的 `_age` / `_rel_time` / `_format_time` 副本）。
+- 2026-07-05: `cluster_health_snapshot` 之前有 4 处重复 list_pod 调用
+  已合并为 1 次 top-level fetch；plan §5 没具体到 sub-section 级
+  优化，仅描述"独立出错边界"。
+- 2026-07-05: `client.py` 现在给 Configuration 设 5s connect / 30s
+  read timeout，plan §3 没有涉及——之前 python-client 默认无限，
+  实测半死 apiserver 会让 MCP 工具调用挂死。
+- 2026-07-05: `_api_version_for` 现在从 `generic.py` 单源导出，
+  `wait_tool.py` 不再持有副本。
+- 2026-07-05: 所有 tool 模块的 `import yaml` / `import copy` /
+  `import re` / `import os` 全部上移到文件顶部（之前散落在
+  函数体内）。
+- 2026-07-05: server-managed metadata key 列表（`_MANAGED_METADATA_KEYS`
+  vs `server_managed_metadata`）在 `generic.py` 内部去重为
+  `_SERVER_MANAGED_METADATA_KEYS` + `_YAML_NOISE_METADATA_KEYS` 两个
+  常量，行为不变。
+
+### 12.2 待决 / 待跟踪
+
+- `set_resources` 在 read_only=False 且 `K8S_MCP_DELETE_TOKEN_SECRET`
+  仍为默认值时，启动日志会 SECURITY-warn，但**不**强制 fail——
+  用户接受这个折中（部署方可忽略 WARN）。如果后续想升级为 hard
+  fail（启动拒绝），需要明确开关。
+- Prometheus discovery 的 wide-scan fallback 在非常大的集群里仍然
+  可能耗时长（list_service_for_all_namespaces + filter），目前没有
+  二次 timeout 保护。需要观察生产环境再决定是否加 hard ceiling。
+
+---
+
 **变更记录**
 - 2026-07-02 初稿：Python + FastMCP，CRUD（删走二次确认），三档认证（apiserver+token / kubeconfig / in-cluster）
+- 2026-07-05 增 §12 Drift Log：把代码已经偏离 plan 的地方登记在此；后续发现 / 重构都要追加

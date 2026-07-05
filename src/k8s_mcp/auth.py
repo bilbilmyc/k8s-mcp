@@ -66,8 +66,6 @@ def _load_token_config(settings: Settings) -> client.Configuration:
 
 def _load_kube_config(settings: Settings) -> client.Configuration:
     """Mode B: kubeconfig file (explicit path or KUBECONFIG env or default)."""
-    import os
-
     kubeconfig_path = (
         str(Path(settings.kubeconfig).expanduser()) if settings.kubeconfig else None
     )

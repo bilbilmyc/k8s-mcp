@@ -18,6 +18,7 @@ import logging
 from datetime import UTC
 from typing import Any
 
+import yaml
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
@@ -107,7 +108,6 @@ def create_deployment(
             },
         },
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 
@@ -188,7 +188,6 @@ def create_statefulset(
             "volumeClaimTemplates": [volume_claim_template],
         },
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 
@@ -467,7 +466,6 @@ def create_job(
         "metadata": md,
         "spec": spec,
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 
@@ -535,7 +533,6 @@ def create_cronjob(
         "metadata": md,
         "spec": spec,
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 

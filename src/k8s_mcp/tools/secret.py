@@ -32,7 +32,7 @@ from kubernetes import dynamic
 from kubernetes.client.rest import ApiException
 
 from ..client import get_api_client
-from ..formatters import short_table
+from ..formatters import format_age, short_table
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ def list_secrets(
             "NAMESPACE": md.get("namespace", ""),
             "TYPE": obj.get("type", ""),
             "DATA": len(obj.get("data") or {}),
-            "AGE": _age(md.get("creationTimestamp")),
+            "AGE": format_age(md.get("creationTimestamp")),
         })
     return short_table(rows, ["NAME", "NAMESPACE", "TYPE", "DATA", "AGE"])
 
@@ -205,27 +205,7 @@ def _format_decoded(key: str, raw: bytes) -> str:
     except UnicodeDecodeError:
         pass
 
-    import base64 as _b64
-    return f"<binary, {len(raw)} bytes, base64={_b64.b64encode(raw).decode('ascii')}>"
-
-
-def _age(created: str | None) -> str:
-    if not created:
-        return ""
-    from datetime import UTC, datetime
-    try:
-        ts = datetime.fromisoformat(created.replace("Z", "+00:00"))
-        delta = datetime.now(UTC) - ts
-    except (ValueError, TypeError):
-        return created
-    secs = int(delta.total_seconds())
-    if secs < 60:
-        return f"{secs}s"
-    if secs < 3600:
-        return f"{secs // 60}m"
-    if secs < 86400:
-        return f"{secs // 3600}h"
-    return f"{secs // 86400}d"
+    return f"<binary, {len(raw)} bytes, base64={base64.b64encode(raw).decode('ascii')}>"
 
 
 def register(mcp) -> None:

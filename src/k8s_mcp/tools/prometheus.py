@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -278,10 +279,13 @@ def _not_found_message(tried: list[str] | None = None) -> str:
 
 
 def reset_prometheus_discovery_cache() -> None:
-    """Drop the cached Prometheus URL. Tests should call this between scenarios."""
+    """Drop the cached Prometheus URL + diagnostic hints. Tests should call
+    this between scenarios so cached `(name, base_url) → hint` mappings
+    don't leak across fake-apiserver setups."""
     global _DISCOVERY_CACHE, _DISCOVERY_TRIED
     _DISCOVERY_CACHE = None
     _DISCOVERY_TRIED = False
+    _DIAGNOSE_CACHE.clear()
 
 
 # Common Service name patterns we'd consider "likely Prometheus". The fuzzy
@@ -488,8 +492,13 @@ def _prom_get(path: str, params: dict[str, str], base_url: str,
     req = urllib.request.Request(url, method="GET")
     if bearer_token:
         req.add_header("Authorization", f"Bearer {bearer_token}")
+    # Timeouts: a half-dead Prometheus should fail fast. 3s connect (TCP
+    # handshake / TLS) is enough for healthy in-cluster Prometheus; 15s
+    # read covers full range queries on big clusters (1d / 7d ranges can
+    # easily be 5–10s even when things work). Both shorter than the
+    # default infinite urllib would otherwise allow.
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=_PROM_HTTP_TIMEOUT) as resp:
             data = resp.read()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")[:500]
@@ -530,10 +539,23 @@ def _diagnose_empty_promql(
 ) -> str:
     """For empty cAdvisor queries, return a hint listing scrape jobs and
     suggesting `job="kubelet"`. Empty string otherwise (or on probe
-    failure — diagnostic must never shadow the main error)."""
+    failure — diagnostic must never shadow the main error).
+
+    The scrape-job probe is cached per `(metric_name, base_url)` for
+    `_DIAGNOSE_TTL_SECONDS` because dashboards and health checks hammer
+    the same empty metric every poll cycle — without a cache we'd add
+    one full Prometheus HTTP round-trip per call.
+    """
     name = _extract_promql_metric_name(promql)
     if not name or not name.startswith(_CADVISOR_METRIC_PREFIXES):
         return ""
+
+    cache_key = (name, base_url)
+    cached = _DIAGNOSE_CACHE.get(cache_key)
+    now = time.monotonic()
+    if cached is not None and (now - cached[0]) < _DIAGNOSE_TTL_SECONDS:
+        return cached[1]
+
     try:
         payload = _prom_get(
             "/api/v1/query",
@@ -542,9 +564,13 @@ def _diagnose_empty_promql(
         )
     except Exception as e:  # noqa: BLE001 — diagnostic must never shadow main error
         logger.debug("prometheus empty-result diagnostic failed: %s", e)
+        # Negative-cache for a shorter window so we don't keep retrying a
+        # broken endpoint on every probe.
+        _DIAGNOSE_CACHE[cache_key] = (now, "")
         return ""
     jobs = (payload.get("data") or {}).get("result") or []
     if not jobs:
+        _DIAGNOSE_CACHE[cache_key] = (now, "")
         return ""
     rows: list[str] = []
     for r in jobs:
@@ -553,7 +579,7 @@ def _diagnose_empty_promql(
         v = r.get("value")
         cnt = v[1] if isinstance(v, list) and len(v) == 2 else "?"
         rows.append(f"`{job}` ({cnt} series)")
-    return (
+    out = (
         "\n\nDiagnostic: `" + name + "` is scraped by "
         + ", ".join(rows) + "."
         "\nOnly `job=\"kubelet\"` carries `pod`/`namespace` labels — "
@@ -561,6 +587,27 @@ def _diagnose_empty_promql(
         "probes. Re-issue with `job=\"kubelet\"`, e.g. "
         f"`{name}{{job=\"kubelet\", pod=\"...\", namespace=\"...\"}}`."
     )
+    _DIAGNOSE_CACHE[cache_key] = (now, out)
+    return out
+
+
+# Cache for `_diagnose_empty_promql`. Keyed by (metric_name, base_url);
+# value is `(fetched_at_monotonic, hint_string)`. TTL bounds repeated
+# dashboard-style probes from hammering Prometheus.
+_DIAGNOSE_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
+_DIAGNOSE_TTL_SECONDS = 300  # 5 minutes — matches typical scrape config
+
+
+# HTTP timeout (connect + read combined) for Prometheus API calls.
+# urllib's `timeout` param is a single value applied to both phases; we
+# picked 15s as a compromise that:
+#   - gives in-cluster Prometheus 3s+ to establish the TCP/TLS handshake
+#     and start streaming a response;
+#   - leaves ~12s for big range queries (1d / 7d windows over thousands
+#     of series can take 5–10s even on a healthy Prom);
+#   - caps wall-clock hang time on a dead Prom so the agent's tool call
+#     can return a clear error instead of waiting indefinitely.
+_PROM_HTTP_TIMEOUT = 15
 
 
 # =============================================================================

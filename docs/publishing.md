@@ -172,5 +172,82 @@ k8s-mcp --version
 ## 不用 PyPI token 的方案：Trusted Publishing
 
 GitHub Actions 跑发布可以用 [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/)：
-在 PyPI 项目里登记 GitHub repo + workflow，发布时不传 token。**v2 加 CI
-时再配**，v1 阶段人工发布就够。
+在 PyPI 项目里登记 GitHub repo + workflow，发布时不传 token。本仓库 v0.3.0
+起采用这个方案（`.github/workflows/release.yml`）。**这是一次性配
+置**——下面是从零配好的步骤。
+
+### A. 在 PyPI 项目页登记 Trusted Publisher（一次性）
+
+1. 登录 <https://pypi.org/manage/account/publishing/>。
+2. 滚动到 "Add a new pending publisher" → 填：
+   - **PyPI Project Name**: `k8s-mcp-bilbilmyc`（包名，不是 GitHub repo 名）。
+     如果项目还没在 PyPI 上存在，**这里要先在 PyPI 手动 "create" 一次
+     空项目**：<https://pypi.org/manage/projects/> → "Create" → Name 填
+     `k8s-mcp-bilbilmyc`、其余留空。
+   - **Owner**: `bilbilmyc`
+   - **Repository name**: `k8s-mcp`
+   - **Workflow filename**: `release.yml`
+   - **Environment name**: `pypi`（必须跟 release.yml 里的 `environment: pypi` 字面值一致）
+3. 点 "Add"。
+
+PyPI 会发一封确认邮件到你 PyPI 账号绑定的邮箱。**点邮件里的 "Approve"**
+链接，Trusted Publisher 才算生效。没点的话 `uv publish` 会 403。
+
+### B. 在 GitHub 端创建 `pypi` environment（一次性）
+
+1. 仓库 → Settings → Environments → "New environment"。
+2. Name: `pypi`（必须跟上面填的字面值一致）。
+3. 可选：加一个 "Required reviewers" 的 approval gate——只有指定 reviewer
+   approve 后 workflow 才能跑。生产建议加；纯自动化测试期可以不开。
+
+### C. 测试一次发版
+
+第一次走完整流程：
+
+```bash
+# 1) 手动跑 release dry-run 看会发生什么
+bash scripts/bump_and_release.sh 0.3.0 --dry-run
+
+# 2) 实际 bump + commit + tag + push（dry-run 看着 OK 之后）
+bash scripts/bump_and_release.sh 0.3.0
+
+# 3) 浏览器看 release.yml workflow 跑：
+#    https://github.com/bilbilmyc/k8s-mcp/actions/workflows/release.yml
+
+# 4) PyPI 上看新版本：
+#    https://pypi.org/project/k8s-mcp-bilbilmyc/0.3.0/
+```
+
+如果第 3 步卡在 "Publish to PyPI" 这一步报 `403`，回头检查 §A 的邮
+件是否点了 Approve，以及 §B 的 environment name 是否字面是 `pypi`。
+
+### D. 为什么不直接用 PyPI API token
+
+- Token 会过期、要轮换、要存 GitHub Secrets——多一道泄露面。
+- Trusted Publishing 用 OIDC 短期 token，PyPI 验证 GitHub repo +
+  workflow path 后才放行——即使 GitHub Actions 被攻，攻击者也得上传
+  到一个**他控制的 GitHub repo + workflow**，而这个 repo 必须在 PyPI
+  那边白名单里。
+- 完全免维护（token 不存在 → 无轮换 → 无过期事故）。
+
+### E. 常见坑
+
+- **PyPI 报 `403 pending publisher not approved`** —— 没点 Approve 邮件，
+  或者 §A 的字段跟 release.yml 字面值不匹配。检查 environment name 是
+  否是 `pypi`（不是 `PyPI` / `production` 等）。
+- **PyPI 报 `400 file already exists`** —— 同一 version 二次上传。PyPI
+  不可覆盖；bump 版本号重发。
+- **Workflow 报 `failed: Environment pypi not found`** —— §B 的
+  environment 没建、或名字拼错。
+- **Tag 跟 pyproject version 不一致** —— release.yml 里有一步校验会拒绝
+  这种 push。修 tag 的方式：
+  ```bash
+  git tag -d v0.3.0 && git push origin :refs/tags/v0.3.0   # 删本地+远端
+  # 修 pyproject.toml / CHANGELOG.md
+  git commit --amend --no-edit
+  git tag -a v0.3.0 -m "Release 0.3.0"
+  git push origin HEAD --force                                  # 仅限 tag 与 version 不一致时
+  git push origin v0.3.0
+  ```
+  `--force` 在 tag-only release commit 上安全，因为这个 commit 就是为
+  了发版而存在的。

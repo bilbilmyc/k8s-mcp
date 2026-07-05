@@ -23,11 +23,13 @@ jsonpath_value=..., timeout_seconds=60)`：
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from kubernetes.client.rest import ApiException
 
 from ..client import get_api_client
+from .generic import _api_version_for
 
 logger = logging.getLogger(__name__)
 
@@ -118,25 +120,6 @@ def wait_resource(
 # ---------- internals ----------------------------------------------------------
 
 
-def _api_version_for(kind: str) -> str | None:
-    return {
-        "Pod": "v1",
-        "Service": "v1",
-        "ConfigMap": "v1",
-        "Secret": "v1",
-        "Deployment": "apps/v1",
-        "StatefulSet": "apps/v1",
-        "DaemonSet": "apps/v1",
-        "ReplicaSet": "apps/v1",
-        "Job": "batch/v1",
-        "CronJob": "batch/v1",
-        "Ingress": "networking.k8s.io/v1",
-        "HorizontalPodAutoscaler": "autoscaling/v2",
-        "Node": "v1",
-        "Namespace": "v1",
-    }.get(kind)
-
-
 def _check_condition(obj: dict, condition: str) -> bool:
     """Return True if status.conditions has type=condition with status=True."""
     conds = (obj.get("status") or {}).get("conditions") or []
@@ -157,8 +140,6 @@ def _jsonpath(obj: dict, expr: str) -> object:
     Walks `obj` according to the expression. Returns the final value (raises
     LookupError if the path is missing or wrong type).
     """
-    import re
-
     cur: object = obj
     tokens = re.findall(r"\.[^.\[]+|\[\-?\d+\]", expr)
     if not expr.startswith("."):

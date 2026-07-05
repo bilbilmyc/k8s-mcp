@@ -41,11 +41,12 @@ What it deliberately does NOT cover (out of scope for an MVP snapshot):
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
 from ..client import get_api_client
-from ..formatters import short_table
+from ..formatters import format_relative_time, short_table
 from . import certs, events, metrics
 
 logger = logging.getLogger(__name__)
@@ -86,14 +87,20 @@ def _batch_v1():
 
 
 def _list_pods(namespaces: list[str] | None) -> list[Any]:
+    """Cluster-wide pod list. `namespaces` is best-effort client-side filter
+    on top of a single apiserver call — we deliberately avoid per-namespace
+    list_namespaced_pod loops here because the snapshot calls this 4+ times
+    in a row and the per-ns loop multiplies the round-trip cost.
+
+    When callers want a strict per-namespace source of truth (e.g. RBAC
+    reasons), pass `namespaces=None` and filter downstream.
+    """
     api = _core_v1()
+    items = list(api.list_pod_for_all_namespaces().items)
     if namespaces:
-        out = []
-        for ns in namespaces:
-            ret = api.list_namespaced_pod(ns)
-            out.extend(ret.items)
-        return out
-    return list(api.list_pod_for_all_namespaces().items)
+        ns_set = set(namespaces)
+        items = [p for p in items if p.metadata.namespace in ns_set]
+    return items
 
 
 # ---------- section builders -------------------------------------------------
@@ -111,7 +118,7 @@ def _section_nodes() -> str:
         status = n.status
         for cond in (status.conditions or []):
             if cond.type == "Ready" and cond.status != "True":
-                not_ready.append(f"{name} (since {_rel_time(cond.last_transition_time)})")
+                not_ready.append(f"{name} (since {format_relative_time(cond.last_transition_time)})")
             if cond.type in ("DiskPressure", "MemoryPressure", "PIDPressure") and cond.status == "True":
                 pressure.append(f"{name}: {cond.type}")
     lines = [
@@ -133,8 +140,10 @@ def _section_nodes() -> str:
     return "\n".join(lines)
 
 
-def _section_pending_pods(namespaces: list[str] | None) -> str:
-    pods = [p for p in _list_pods(namespaces) if p.status.phase == "Pending"]
+def _section_pending_pods(namespaces: list[str] | None, pods: list[Any] | None = None) -> str:
+    if pods is None:
+        pods = _list_pods(namespaces)
+    pods = [p for p in pods if p.status.phase == "Pending"]
     if not pods:
         return "## Pending Pods\n(none — all scheduled)"
     rows = []
@@ -154,10 +163,14 @@ def _section_pending_pods(namespaces: list[str] | None) -> str:
     return f"## Pending Pods ({len(pods)})\n" + short_table(rows, ["POD", "REASON", "MESSAGE"]) + extra
 
 
-def _section_abnormal_restarts(namespaces: list[str] | None, threshold: int) -> str:
+def _section_abnormal_restarts(
+    namespaces: list[str] | None, threshold: int, pods: list[Any] | None = None,
+) -> str:
     """Pods with restartCount > threshold OR in a bad waiting state."""
+    if pods is None:
+        pods = _list_pods(namespaces)
     rows: list[dict] = []
-    for p in _list_pods(namespaces):
+    for p in pods:
         for cs in (p.status.container_statuses or []):
             waiting = (cs.state.waiting.reason if cs.state.waiting else None)
             if cs.restart_count > threshold or waiting in _BAD_WAITING_REASONS:
@@ -176,12 +189,13 @@ def _section_abnormal_restarts(namespaces: list[str] | None, threshold: int) -> 
 
 def _section_hpa(namespaces: list[str] | None) -> str:
     api = _autoscaling_v2()
+    # Cluster-wide list + client-side filter, same pattern as `_list_pods`.
+    # Avoids the N+1 `list_namespaced_horizontal_pod_autoscaler` loop on
+    # multi-namespace snapshots.
+    hpas = list(api.list_horizontal_pod_autoscaler_for_all_namespaces().items)
     if namespaces:
-        hpas = []
-        for ns in namespaces:
-            hpas.extend(api.list_namespaced_horizontal_pod_autoscaler(ns).items)
-    else:
-        hpas = list(api.list_horizontal_pod_autoscaler_for_all_namespaces().items)
+        ns_set = set(namespaces)
+        hpas = [h for h in hpas if h.metadata.namespace in ns_set]
     rows = []
     for h in hpas:
         status = h.status
@@ -232,7 +246,7 @@ def _section_orphan_pvs() -> str:
             "PV": pv.metadata.name,
             "PHASE": phase,
             "CLAIM_REF": claim_str,
-            "AGE": _rel_time(pv.metadata.creation_timestamp),
+            "AGE": format_relative_time(pv.metadata.creation_timestamp),
         })
     if not rows:
         return "## Orphan PVs\n(all PVs Bound)"
@@ -324,17 +338,21 @@ def _section_resource_usage(namespaces: list[str] | None, top_n: int = 5) -> str
     return "\n".join(out)
 
 
-def _section_pod_distribution(namespaces: list[str] | None) -> str:
+def _section_pod_distribution(
+    namespaces: list[str] | None, pods: list[Any] | None = None,
+) -> str:
     """Count of pods per phase (Running / Pending / Failed / Succeeded / Unknown).
 
     Cheaper to render than the full `list_pods` table but gives the
     operator a "what's the cluster actually doing" one-liner.
     """
+    if pods is None:
+        pods = _list_pods(namespaces)
     counts: dict[str, int] = {
         "Running": 0, "Pending": 0, "Failed": 0,
         "Succeeded": 0, "Unknown": 0,
     }
-    for p in _list_pods(namespaces):
+    for p in pods:
         phase = p.status.phase or "Unknown"
         counts[phase if phase in counts else "Unknown"] += 1
     total = sum(counts.values())
@@ -348,7 +366,9 @@ def _section_pod_distribution(namespaces: list[str] | None) -> str:
         short_table(rows, ["PHASE", "COUNT"])
 
 
-def _section_image_pull(namespaces: list[str] | None) -> str:
+def _section_image_pull(
+    namespaces: list[str] | None, pods: list[Any] | None = None,
+) -> str:
     """Pods stuck on image-pull failures (distinct actionable signal).
 
     Separate from "Abnormal Restarts" because image-pull pods typically
@@ -357,8 +377,10 @@ def _section_image_pull(namespaces: list[str] | None) -> str:
     is usually edit the image reference or check `imagePullSecrets` /
     registry creds — different from the restart-thrash category.
     """
+    if pods is None:
+        pods = _list_pods(namespaces)
     rows: list[dict] = []
-    for p in _list_pods(namespaces):
+    for p in pods:
         for cs in (p.status.container_statuses or []):
             waiting = (cs.state.waiting.reason if cs.state.waiting else None)
             if waiting in ("ErrImagePull", "ImagePullBackOff", "InvalidImageName"):
@@ -500,18 +522,29 @@ def cluster_health_snapshot(
         "hpa_off": 0, "orphan_pvs": 0,
     }
 
+    # Fetch the pod list ONCE — 4 sections (pending / abnormal / distribution /
+    # image-pull) all need it, and the apiserver round-trip + serialization
+    # dominates the snapshot's wall time on big clusters. `_list_pods`
+    # returns cluster-wide + client-side filter, so namespaces is honored.
+    pods: list[Any] | None
+    try:
+        pods = _list_pods(namespaces)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("health snapshot: pod list failed: %s", e)
+        pods = None  # sections fall back to their own fetch on None
+
     section_builders = [
         ("Nodes", _section_nodes, lambda s: _count_from_section(s, "NotReady:") and "  "),
         ("Resource Usage", lambda: _section_resource_usage(namespaces),
          lambda s: 0),  # informational; no headline contribution
-        ("Pending Pods", lambda: _section_pending_pods(namespaces),
+        ("Pending Pods", lambda: _section_pending_pods(namespaces, pods),
          lambda s: _int_after(s, "## Pending Pods (")),
         ("Abnormal Restarts",
-         lambda: _section_abnormal_restarts(namespaces, restart_threshold),
+         lambda: _section_abnormal_restarts(namespaces, restart_threshold, pods),
          lambda s: _int_after(s, "## Abnormal Restarts (")),
-        ("Pod Distribution", lambda: _section_pod_distribution(namespaces),
+        ("Pod Distribution", lambda: _section_pod_distribution(namespaces, pods),
          lambda s: 0),  # informational
-        ("Image Pull Issues", lambda: _section_image_pull(namespaces),
+        ("Image Pull Issues", lambda: _section_image_pull(namespaces, pods),
          lambda s: _int_after(s, "## Image Pull Issues (")
          if "all images resolved" not in s else 0),
         ("Workloads", lambda: _section_workloads(namespaces),
@@ -597,7 +630,6 @@ def _node_counts(nodes_section: str) -> tuple[int, int]:
         NotReady:
           - deploy-2 (since 5m ago)
     """
-    import re
     total_m = re.search(r"Total:\s*(\d+)", nodes_section)
     not_ready_m = re.search(r"NotReady:\s*\n((?:\s*-\s*.+\n?)+)", nodes_section)
     total = int(total_m.group(1)) if total_m else 0
@@ -614,26 +646,6 @@ def _count_expiring_certs(certs_section: str) -> int:
         if line and not line.startswith(("SOURCE", "##", "Action", "  -", "Note:", "  "))
         and ("<30d" in line or "<7d" in line or "EXPIRED" in line)
     )
-
-
-# ---------- time helper ------------------------------------------------------
-
-
-def _rel_time(ts) -> str:
-    if not ts:
-        return "?"
-    if isinstance(ts, str):
-        ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=UTC)
-    secs = int((datetime.now(UTC) - ts).total_seconds())
-    if secs < 60:
-        return f"{secs}s ago"
-    if secs < 3600:
-        return f"{secs // 60}m ago"
-    if secs < 86400:
-        return f"{secs // 3600}h ago"
-    return f"{secs // 86400}d ago"
 
 
 def register(mcp) -> None:

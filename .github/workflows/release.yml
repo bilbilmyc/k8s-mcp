@@ -1,0 +1,80 @@
+name: Release
+
+# Triggers ONLY on a version tag push (e.g. v0.3.0). Branch pushes do
+# nothing — build & publish is intentionally not coupled to the CI on
+# every PR merge, since publishing the same version twice is a
+# PyPI rejection and we don't want the auto-merge flow to silently
+# cause that. The manual `git tag vX.Y.Z && git push --tags` step
+# is the gate.
+#
+# Publish path: PyPI Trusted Publishing via OIDC. No PyPI API token
+# is stored in GitHub — the workflow authenticates to PyPI using a
+# short-lived OIDC token that PyPI verifies against the configured
+# Trusted Publisher (set once on the PyPI project page; see
+# docs/publishing.md).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Verify version matches tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/v}"
+          pyproject_version=$(uv run --no-project python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          if [ "$tag" != "$pyproject_version" ]; then
+            echo "::error::Tag v${tag} does not match pyproject.toml version ${pyproject_version}"
+            exit 1
+          fi
+          echo "Tag v${tag} matches pyproject.toml version — OK"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish tags we explicitly approve — never on a force-pushed
+    # tag, never on a tag that was deleted and re-created (PyPI rejects
+    # re-upload of the same filename anyway, but the extra gate makes
+    # the failure mode obvious in logs).
+    environment: pypi
+    permissions:
+      # The two scopes below are the minimum required for PyPI's
+      # trusted-publishing flow: `id-token` to mint the OIDC token,
+      # `contents` so the action can read repo metadata.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No `password:` — OIDC handles auth.

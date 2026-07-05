@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import yaml
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
@@ -53,7 +54,6 @@ def create_role(
         "metadata": {"name": name, "namespace": namespace},
         "rules": [_validate_rule(r) for r in rules],
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 
@@ -93,7 +93,6 @@ def create_rolebinding(
             "name": role_name,
         },
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 
@@ -115,7 +114,6 @@ def create_clusterrole(name: str, rules: list[dict[str, Any]]) -> str:
         "metadata": {"name": name},
         "rules": [_validate_rule(r) for r in rules],
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 
@@ -143,7 +141,6 @@ def create_clusterrolebinding(
             "name": role_name,
         },
     }
-    import yaml
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 

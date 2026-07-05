@@ -8,14 +8,89 @@
   - `describe(obj)`：仿 `kubectl describe` 风格的分组输出。
   - `mask_secret_data(obj)`：把 Secret.data / stringData 里的值替换为
     `***`，是 `get_resource_yaml` 默认行为的安全后盾。
+  - `format_age(created)` / `format_relative_time(ts)`：把
+    RFC3339 时间戳统一渲染成 `5s` / `5m` / `5h ago` 这种紧凑 / 完整
+    形式。各 tool 之前都各自有一份拷贝；这里是唯一实现。
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import yaml
 
 SECRET_MASK = "***"
+
+
+def format_age(created: str | datetime | None) -> str:
+    """Render a timestamp as a compact `5s` / `5m` / `5h` / `5d` age.
+
+    `created` may be an RFC3339 string (with or without trailing Z), an
+    aware `datetime`, or None / empty (→ empty string). Used in `list_*`
+    tables where a leading "5 minutes" is noise and `5m` is what humans
+    want.
+    """
+    if not created:
+        return ""
+    ts = _coerce_utc(created)
+    if ts is None:
+        return str(created)
+    secs = int((datetime.now(UTC) - ts).total_seconds())
+    if secs < 0:
+        return "0s"  # clock skew — never render negative ages
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def format_relative_time(ts: str | datetime | None) -> str:
+    """Render a timestamp as a relative phrase: `5s ago`, `3h ago`, `2d ago`.
+
+    Used in `cluster_health_snapshot` and event tables where "5m ago" is
+    more readable than `5m` (which can be confused with "five minutes
+    from now"). Empty string when input is missing.
+    """
+    if not ts:
+        return ""
+    parsed = _coerce_utc(ts)
+    if parsed is None:
+        return ""
+    secs = int((datetime.now(UTC) - parsed).total_seconds())
+    if secs < 0:
+        return "now"  # clock skew — neutral "now" beats "in 5m"
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def _coerce_utc(ts: str | datetime) -> datetime | None:
+    """Return an aware UTC datetime for the input, or None if unparseable.
+
+    Tolerates RFC3339 with or without trailing `Z`, microsecond and
+    nanosecond precision, and already-converted datetime instances.
+    """
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+    if not isinstance(ts, str):
+        return None
+    s = ts.strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def to_yaml(obj: Any) -> str:

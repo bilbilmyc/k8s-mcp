@@ -39,7 +39,7 @@ dependencies = [
 Homepage = "https://github.com/bilbilmyc/k8s-mcp"
 Repository = "https://github.com/bilbilmyc/k8s-mcp"
 Issues = "https://github.com/bilbilmyc/k8s-mcp/issues"
-Changelog = "https://github.com/bilbilmyc/k8s-mcp/blob/main/PLAN.md"
+Changelog = "https://github.com/bilbilmyc/k8s-mcp/blob/main/docs/PLAN.md"
 
 [project.scripts]
 k8s-mcp = "k8s_mcp.server:main"

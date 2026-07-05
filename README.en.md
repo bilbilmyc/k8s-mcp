@@ -202,7 +202,7 @@ uv build                   # produce dist/*.whl + .tar.gz
 ```
 
 Release workflow: [docs/publishing.md](./docs/publishing.md). Full design
-doc: [PLAN.md](./PLAN.md).
+doc: [PLAN.md](./docs/PLAN.md).
 
 ## Out of scope (v2+)
 

@@ -42,7 +42,7 @@ src/k8s_mcp/
 `generic.py` 还额外暴露 `replace_resource`（PUT 带 ResourceVersion）和
 `diff_resource`（apply 前预览差异）。
 
-完整设计文档见 [PLAN.md](../PLAN.md)，用法示例见 [tests/](../tests/)。
+完整设计文档见 [PLAN.md](./PLAN.md)，用法示例见 [tests/](../tests/)。
 
 ## 设计要点
 

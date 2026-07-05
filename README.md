@@ -195,7 +195,7 @@ uv build                   # 生成 dist/*.whl + .tar.gz
 ```
 
 发版流程见 [docs/publishing.md](./docs/publishing.md)。完整设计文档见
-[PLAN.md](./PLAN.md)。
+[PLAN.md](./docs/PLAN.md)。
 
 ## 后续计划（v2+）
 

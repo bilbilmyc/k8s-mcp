@@ -52,7 +52,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 PYPROJECT="$ROOT/pyproject.toml"
-CHANGELOG="$ROOT/CHANGELOG.md"
+CHANGELOG="$ROOT/docs/CHANGELOG.md"
 
 # Current version from pyproject.toml.
 CUR_VERSION="$(uv run --no-project python -c "

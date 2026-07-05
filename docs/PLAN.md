@@ -66,9 +66,9 @@ CLI 参数优先级高于环境变量：`--api-server`、`--token`、`--kubeconf
 
 ```
 k8s-mcp/
-├── PLAN.md                   # 本文件
 ├── README.md
 ├── pyproject.toml
+├── docs/                       # 项目文档集中地
 ├── .python-version
 ├── .env.example              # 环境变量示例
 ├── src/k8s_mcp/

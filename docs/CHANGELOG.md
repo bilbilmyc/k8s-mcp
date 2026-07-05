@@ -6,6 +6,8 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-07-05
+
 ### Fixed
 - `bulk_scale` / `bulk_restart` duplicated `label_selector` check removed
 
@@ -121,3 +123,4 @@ behavior changes bump the minor (we're pre-1.0).
 [0.1.2]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/bilbilmyc/k8s-mcp/releases/tag/0.1.1
 [0.3.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.2.1...v0.3.0
+[0.4.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.0...v0.4.1

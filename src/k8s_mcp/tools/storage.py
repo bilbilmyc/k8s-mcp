@@ -166,7 +166,7 @@ def delete_pvc(name: str, namespace: str) -> str:
         all destructive ops going forward.
 
     Args:
-        name: PVC name.
+        name: PVC name, or a list of PVC names to delete serially.
         namespace: PVC namespace.
     """
     settings = get_settings()
@@ -180,17 +180,21 @@ def delete_pvc(name: str, namespace: str) -> str:
             f"Delete in namespace '{namespace}' is not allowed by "
             "K8S_MCP_NAMESPACE_ALLOWLIST"
         )
-    try:
-        _core_v1().delete_namespaced_persistent_volume_claim(name, namespace)
-    except ApiException as e:
-        if e.status == 404:
-            raise LookupError(f"PVC '{namespace}/{name}' not found") from e
-        raise
-    return (
-        f"⚠️ DEPRECATED: delete_pvc will be removed in v0.5.0 — "
-        f"use delete_resource(kind='PersistentVolumeClaim') for the audited two-step flow.\n"
-        f"PVC/{namespace}/{name} deleted"
-    )
+    names = name if isinstance(name, list) else [name]
+    rows: list[str] = []
+    for n in names:
+        try:
+            _core_v1().delete_namespaced_persistent_volume_claim(n, namespace)
+        except ApiException as e:
+            if e.status == 404:
+                raise LookupError(f"PVC '{namespace}/{n}' not found") from e
+            raise
+        rows.append(
+            f"⚠️ DEPRECATED: delete_pvc will be removed in v0.5.0 — "
+            f"use delete_resource(kind='PersistentVolumeClaim') for the audited two-step flow.\n"
+            f"PVC/{namespace}/{n} deleted"
+        )
+    return "\n".join(rows)
 
 
 # ---------- bulk_delete_pvc --------------------------------------------------
@@ -247,11 +251,51 @@ def bulk_delete_pvc(
          preview time. New PVCs matching the same label_selector
          between preview and confirm are NOT touched.
 
+    .. deprecated::
+        Use :func:`delete_pvc` with a list of names passed as `name`
+        (no label_selector, no dry_run / confirm flow — one-step per
+        PVC). For audited label-selector-based bulk delete, await
+        v0.5.0's two-step `delete_resource` integration.
+
     Args:
         label_selector: e.g. "app=postgres". Required.
         namespace: limit to one namespace; None = all namespaces.
         dry_run / confirm / confirmation_token: see flow above.
     """
+    return _deprecate_pvc(
+        _bulk_delete_pvc_impl(
+            label_selector, namespace, dry_run, confirm, confirmation_token,
+        )
+    )
+
+
+def _deprecate_pvc(body: str) -> str:
+    """Prepend the deprecation marker for `bulk_delete_pvc`.
+
+    Lives in storage.py (not bulk.py) because `bulk_delete_pvc` already
+    lived in storage.py pre-consolidation. The marker string matches
+    the one in bulk.py so an agent that sees one migration notice sees
+    all of them in the same shape.
+    """
+    note = (
+        "⚠️ DEPRECATED: bulk_delete_pvc will be removed in v0.5.0 — "
+        "pass a list of names to delete_pvc instead. For label_selector-based "
+        "operations with the audited dry_run → confirm flow, keep using this "
+        "tool until v0.5.0."
+    )
+    return f"{note}\n{body}"
+
+
+def _bulk_delete_pvc_impl(
+    label_selector: str,
+    namespace: str | None = None,
+    dry_run: bool = True,
+    confirm: bool = False,
+    confirmation_token: str | None = None,
+) -> str:
+    """Internal body of `bulk_delete_pvc` — kept separate so the public
+    function can prepend the deprecation marker without tangling the
+    label_selector / dry_run / confirm flow."""
     if not label_selector:
         raise ValueError("label_selector is required for bulk_delete_pvc")
 

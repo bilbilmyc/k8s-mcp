@@ -6,10 +6,17 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+### Fixed
+- `bulk_scale` / `bulk_restart` duplicated `label_selector` check removed
+
 ### Changed
-- (planned) bulk_scale / bulk_restart / bulk_set_image / bulk_delete_pvc deprecated → merged into single-tool list variants
-- (planned) tool description boundaries clarified for 6 overlapping pairs
-- (planned) shared HTTP connection pool + per-tool timeout split (prometheus / logs / notifier)
+- `bulk_scale` / `bulk_restart` / `bulk_set_image` / `bulk_delete_pvc` deprecated. Migration target:
+  - `bulk_scale` → `scale_workload(kind="Deployment|StatefulSet", name=[...], namespace, replicas)`
+  - `bulk_restart` → `restart_workload(kind="Deployment|StatefulSet", name=[...], namespace)`
+  - `bulk_set_image` → `set_image(kind="Deployment|StatefulSet", name=[...], namespace, container, image)`
+  - `bulk_delete_pvc` → `delete_pvc(name=[...], namespace)` (one-step, no label_selector)
+  - For label_selector-based operations with the audited dry_run → confirm flow, keep using these tools until v0.5.0 removal
+- `delete_pvc` now accepts a list of PVC names to delete serially
 
 ## [0.3.3] — 2026-07-05
 

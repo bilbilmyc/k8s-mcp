@@ -198,13 +198,24 @@ def _apps_v1():
     return client.AppsV1Api(get_api_client())
 
 
-def scale_workload(kind: str, name: str, namespace: str, replicas: int) -> str:
+def scale_workload(
+    kind: str,
+    name: str | list[str],
+    namespace: str,
+    replicas: int,
+) -> str:
     """⚠️ WRITE — patches replica count on a Deployment / StatefulSet only
     (not DaemonSet, not Job, not CronJob; HPA-managed workloads will fight back).
 
     Args:
         kind: "Deployment" or "StatefulSet".
-        name, namespace: workload identity.
+        name: workload name, or a list of names to operate on serially.
+            When a list is passed, each workload is patched in turn and
+            the tool returns a combined per-workload result table.
+            (For label_selector-based bulk operations with the audited
+            dry_run → confirm two-step flow, see the still-available
+            :func:`bulk_scale` — also deprecated, removal v0.5.0.)
+        namespace: workload namespace.
         replicas: desired replica count.
     """
     _read_only_guard("scale_workload")
@@ -214,25 +225,36 @@ def scale_workload(kind: str, name: str, namespace: str, replicas: int) -> str:
         raise ValueError(f"Unsupported kind for scale: {kind}")
     body = {"spec": {"replicas": int(replicas)}}
     api = _apps_v1()
-    try:
-        if kind_lower == "deployment":
-            api.patch_namespaced_deployment_scale(name, namespace, body)
-        else:
-            api.patch_namespaced_stateful_set_scale(name, namespace, body)
-    except ApiException as e:
-        if e.status == 404:
-            raise LookupError(f"{kind} '{namespace}/{name}' not found") from e
-        raise
-    return f"{kind}/{namespace}/{name} scaled to {replicas}"
+    names = name if isinstance(name, list) else [name]
+    rows: list[str] = []
+    for n in names:
+        try:
+            if kind_lower == "deployment":
+                api.patch_namespaced_deployment_scale(n, namespace, body)
+            else:
+                api.patch_namespaced_stateful_set_scale(n, namespace, body)
+            rows.append(f"{kind}/{namespace}/{n} scaled to {replicas}")
+        except ApiException as e:
+            if e.status == 404:
+                raise LookupError(f"{kind} '{namespace}/{n}' not found") from e
+            raise
+    return "\n".join(rows)
 
 
-def restart_workload(kind: str, name: str, namespace: str) -> str:
+def restart_workload(kind: str, name: str | list[str], namespace: str) -> str:
     """⚠️ WRITE — triggers a rolling restart of every Pod in a Deployment /
     StatefulSet (Deployment / StatefulSet only; DaemonSet, Job, CronJob
     are not supported). Equivalent to `kubectl rollout restart <kind>/<name>`.
 
     Implemented by patching the `kubectl.kubernetes.io/restartedAt`
     annotation on the pod template.
+
+    Args:
+        kind: "Deployment" or "StatefulSet".
+        name: workload name, or a list of names to operate on serially.
+            (For label_selector-based bulk operations, see the still-
+            available :func:`bulk_restart` — also deprecated, removal v0.5.0.)
+        namespace: workload namespace.
     """
     _read_only_guard("restart_workload")
     _ensure_ns(namespace)
@@ -253,19 +275,29 @@ def restart_workload(kind: str, name: str, namespace: str) -> str:
         }
     }
     api = _apps_v1()
-    try:
-        if kind_lower == "deployment":
-            api.patch_namespaced_deployment(name, namespace, body)
-        else:
-            api.patch_namespaced_stateful_set(name, namespace, body)
-    except ApiException as e:
-        if e.status == 404:
-            raise LookupError(f"{kind} '{namespace}/{name}' not found") from e
-        raise
-    return f"{kind}/{namespace}/{name} restart triggered"
+    names = name if isinstance(name, list) else [name]
+    rows: list[str] = []
+    for n in names:
+        try:
+            if kind_lower == "deployment":
+                api.patch_namespaced_deployment(n, namespace, body)
+            else:
+                api.patch_namespaced_stateful_set(n, namespace, body)
+            rows.append(f"{kind}/{namespace}/{n} restart triggered")
+        except ApiException as e:
+            if e.status == 404:
+                raise LookupError(f"{kind} '{namespace}/{n}' not found") from e
+            raise
+    return "\n".join(rows)
 
 
-def set_image(kind: str, name: str, namespace: str, container: str, image: str) -> str:
+def set_image(
+    kind: str,
+    name: str | list[str],
+    namespace: str,
+    container: str,
+    image: str,
+) -> str:
     """⚠️ WRITE — triggers a rolling update by changing one container's image on
     a Deployment / StatefulSet (Deployment / StatefulSet only; DaemonSet, Job,
     CronJob are not supported).
@@ -273,6 +305,15 @@ def set_image(kind: str, name: str, namespace: str, container: str, image: str) 
     Uses a JSON strategic merge patch under the hood via the kubernetes client.
     `container` must match an existing container name in the PodSpec (case-
     sensitive); for multi-container workloads call once per container.
+
+    Args:
+        kind: "Deployment" or "StatefulSet".
+        name: workload name, or a list of names to operate on serially.
+            (For label_selector-based bulk operations, see the still-
+            available :func:`bulk_set_image` — also deprecated, removal v0.5.0.)
+        namespace: workload namespace.
+        container: container name within each pod template.
+        image: the new image reference.
     """
     _read_only_guard("set_image")
     _ensure_ns(namespace)
@@ -291,16 +332,20 @@ def set_image(kind: str, name: str, namespace: str, container: str, image: str) 
         }
     }
     api = _apps_v1()
-    try:
-        if kind_lower == "deployment":
-            api.patch_namespaced_deployment(name, namespace, body)
-        else:
-            api.patch_namespaced_stateful_set(name, namespace, body)
-    except ApiException as e:
-        if e.status == 404:
-            raise LookupError(f"{kind} '{namespace}/{name}' not found") from e
-        raise
-    return f"{kind}/{namespace}/{name} container '{container}' -> {image}"
+    names = name if isinstance(name, list) else [name]
+    rows: list[str] = []
+    for n in names:
+        try:
+            if kind_lower == "deployment":
+                api.patch_namespaced_deployment(n, namespace, body)
+            else:
+                api.patch_namespaced_stateful_set(n, namespace, body)
+            rows.append(f"{kind}/{namespace}/{n} container '{container}' -> {image}")
+        except ApiException as e:
+            if e.status == 404:
+                raise LookupError(f"{kind} '{namespace}/{n}' not found") from e
+            raise
+    return "\n".join(rows)
 
 
 def set_resources(

@@ -37,6 +37,12 @@ Read-only mode + namespace allowlist are checked up front (same as
 步安全流程，token 里记录「这次会改哪 N 个资源」，确认时只动这 N 个
 —— 即使在确认前集群里多出同 label 的 Deployment 也不会被误伤。改
 image / replicas 都被 HMAC 签名覆盖，token 不能跨参数复用。
+
+v0.4.0 起这三个工具标 `@deprecated`，v0.5.0 删除。迁移路径：单工具
+（`scale_workload` / `restart_workload` / `set_image`）现在接受
+`name: str | list[str]`，传入列表即可在多个同名工作负载上连用，不再需
+要走 label_selector + token 三段流程（如果你确实需要 label_selector
+的安全性，等到 v0.5.0 之前都还可以继续用）。
 """
 from __future__ import annotations
 
@@ -213,6 +219,23 @@ def _render_preview(
     return "\n".join(parts)
 
 
+# ---------- deprecation helper --------------------------------------------
+
+
+_DEPRECATION_NOTE = (
+    "⚠️ DEPRECATED: {tool} will be removed in v0.5.0 — pass a list of "
+    "names to {single_tool} instead. For label_selector-based operations "
+    "with the audited dry_run → confirm flow, keep using this tool until "
+    "v0.5.0."
+)
+
+
+def _deprecate(tool: str, single_tool: str, body: str) -> str:
+    """Prepend the deprecation note for a bulk_* tool to its return."""
+    note = _DEPRECATION_NOTE.format(tool=tool, single_tool=single_tool)
+    return f"{note}\n{body}"
+
+
 # ---------- bulk_set_image -------------------------------------------------
 
 
@@ -228,7 +251,13 @@ def bulk_set_image(
 ) -> str:
     """⚠️ WRITE — set the `image` of a named container on every workload
     matching `label_selector`. `kubectl set image -l <sel> <kind>/<*> <c>=<img>`
-    equivalent.
+
+    .. deprecated::
+        Use :func:`set_image` with a list of names passed as `name`
+        instead. This label_selector-based bulk tool will be removed
+        in v0.5.0; the dry_run → confirm two-step flow is being
+        consolidated into the audited two-step `delete_resource` /
+        `replace_resource` family instead.
 
     Args:
         label_selector: e.g. `"app=nginx,tier=frontend"`. Required.
@@ -247,6 +276,28 @@ def bulk_set_image(
     reported as "no change" — the patch is still issued, so the rollout
     may still occur (some teams rely on this; we don't suppress).
     """
+    return _deprecate(
+        "bulk_set_image", "set_image(name=[...])",
+        _bulk_set_image_impl(
+            label_selector, container, image, kind, namespace,
+            dry_run, confirm, confirmation_token,
+        ),
+    )
+
+
+def _bulk_set_image_impl(
+    label_selector: str,
+    container: str,
+    image: str,
+    kind: str = "Deployment",
+    namespace: str | None = None,
+    dry_run: bool = True,
+    confirm: bool = False,
+    confirmation_token: str | None = None,
+) -> str:
+    """Internal body of `bulk_set_image` — kept separate so the public
+    function can prepend the deprecation marker without tangling the
+    label_selector / dry_run / confirm flow."""
     if not label_selector:
         raise ValueError("label_selector is required for bulk operations")
     _write_guard(namespace)
@@ -329,6 +380,11 @@ def bulk_restart(
     to the current UTC ISO timestamp. The controller treats the annotation
     change as a template change and rolls the Pods.
 
+    .. deprecated::
+        Use :func:`restart_workload` with a list of names passed as
+        `name` instead. This label_selector-based bulk tool will be
+        removed in v0.5.0.
+
     Args:
         label_selector: required.
         kind: Deployment / StatefulSet / DaemonSet.
@@ -336,6 +392,25 @@ def bulk_restart(
         dry_run / confirm / confirmation_token: same safety flow as
             `bulk_set_image`.
     """
+    return _deprecate(
+        "bulk_restart", "restart_workload(name=[...])",
+        _bulk_restart_impl(
+            label_selector, kind, namespace,
+            dry_run, confirm, confirmation_token,
+        ),
+    )
+
+
+def _bulk_restart_impl(
+    label_selector: str,
+    kind: str = "Deployment",
+    namespace: str | None = None,
+    dry_run: bool = True,
+    confirm: bool = False,
+    confirmation_token: str | None = None,
+) -> str:
+    """Internal body of `bulk_restart` — kept separate so the public
+    function can prepend the deprecation marker."""
     if not label_selector:
         raise ValueError("label_selector is required for bulk operations")
     _write_guard(namespace)
@@ -403,6 +478,11 @@ def bulk_scale(
     """⚠️ WRITE — set `spec.replicas` on every workload matching
     `label_selector`. `kubectl scale -l <sel> --replicas=N` equivalent.
 
+    .. deprecated::
+        Use :func:`scale_workload` with a list of names passed as
+        `name` instead. This label_selector-based bulk tool will be
+        removed in v0.5.0.
+
     Args:
         label_selector: required.
         replicas: target replica count (int ≥ 0).
@@ -411,6 +491,27 @@ def bulk_scale(
         namespace: limit to one namespace; None = cluster-wide.
         dry_run / confirm / confirmation_token: same safety flow.
     """
+    return _deprecate(
+        "bulk_scale", "scale_workload(name=[...])",
+        _bulk_scale_impl(
+            label_selector, replicas, kind, namespace,
+            dry_run, confirm, confirmation_token,
+        ),
+    )
+
+
+def _bulk_scale_impl(
+    label_selector: str,
+    replicas: int,
+    kind: str = "Deployment",
+    namespace: str | None = None,
+    dry_run: bool = True,
+    confirm: bool = False,
+    confirmation_token: str | None = None,
+) -> str:
+    """Internal body of `bulk_scale` — kept separate so the public
+    function can prepend the deprecation marker without tangling the
+    label_selector / dry_run / confirm flow."""
     if not label_selector:
         raise ValueError("label_selector is required for bulk operations")
     if kind not in _SCALE_KINDS:

@@ -6,6 +6,8 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-07-06
+
 ### Added
 - `diagnose_pod(name, namespace="default")` — one-shot Pod triage that aggregates the ~5 calls an agent otherwise makes serially (read pod, parse container statuses, list events, tail previous logs, check PVC binding) into a single phase-dispatched report. **Pending** → scheduling diagnosis that surfaces the kube-scheduler's own `Unschedulable` verdict (not recomputed — re-deriving per-node fit would duplicate and risk contradicting the scheduler), PVC binding status, and the pod's resource requests. **Running / CrashLoopBackOff / Error** → runtime diagnosis: per-container `state` + `lastState` (CrashLoopBackOff / ImagePullBackOff / OOMKilled / non-zero exit), restart counts with the OOM hint, and an automatic tail of the *previous* container's logs for anything crash-looping. New `diagnostics.py` module. Read-only. Complements `cluster_health_snapshot` (breadth: which pods are unhealthy cluster-wide) with depth (why *this* pod is unhealthy) — the list-vs-describe relationship.
 - `analyze_networkpolicy(namespace, pod=None)` — 🔍 read-only NetworkPolicy connectivity / coverage inspector that fills the verification gap after `create_networkpolicy`. Two modes: **`pod=` view** evaluates `podSelector.matchLabels` + `matchExpressions` against pod labels, lists every selecting policy's merged ingress/egress rules (peers + ports), and reports the effective posture per direction (`🔒 default-deny` once any selecting policy lists that `policyType`, else `🔓 default-allow`). **`namespace=` only** is a coverage sweep: every pod's ingress/egress posture with open-pods highlighted as the exposure surface, plus a policy inventory with `deny-all` markers for empty-rule policies. Reports the *declared* policy graph (actual enforcement depends on the CNI plugin). `policyTypes` inference follows the K8s rule (Ingress always implied, Egress only if egress rules present).
@@ -151,14 +153,17 @@ behavior changes bump the minor (we're pre-1.0).
 ## [0.1.1] — 2026-04-xx
 - Initial PyPI release notes.
 
-[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.3.3...HEAD
+[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.4.3...HEAD
+[0.4.3]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/bilbilmyc/k8s-mcp/compare/0.3.3...v0.4.0
 [0.3.3]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/bilbilmyc/k8s-mcp/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.3...0.2.0
 [0.1.3]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.2...0.1.3
 [0.1.2]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/bilbilmyc/k8s-mcp/releases/tag/0.1.1
-[0.3.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.2.1...v0.3.0
-[0.4.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.0...v0.4.1

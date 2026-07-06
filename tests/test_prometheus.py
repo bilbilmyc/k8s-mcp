@@ -765,6 +765,12 @@ def test_find_prometheus_service_scans_all_namespaces(monkeypatch):
         def list_namespaced_service(self, namespace, **kw):
             return type("R", (), {"items": services_by_ns.get(namespace, [])})()
 
+        def list_service_for_all_namespaces(self, **kw):
+            flat = []
+            for items in services_by_ns.values():
+                flat.extend(items)
+            return type("R", (), {"items": flat})()
+
     monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
     out = prometheus.find_prometheus_service()
     # Both non-standard and standard names should appear (table format)
@@ -815,6 +821,9 @@ def test_find_prometheus_service_filters_non_matching_names(monkeypatch):
             return type("R", (), {"items": [_ns_obj("default")]})()
 
         def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {"items": services})()
+
+        def list_service_for_all_namespaces(self, **kw):
             return type("R", (), {"items": services})()
 
     monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
@@ -887,6 +896,18 @@ def test_find_prometheus_service_clusterip_row_recommends_nodeport(monkeypatch):
                 ],
             })()
 
+        def list_service_for_all_namespaces(self, **kw):
+            return type("R", (), {
+                "items": [
+                    _ns_service_with_type(
+                        "monitoring",
+                        "kube-prometheus-stack-prometheus",
+                        ip="10.96.42.7",
+                        svc_type="ClusterIP",
+                    ),
+                ],
+            })()
+
     monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
     out = prometheus.find_prometheus_service()
 
@@ -922,6 +943,19 @@ def test_find_prometheus_service_nodeport_row_says_direct(monkeypatch):
             return type("R", (), {"items": [_ns_obj("monitoring")]})()
 
         def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {
+                "items": [
+                    _ns_service_with_type(
+                        "monitoring",
+                        "kube-prometheus-stack-prometheus",
+                        port=9090,
+                        svc_type="NodePort",
+                        node_port=45149,
+                    ),
+                ],
+            })()
+
+        def list_service_for_all_namespaces(self, **kw):
             return type("R", (), {
                 "items": [
                     _ns_service_with_type(
@@ -981,6 +1015,19 @@ def test_find_prometheus_service_loadbalancer_row_says_direct(monkeypatch):
                 ],
             })()
 
+        def list_service_for_all_namespaces(self, **kw):
+            return type("R", (), {
+                "items": [
+                    _ns_service_with_type(
+                        "monitoring",
+                        "kube-prometheus-stack-prometheus",
+                        port=9090,
+                        svc_type="LoadBalancer",
+                        node_port=30080,
+                    ),
+                ],
+            })()
+
     monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
     out = prometheus.find_prometheus_service()
 
@@ -1010,6 +1057,17 @@ def test_find_prometheus_service_guidance_omits_portforward_warning_when_only_no
             return type("R", (), {"items": [_ns_obj("monitoring")]})()
 
         def list_namespaced_service(self, namespace, **kw):
+            return type("R", (), {
+                "items": [
+                    _ns_service_with_type(
+                        "monitoring",
+                        "kube-prometheus-stack-prometheus",
+                        svc_type="NodePort",
+                    ),
+                ],
+            })()
+
+        def list_service_for_all_namespaces(self, **kw):
             return type("R", (), {
                 "items": [
                     _ns_service_with_type(
@@ -1475,8 +1533,11 @@ class _WideScanCore:
     Differentiates between:
       - `read_namespaced_service(name, namespace)` → used by the hardcoded
         candidate list (always 404 here, forcing the fallback)
-      - `list_namespace()` + `list_namespaced_service(namespace)` → used
-        by `_wide_scan_prometheus_matches` to enumerate every namespace
+      - `list_service_for_all_namespaces()` → used by the production
+        wide-scan path since the P1 refactor (was `list_namespace()` +
+        N×`list_namespaced_service(namespace)` before)
+      - `list_namespaced_service(namespace)` → still used by the
+        explicit-namespace branch of `find_prometheus_service`
     """
 
     def __init__(self, namespaces, services_by_ns):
@@ -1492,6 +1553,15 @@ class _WideScanCore:
 
     def list_namespaced_service(self, namespace, **kw):
         return _SvcList(self._services_by_ns.get(namespace, []))
+
+    def list_service_for_all_namespaces(self, **kw):
+        # Flatten every namespace's services into one list — this is what
+        # the P1 refactor calls. Each item already carries its
+        # `metadata.namespace` so the production code filters by that.
+        flat = []
+        for ns_items in self._services_by_ns.values():
+            flat.extend(ns_items)
+        return _SvcList(flat)
 
 
 def test_resolve_wide_scan_finds_non_standard_namespace(monkeypatch):

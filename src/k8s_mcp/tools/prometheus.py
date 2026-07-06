@@ -171,42 +171,45 @@ def _wide_scan_prometheus_matches(
 
     Bounded by `settings.prometheus_namespace_allowlist` when set — see
     `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST`. None = scan every namespace.
+
+    Single cluster-wide `list_service_for_all_namespaces` call (instead
+    of N×`list_namespaced_service`). For a 50-ns cluster this is one
+    apiserver round-trip instead of 50 — ~50× faster on slow apiservers.
+    The allowlist is applied client-side on the resulting items.
     """
     allowlist = settings.prometheus_namespace_allowlist
-    namespaces = [ns.metadata.name for ns in core.list_namespace().items]
-    if allowlist is not None:
-        # Allowlist set → only scan these namespaces. Unset (None) = all.
-        namespaces = [ns for ns in namespaces if ns in allowlist]
-        if not namespaces:
-            logger.debug(
-                "prom wide-scan: allowlist %s excludes every namespace; skipping",
-                allowlist,
-            )
-            return []
+    try:
+        all_services = core.list_service_for_all_namespaces().items
+    except ApiException as e:
+        logger.debug("prom wide-scan: cluster-wide service list failed: %s", e)
+        return []
+    except Exception as e:  # noqa: BLE001 — defensive
+        logger.debug("prom wide-scan: cluster-wide service list error: %s", e)
+        return []
 
     nodeport_first: list[tuple[str, Any]] = []
     clusterip_after: list[tuple[str, Any]] = []
-    for ns_name in namespaces:
-        try:
-            services = core.list_namespaced_service(namespace=ns_name).items
-        except ApiException as e:
-            logger.debug("prom wide-scan: list svc in %s failed: %s", ns_name, e)
+    allowset = set(allowlist) if allowlist is not None else None
+    for svc in all_services:
+        ns_name = (getattr(svc.metadata, "namespace", "") or "")
+        if allowset is not None and ns_name not in allowset:
             continue
-        except Exception as e:  # noqa: BLE001 — defensive
-            logger.debug("prom wide-scan: unexpected error in %s: %s", ns_name, e)
+        name = (svc.metadata.name or "").lower()
+        if not any(hint in name for hint in _PROM_NAME_HINTS):
             continue
-        for svc in services:
-            name = (svc.metadata.name or "").lower()
-            if not any(hint in name for hint in _PROM_NAME_HINTS):
-                continue
-            spec = svc.spec
-            svc_type = (getattr(spec, "type", None) if spec else None) or "ClusterIP"
-            # Preference order: NodePort / LoadBalancer first (externally
-            # reachable), ClusterIP last.
-            if svc_type in ("NodePort", "LoadBalancer"):
-                nodeport_first.append((ns_name, svc))
-            else:
-                clusterip_after.append((ns_name, svc))
+        spec = svc.spec
+        svc_type = (getattr(spec, "type", None) if spec else None) or "ClusterIP"
+        # Preference order: NodePort / LoadBalancer first (externally
+        # reachable), ClusterIP last.
+        if svc_type in ("NodePort", "LoadBalancer"):
+            nodeport_first.append((ns_name, svc))
+        else:
+            clusterip_after.append((ns_name, svc))
+    if allowset is not None and not (nodeport_first or clusterip_after):
+        logger.debug(
+            "prom wide-scan: allowlist %s excludes every matching service; skipping",
+            allowlist,
+        )
     return nodeport_first + clusterip_after
 
 

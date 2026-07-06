@@ -24,7 +24,7 @@ from typing import Any
 from kubernetes import dynamic
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
 
-from ..config import Settings, get_settings
+from ..config import Settings, enforce_write_safety, get_settings
 from ..formatters import mask_secret_data, to_yaml
 from ..safety import (
     TokenError,
@@ -75,6 +75,7 @@ def delete_resource(
         raise PermissionError(
             "Server is in read-only mode (K8S_MCP_READ_ONLY=true). delete is disabled."
         )
+    enforce_write_safety(settings)
     if not settings.ns_allowed(namespace):
         raise PermissionError(
             f"Delete in namespace '{namespace}' is not allowed by "

@@ -19,7 +19,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from . import __version__
-from .config import Settings, assert_write_safety, get_settings
+from .config import Settings, enforce_write_safety, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -81,10 +81,10 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     logger.info(
         "k8s-mcp %s starting (read_only=%s)", __version__, settings.read_only
     )
-    for warning in assert_write_safety():
-        # SECURITY class — single-line and grep-friendly so support tickets
-        # always surface it.
-        logger.warning(warning)
+    # Refuse to start with the forge-able HMAC default. This is the
+    # load-bearing startup check — see config.enforce_write_safety for
+    # the per-tool belt-and-suspenders duplicate.
+    enforce_write_safety(settings)
 
     _install_signal_handlers()
 

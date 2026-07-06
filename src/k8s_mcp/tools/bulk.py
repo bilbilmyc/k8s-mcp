@@ -54,7 +54,7 @@ from typing import Any
 import yaml
 from kubernetes.client.rest import ApiException
 
-from ..config import get_settings
+from ..config import enforce_write_safety, get_settings
 from ..formatters import short_table
 from ..safety import TokenError, issue_token, verify_token
 from . import generic
@@ -164,12 +164,14 @@ def _patch_replicas(workload: dict, replicas: int) -> dict:
 
 def _issue_bulk_token(payload: dict) -> str:
     settings = get_settings()
+    enforce_write_safety(settings)
     return issue_token(payload, settings.delete_token_secret,
                        settings.delete_token_ttl_seconds)
 
 
 def _verify_bulk_token(token: str, *, expected_op: str) -> dict:
     settings = get_settings()
+    enforce_write_safety(settings)
     try:
         payload = verify_token(token, settings.delete_token_secret)
     except TokenError:

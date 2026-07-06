@@ -27,9 +27,16 @@ _K8S_MCP_ENV_KEYS = [
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    """Wipe K8S_MCP_* env vars and reset settings cache between tests."""
+    """Wipe K8S_MCP_* env vars and reset settings cache between tests.
+
+    Default-inject a real-looking HMAC secret so the `enforce_write_safety`
+    guard (refuses the source-tree literal 'change-me') does not fire
+    spuriously on tests that exercise delete/bulk flows without explicitly
+    setting K8S_MCP_DELETE_TOKEN_SECRET.
+    """
     for k in _K8S_MCP_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("K8S_MCP_DELETE_TOKEN_SECRET", "test-secret-not-change-me")
     reset_settings_cache()
     yield
     reset_settings_cache()

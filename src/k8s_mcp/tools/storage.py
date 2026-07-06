@@ -38,7 +38,7 @@ from kubernetes import client
 from kubernetes.client.rest import ApiException
 
 from ..client import get_api_client  # noqa: F401  (used by tests indirectly)
-from ..config import get_settings
+from ..config import enforce_write_safety, get_settings
 from ..formatters import short_table
 from ..safety import TokenError, issue_token, verify_token
 from . import generic
@@ -305,6 +305,7 @@ def _bulk_delete_pvc_impl(
             "Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
             "bulk_delete_pvc is disabled."
         )
+    enforce_write_safety(settings)
     if not settings.ns_allowed(namespace):
         raise PermissionError(
             f"Namespace {namespace!r} not allowed by K8S_MCP_NAMESPACE_ALLOWLIST"

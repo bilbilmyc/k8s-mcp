@@ -147,12 +147,13 @@ def assert_caller_matches(
 ) -> None:
     """Reject tokens issued for a different MCP-server kube identity.
 
-    The bulk tools (`bulk_set_image`, `bulk_restart`, `bulk_scale`,
-    `bulk_delete_pvc`) all sign their tokens with the issuer's
-    `get_caller_identity()` snapshot. A leaked token replayed against
-    a different MCP server (which is running as a different ServiceAccount
-    / user) must be rejected — otherwise the "two-step confirmation"
-    pattern collapses into "anyone with the token can execute".
+    Destructive-op tools (`delete_resource` and the deprecated
+    bulk_*/delete_* family — the latter removed in v0.5.0) sign their
+    tokens with the issuer's `get_caller_identity()` snapshot. A leaked
+    token replayed against a different MCP server (which is running as
+    a different ServiceAccount / user) must be rejected — otherwise the
+    "two-step confirmation" pattern collapses into "anyone with the
+    token can execute".
 
     `token_caller` is the embedded `{"username", "uid"}` dict from the
     token's payload; `current_caller` is the live `get_caller_identity()`

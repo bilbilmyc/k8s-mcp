@@ -1,4 +1,4 @@
-"""Storage: create_pvc, delete_pvc, bulk_delete_pvc, and the local-path bootstrap.
+"""Storage: PVC creation and the local-path provisioner bootstrap.
 
 `create_pvc` claims a single PersistentVolume. When the cluster has no
 StorageClass at all, that PVC will sit Pending forever — most dev/test
@@ -7,25 +7,19 @@ escape hatch is `bootstrap_local_path_provisioner`: it applies Rancher's
 local-path-storage manifest in one shot, giving the cluster a working
 `local-path` StorageClass.
 
-`delete_pvc` is a one-step (no two-step HMAC) delete. PVCs are
-declarative — deleting one does not cascade-delete workloads; the
-workload just goes Pending until a replacement is bound. Recoverable
-by re-running `create_pvc` with the same name.
-
-`bulk_delete_pvc` is the label-selector-driven batch version. Goes
-through the same `dry_run → token → confirm` flow as the rest of the
-bulk_* family (see bulk.py), so new PVCs appearing with the same
-label_selector between preview and confirm are NOT touched.
+The audited two-step general-purpose delete path lives in
+`delete_resource(kind="PersistentVolumeClaim", ...)`. The previous
+one-step `delete_pvc` and label-selector `bulk_delete_pvc` were
+deprecated in v0.4.x and removed in v0.5.0 — both were subsumed by the
+audited flow.
 
 中文说明：
 - `create_pvc`：单个 PVC 声明，集群必须已有对应 StorageClass 才能绑定。
-- `delete_pvc`：一步删除（不强制两段式 HMAC），PVC 是声明性资源，
-  删了不会级联，工作负载只会 Pending 等待重新绑定。
-- `bulk_delete_pvc`：按 label_selector 批量删 PVC，走 dry_run → token →
-  confirm 三段式（与 bulk.py 一致）。
 - `bootstrap_local_path_provisioner`：在 SC 缺失时一次性 install 一个
   hostPath-based 的本地 provisioner（等价于
   `kubectl apply -f rancher/local-path-storage.yaml`）。
+- `validate_pv_hostpath_paths`：列出集群中 hostPath PV 实际指向的
+  主机目录与节点名，标出 kubelet 启动前需先 `mkdir -p` 的位置。
 """
 from __future__ import annotations
 
@@ -35,17 +29,9 @@ import urllib.request
 
 import yaml
 from kubernetes import client
-from kubernetes.client.rest import ApiException
 
-from ..client import get_api_client, get_caller_identity  # noqa: F401  (used by tests indirectly)
-from ..config import enforce_write_safety, get_settings
-from ..formatters import short_table
-from ..safety import (
-    TokenError,
-    assert_caller_matches,
-    issue_token,
-    verify_token,
-)
+from ..client import get_api_client
+from ..config import get_settings
 from . import generic
 
 logger = logging.getLogger(__name__)
@@ -151,260 +137,6 @@ def _node_for_pv(pv_obj: dict) -> str | None:
 
 def _core_v1():
     return client.CoreV1Api(get_api_client())
-
-
-def delete_pvc(name: str, namespace: str) -> str:
-    """⚠️ WRITE / ⚠️ DEPRECATED — delete a PVC (one-step, no two-step HMAC).
-
-    Use `delete_resource(kind='PersistentVolumeClaim', ...)` for the
-    audited two-step flow. This wrapper will be removed in v0.5.0.
-
-    Why one-step: PVC deletion is recoverable — re-running `create_pvc`
-    with the same name brings it back. Deleting a PVC also does NOT
-    cascade-delete workloads that mount it; the workload just stays
-    Pending until a replacement PVC is bound. This makes it safer than
-    the generic two-step `delete_resource(kind="PersistentVolumeClaim", ...)`.
-
-    For multi-PVC cleanup by label, use `bulk_delete_pvc` instead.
-
-    .. deprecated::
-        Use :func:`delete_resource` with ``kind='PersistentVolumeClaim'``
-        instead. This one-step wrapper will be removed in v0.5.0;
-        the two-step preview+confirm flow is the recommended path for
-        all destructive ops going forward.
-
-    Args:
-        name: PVC name, or a list of PVC names to delete serially.
-        namespace: PVC namespace.
-    """
-    settings = get_settings()
-    if settings.read_only:
-        raise PermissionError(
-            "Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
-            "delete_pvc is disabled."
-        )
-    if not settings.ns_allowed(namespace):
-        raise PermissionError(
-            f"Delete in namespace '{namespace}' is not allowed by "
-            "K8S_MCP_NAMESPACE_ALLOWLIST"
-        )
-    names = name if isinstance(name, list) else [name]
-    rows: list[str] = []
-    for n in names:
-        try:
-            _core_v1().delete_namespaced_persistent_volume_claim(n, namespace)
-        except ApiException as e:
-            if e.status == 404:
-                raise LookupError(f"PVC '{namespace}/{n}' not found") from e
-            raise
-        rows.append(
-            f"⚠️ DEPRECATED: delete_pvc will be removed in v0.5.0 — "
-            f"use delete_resource(kind='PersistentVolumeClaim') for the audited two-step flow.\n"
-            f"PVC/{namespace}/{n} deleted"
-        )
-    return "\n".join(rows)
-
-
-# ---------- bulk_delete_pvc --------------------------------------------------
-
-
-def _list_matched_pvcs(
-    namespace: str | None, label_selector: str,
-) -> list[dict]:
-    """Return PVCs matching the selector, as plain dicts.
-
-    `_to_dict` already normalizes k8s objects (calls `.to_dict()` if
-    available, else casts via `dict()`); the previous version of this
-    helper had a second `.to_dict()` call and a manual fallback dict
-    that could never run — both were dead branches because `_to_dict`
-    guarantees a plain dict return.
-    """
-    api = _core_v1()
-    get_kwargs: dict = {"label_selector": label_selector}
-    if namespace:
-        ret = api.list_namespaced_persistent_volume_claim(namespace, **get_kwargs)
-    else:
-        ret = api.list_persistent_volume_claim_for_all_namespaces(**get_kwargs)
-    return [generic._to_dict(item) for item in ret.items]
-
-
-def bulk_delete_pvc(
-    label_selector: str,
-    namespace: str | None = None,
-    dry_run: bool = True,
-    confirm: bool = False,
-    confirmation_token: str | None = None,
-) -> str:
-    """⚠️ WRITE — delete every PVC matching `label_selector`. Same
-    `dry_run → token → confirm` flow as the workload bulk_* tools.
-
-    Use case: cleanup of orphan PVCs (e.g. from a deleted StatefulSet)
-    where a label like `app=postgres` is still on the orphaned PVCs.
-
-    Safety flow (identical to bulk_set_image / bulk_restart / bulk_scale):
-      1. `dry_run=True` (default): list matches, no write, no token.
-      2. `dry_run=False, confirm=False`: re-list, render the same preview,
-         issue an HMAC-signed `confirmation_token` (5-min TTL).
-      3. `dry_run=False, confirm=True, confirmation_token=...`: verify
-         the token, then delete ONLY the resources that were matched at
-         preview time. New PVCs matching the same label_selector
-         between preview and confirm are NOT touched.
-
-    .. deprecated::
-        Use :func:`delete_pvc` with a list of names passed as `name`
-        (no label_selector, no dry_run / confirm flow — one-step per
-        PVC). For audited label-selector-based bulk delete, await
-        v0.5.0's two-step `delete_resource` integration.
-
-    Args:
-        label_selector: e.g. "app=postgres". Required.
-        namespace: limit to one namespace; None = all namespaces.
-        dry_run / confirm / confirmation_token: see flow above.
-    """
-    return _deprecate_pvc(
-        _bulk_delete_pvc_impl(
-            label_selector, namespace, dry_run, confirm, confirmation_token,
-        )
-    )
-
-
-def _deprecate_pvc(body: str) -> str:
-    """Prepend the deprecation marker for `bulk_delete_pvc`.
-
-    Lives in storage.py (not bulk.py) because `bulk_delete_pvc` already
-    lived in storage.py pre-consolidation. The marker string matches
-    the one in bulk.py so an agent that sees one migration notice sees
-    all of them in the same shape.
-    """
-    note = (
-        "⚠️ DEPRECATED: bulk_delete_pvc will be removed in v0.5.0 — "
-        "pass a list of names to delete_pvc instead. For label_selector-based "
-        "operations with the audited dry_run → confirm flow, keep using this "
-        "tool until v0.5.0."
-    )
-    return f"{note}\n{body}"
-
-
-def _bulk_delete_pvc_impl(
-    label_selector: str,
-    namespace: str | None = None,
-    dry_run: bool = True,
-    confirm: bool = False,
-    confirmation_token: str | None = None,
-) -> str:
-    """Internal body of `bulk_delete_pvc` — kept separate so the public
-    function can prepend the deprecation marker without tangling the
-    label_selector / dry_run / confirm flow."""
-    if not label_selector:
-        raise ValueError("label_selector is required for bulk_delete_pvc")
-
-    settings = get_settings()
-    if settings.read_only:
-        raise PermissionError(
-            "Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
-            "bulk_delete_pvc is disabled."
-        )
-    enforce_write_safety(settings)
-    if not settings.ns_allowed(namespace):
-        raise PermissionError(
-            f"Namespace {namespace!r} not allowed by K8S_MCP_NAMESPACE_ALLOWLIST"
-        )
-
-    matched = _list_matched_pvcs(namespace, label_selector)
-    plans = []
-    for item in matched:
-        md = item.get("metadata", {}) or {}
-        spec = item.get("spec", {}) or {}
-        status = item.get("status", {}) or {}
-        plans.append({
-            "NAMESPACE": md.get("namespace", ""),
-            "NAME": md.get("name", "?"),
-            "PHASE": status.get("phase", "?"),
-            "VOLUME": spec.get("volumeName") or "<dynamic>",
-        })
-
-    ns_part = f" in namespace {namespace!r}" if namespace else " cluster-wide"
-    header = (
-        f"bulk_delete_pvc — label_selector={label_selector!r}{ns_part}\n"
-        f"Matched {len(plans)} PVC(s):"
-    )
-    body = short_table(plans, list(plans[0].keys())) if plans else "(no PVCs)"
-
-    if dry_run:
-        return (
-            f"{header}\n{body}\n\n"
-            f"Re-call with dry_run=False, confirm=False to get a token; "
-            f"then dry_run=False, confirm=True + token to delete."
-        )
-
-    if not confirm:
-        caller = get_caller_identity()
-        token = issue_token(
-            {
-                "op": "bulk_delete_pvc",
-                "label_selector": label_selector,
-                "namespace": namespace or "",
-                "matched_names": [(p["NAMESPACE"], p["NAME"]) for p in plans],
-                "caller": {
-                    "username": caller.get("username", "(unknown)"),
-                    "uid": caller.get("uid", ""),
-                },
-            },
-            settings.delete_token_secret,
-            settings.delete_token_ttl_seconds,
-        )
-        return (
-            f"{header}\n{body}\n\n"
-            f"confirmation_token (HMAC-signed, "
-            f"{settings.delete_token_ttl_seconds}s TTL):\n{token}\n\n"
-            f"To delete, re-call with dry_run=False, confirm=True and the "
-            f"token above. The delete will apply ONLY to the {len(plans)} "
-            f"PVC(s) listed."
-        )
-
-    try:
-        payload = verify_token(confirmation_token or "", settings.delete_token_secret)
-    except TokenError:
-        raise
-    if payload.get("op") != "bulk_delete_pvc":
-        raise TokenError(
-            f"Token was issued for op={payload.get('op')!r}, "
-            f"but you called bulk_delete_pvc."
-        )
-    if payload.get("label_selector") != label_selector:
-        raise TokenError("Token label_selector does not match this call")
-    if (payload.get("namespace") or "") != (namespace or ""):
-        raise TokenError("Token namespace does not match this call")
-    # Caller binding — see safety.assert_caller_matches.
-    assert_caller_matches(payload.get("caller"), get_caller_identity())
-
-    matched_set = {tuple(p) for p in payload.get("matched_names", [])}
-    api = _core_v1()
-    rows = []
-    for ns, name in sorted(matched_set):
-        try:
-            api.delete_namespaced_persistent_volume_claim(name, ns)
-            rows.append({"NAMESPACE": ns, "NAME": name, "RESULT": "deleted"})
-        except ApiException as e:
-            if e.status == 404:
-                rows.append({
-                    "NAMESPACE": ns, "NAME": name,
-                    "RESULT": "SKIPPED (already gone)",
-                })
-            else:
-                rows.append({
-                    "NAMESPACE": ns, "NAME": name,
-                    "RESULT": f"ERROR: {e.reason} (status {e.status})",
-                })
-    deleted = sum(1 for r in rows if r["RESULT"] == "deleted")
-    skipped = sum(1 for r in rows if r["RESULT"].startswith("SKIPPED"))
-    errs = sum(1 for r in rows if r["RESULT"].startswith("ERROR"))
-    summary = f"bulk_delete_pvc — deleted {deleted}/{len(rows)} PVC(s)"
-    if skipped:
-        summary += f" ({skipped} skipped — already gone)"
-    if errs:
-        summary += f" ({errs} errors)"
-    return summary + "\n" + short_table(rows, ["NAMESPACE", "NAME", "RESULT"])
 
 
 def _hostpath_pv_hint(pv_name: str) -> str:
@@ -635,7 +367,5 @@ def validate_pv_hostpath_paths() -> str:
 
 def register(mcp) -> None:
     mcp.tool()(create_pvc)
-    mcp.tool()(delete_pvc)
-    mcp.tool()(bulk_delete_pvc)
     mcp.tool()(bootstrap_local_path_provisioner)
     mcp.tool()(validate_pv_hostpath_paths)

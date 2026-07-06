@@ -301,7 +301,6 @@ def _register_tools(mcp: FastMCP) -> None:
     """
     from .tools import (
         autoscale,
-        bulk,
         certs,
         cluster_info,
         configmap,
@@ -359,7 +358,6 @@ def _register_tools(mcp: FastMCP) -> None:
     prometheus.register(mcp)
     certs.register(mcp)
     health.register(mcp)
-    bulk.register(mcp)
     notifier.register(mcp)
     cluster_info.register(mcp)
 

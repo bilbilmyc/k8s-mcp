@@ -1,4 +1,4 @@
-# 工具参考（80 个，按功能分类）
+# 工具参考（72 个，按功能分类）
 
 > 这是**完整目录**——每个工具一行签名，按"读 / 写 / 删"分组。
 > 详细使用说明（陷阱、流程、为什么这么设计）见 [tools.md](./tools.md)。
@@ -132,32 +132,12 @@
 - `cordon_node(name)` / `uncordon_node(name)` — 节点调度开关
 - `drain_node(name, ignore_daemonsets=False, delete_emptydir_data=False, force=False, grace_period_seconds=-1, timeout_seconds=60)`
 
-### 批量（dry-run → token → confirm）
-
-> **统一三步安全流程**，详见 [tools.md → 批量三步](./tools.md#批量操作三步流程dry-run-token-confirm)。
-
-- `bulk_set_image(label_selector, container, image, kinds=None, namespace=None, dry_run=True, confirm=False, confirmation_token=None)`
-- `bulk_restart(label_selector, kinds=None, namespace=None, dry_run=True, confirm=False, confirmation_token=None)`
-- `bulk_scale(label_selector, replicas, kinds=None, namespace=None, dry_run=True, confirm=False, confirmation_token=None)`
-
 ---
 
 ## 删除
 
 > **统一二次确认模型**，详见 [tools.md → 删除二次确认](./tools.md#删除二次确认)。
 
-### 通用两步（Secret / 级联删除的 Kind）
+### 通用两步（任意 Kind）
 
-- `delete_resource(kind, name, namespace=None, confirm=False, confirmation_token=None, grace_period_seconds=30)` — 任意 Kind
-
-### 一步删除（恢复友好，无级联）
-
-- `delete_pod(name, namespace, grace_period_seconds=30)` — 删了 Deployment / StatefulSet 会拉新的（恢复 / 重启原语）
-- `delete_pvc(name, namespace)` — PVC 是声明性资源，删了工作负载只 Pending 等待重新绑定
-- `delete_configmap(name, namespace="default")` — CM 可重建
-- `delete_service(name, namespace="default")` — 流量规则不是工作负载
-- `delete_ingress(name, namespace="default")` — 外部 HTTP(S) 路由断
-
-### 批量
-
-- `bulk_delete_pvc(label_selector, namespace=None, dry_run=True, confirm=False, confirmation_token=None)` — 专清孤儿 PVC
+- `delete_resource(kind, name, namespace=None, confirm=False, confirmation_token=None, grace_period_seconds=30)` — 任意 Kind；走 `confirm=False` 预览拿 token → `confirm=True + confirmation_token` 真删

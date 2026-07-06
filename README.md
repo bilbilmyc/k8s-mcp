@@ -2,7 +2,7 @@
 
 [English version](./README.en.md)
 
-面向 LLM Agent 的 Kubernetes MCP server。提供 **80 个**工具，覆盖 Pod /
+面向 LLM Agent 的 Kubernetes MCP server。提供 **72 个**工具，覆盖 Pod /
 Deployment / StatefulSet / DaemonSet / Job / CronJob / Service / Ingress
 / ConfigMap / PVC / RBAC / NetworkPolicy 等资源的增删改查，加上日志 /
 事件 / 节点运维 / top / rollout / wait / 批量 YAML apply / Prometheus
@@ -210,7 +210,7 @@ export K8S_MCP_NOTIFIERS='[
 
 ```bash
 uv sync
-uv run pytest              # 666 个测试
+uv run pytest              # 655 个测试
 uv run ruff check .        # lint
 uv run k8s-mcp             # stdio 启动
 uv build                   # 生成 dist/*.whl + .tar.gz

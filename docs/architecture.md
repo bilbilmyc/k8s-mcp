@@ -12,12 +12,12 @@ src/k8s_mcp/
 ├── safety.py         # HMAC 二次确认 token + caller-bound 校验
 └── tools/
     ├── generic.py    # list/get/get_yaml/describe/apply_yaml/replace/diff + label add/remove
-    ├── workload.py   # create_deployment/statefulset/job/cronjob, scale/restart/set_image
-    ├── service.py    # create_service/ingress, expose_workload, delete_service/ingress
+    ├── workload.py   # create_deployment/statefulset/job/cronjob, scale/restart/set_image/set_resources
+    ├── service.py    # create_service/ingress + expose_workload
     ├── logs.py       # get_pod_logs（长日志优化 + 多 Pod 并发）
     ├── pods.py       # list_pods + exec_pod（批模式容器内执行）
     ├── events.py     # list_events + get_events_for_object
-    ├── configmap.py  # get/update/delete_configmap
+    ├── configmap.py  # get/update configmap
     ├── delete_tool.py# delete_resource（两步确认）
     ├── metrics.py    # top_pods / top_nodes
     ├── rollout.py    # rollout_status / rollout_undo / rollout_history
@@ -30,13 +30,12 @@ src/k8s_mcp/
     ├── rbac.py       # Role / RoleBinding / ClusterRole / ClusterRoleBinding + whoami + analyze_rbac
     ├── serviceaccount.py # create_serviceaccount
     ├── networkpolicy.py # create_networkpolicy + analyze_networkpolicy
-    ├── storage.py    # create_pvc / delete_pvc / bulk_delete_pvc / bootstrap_local_path_provisioner
+    ├── storage.py    # create_pvc + bootstrap_local_path_provisioner + validate_pv_hostpath_paths
     ├── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
     ├── certs.py      # get_certificate_expiry（CRD + 内置 kind 都用 DynamicClient）
     ├── health.py     # cluster_health_snapshot（11 维集群体检）
-    ├── bulk.py       # bulk_set_image / bulk_restart / bulk_scale（@deprecated v0.5.0 删除）
     ├── cluster_info.py # cluster_info（apiserver / 版本 / 计数）
-    ├── diagnostics.py   # diagnose_pod（单 Pod 一键体检）
+    ├── diagnostics.py   # diagnose_pod + diagnose_deployment（一键深度体检）
     ├── explain.py       # explain_pod（owner 链 + siblings + spec）
     ├── resource_usage.py # analyze_resource_usage（requests/limits 审计）
     └── notifier.py   # notify 推送 webhook
@@ -56,7 +55,7 @@ src/k8s_mcp/
 
 每个 `tools/*.py` 模块暴露一个 `register(mcp)` 函数。新增工具模块只要在
 `server.py` 的 `_register_tools` 里 import + 调用一次，**不需要**改其他模块。
-80 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
+72 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
 
 ### 配置 + 守门分层
 
@@ -64,9 +63,7 @@ src/k8s_mcp/
 - **守门**（`config.Settings` + 各 tool 内的 `_read_only_guard` / `_ensure_ns`）：
   写工具调工具前先过两层。**`read_only`** 全局拒绝；**`namespace_allowlist`**
   按目标 namespace 校验。
-- **删除守门**（`safety.py`）：两步 HMAC 确认，所有 `delete_resource` / `bulk_*`
-  共用一套 token 签发校验；v0.4.2 起 token 嵌入 MCP server 自己的 kube
-  identity（`username` + `uid`），跨进程 replay 直接拒收。
+- **删除守门**（`safety.py`）：两步 HMAC 确认，所有 `delete_resource` 共用一套 token 签发校验；v0.4.2 起 token 嵌入 MCP server 自己的 kube identity（`username` + `uid`），跨进程 replay 直接拒收。
 
 ### 为什么是 stdio 而不是 HTTP/SSE？
 
@@ -90,11 +87,11 @@ LLM Agent（Cherry Studio / Claude Desktop）的 UI 重启**不会**重启 MCP s
 
 ### 测试策略
 
-666 个测试覆盖所有写 / 读 / 守门路径。模式：
+655 个测试覆盖所有写 / 读 / 守门路径。模式：
 
 - **mock ApiClient** —— 在 tool 模块级别 monkeypatch `_core_v1` / `_apps_v1` 等
   为 recording fake，捕获调用 + 模拟 404 / Forbidden。
-- **mock DynamicClient** —— `bulk_*` / `find_images` 这类走 DynamicClient 的工具
+- **mock DynamicClient** —— `find_images` 这类走 DynamicClient 的工具
   在 `generic._dyn_client` / `generic._resource_for_kind` 边界 patch。
 - **lint** —— `uv run ruff check src tests`（pyproject 配的 `E F W I N UP B`）。
 

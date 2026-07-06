@@ -212,9 +212,6 @@ def scale_workload(
         name: workload name, or a list of names to operate on serially.
             When a list is passed, each workload is patched in turn and
             the tool returns a combined per-workload result table.
-            (For label_selector-based bulk operations with the audited
-            dry_run → confirm two-step flow, see the still-available
-            :func:`bulk_scale` — also deprecated, removal v0.5.0.)
         namespace: workload namespace.
         replicas: desired replica count.
     """
@@ -252,8 +249,6 @@ def restart_workload(kind: str, name: str | list[str], namespace: str) -> str:
     Args:
         kind: "Deployment" or "StatefulSet".
         name: workload name, or a list of names to operate on serially.
-            (For label_selector-based bulk operations, see the still-
-            available :func:`bulk_restart` — also deprecated, removal v0.5.0.)
         namespace: workload namespace.
     """
     _read_only_guard("restart_workload")
@@ -309,8 +304,6 @@ def set_image(
     Args:
         kind: "Deployment" or "StatefulSet".
         name: workload name, or a list of names to operate on serially.
-            (For label_selector-based bulk operations, see the still-
-            available :func:`bulk_set_image` — also deprecated, removal v0.5.0.)
         namespace: workload namespace.
         container: container name within each pod template.
         image: the new image reference.

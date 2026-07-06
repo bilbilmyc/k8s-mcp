@@ -97,46 +97,6 @@ def update_configmap(
     return f"ConfigMap/{namespace}/{name} updated ({len(final_data)} keys)"
 
 
-def delete_configmap(name: str, namespace: str = "default") -> str:
-    """⚠️ WRITE / ⚠️ DEPRECATED — delete a ConfigMap (one-step, no two-step HMAC).
-
-    Use `delete_resource(kind='ConfigMap', ...)` for the audited two-step
-    flow. This wrapper will be removed in v0.5.0.
-
-    Why one-step: ConfigMaps are loose-coupled config data; deleting one
-    will cause Pods that mount it to fail to start, but the failure mode
-    is visible (CrashLoopBackOff / CreateContainerConfigError) and the
-    CM is re-creatable with `apply_yaml` or `create_pvc`-style helpers.
-
-    For higher-risk delete (Secret, anything that triggers a cascade),
-    use the generic two-step `delete_resource` instead.
-
-    .. deprecated::
-        Use :func:`delete_resource` with ``kind='ConfigMap'`` instead.
-        This one-step wrapper will be removed in v0.5.0; the two-step
-        preview+confirm flow is the recommended path for all
-        destructive ops going forward.
-
-    Args:
-        name: ConfigMap name.
-        namespace: ConfigMap namespace (default "default").
-    """
-    _read_only_guard("delete_configmap")
-    _ensure_ns(namespace)
-    try:
-        _core_v1().delete_namespaced_config_map(name, namespace)
-    except ApiException as e:
-        if e.status == 404:
-            raise LookupError(f"ConfigMap '{namespace}/{name}' not found") from e
-        raise
-    return (
-        f"⚠️ DEPRECATED: delete_configmap will be removed in v0.5.0 — "
-        f"use delete_resource(kind='ConfigMap') for the audited two-step flow.\n"
-        f"ConfigMap/{namespace}/{name} deleted"
-    )
-
-
 def register(mcp) -> None:
     mcp.tool()(get_configmap)
     mcp.tool()(update_configmap)
-    mcp.tool()(delete_configmap)

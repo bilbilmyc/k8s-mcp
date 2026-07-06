@@ -119,10 +119,9 @@
 
 > 你："把 prod namespace 里所有 `app=db` 标签的孤儿 PVC 清掉。"
 
-> Claude → `bulk_delete_pvc(label_selector="app=db", namespace="prod")`
-> （dry-run，列出来）→ 用户确认 →
-> `bulk_delete_pvc(..., confirm=False, dry_run=False)` 拿 token →
-> `bulk_delete_pvc(..., confirm=True, confirmation_token=token)` 真删。
+> Claude → `list_resources(kind="PersistentVolumeClaim", namespace="prod", label_selector="app=db")` 列出所有匹配项 →
+> 用户逐个（或一次性脚本）确认 → `delete_resource(kind="PersistentVolumeClaim", name=..., namespace="prod", confirm=False)` 预览 →
+> `delete_resource(..., confirm=True, confirmation_token=...)` 逐个真删。
 
 ---
 

@@ -1,13 +1,11 @@
-"""Pod listing + delete (escape hatch).
+"""Pod listing + exec.
 
 中文说明：
 - `list_pods`：支持 namespace / label_selector / field_selector 三类筛选，
   `include_all=True` 跨所有 namespace。
-- `delete_pod`：单 Pod 删除的低风险逃生通道——故意绕过 delete_resource 的
-  二次确认机制（删除一个 Pod 通常只是触发重启，不是真删数据），适合 Agent
-  "重启 pod" 这一类常规排障动作。
 - `exec_pod`：⚠️ 高权限 — 在 Pod 容器里跑命令（批模式）。K8s RBAC 控制
   谁能 pods/exec，本工具不做命令白名单。
+  Pod 删除请走通用两段式 `delete_resource(kind="Pod", ...)`。
 """
 from __future__ import annotations
 
@@ -81,52 +79,6 @@ def list_pods(
         })
 
     return short_table(rows, ["NAME", "NAMESPACE", "PHASE", "RESTARTS", "AGE", "NODE"])
-
-
-def delete_pod(name: str, namespace: str, grace_period_seconds: int = 30) -> str:
-    """⚠️ DEPRECATED — Delete a single Pod (immediate reschedule).
-
-    Use `delete_resource(kind='Pod', ...)` for the audited two-step
-    flow. This one-step wrapper will be removed in v0.5.0.
-
-    This bypasses the two-step delete confirmation in `delete_resource`
-    because deleting a Pod is a low-risk recovery / restart primitive —
-    the controller (Deployment, StatefulSet, Job, …) will recreate it.
-
-    .. deprecated::
-        Use :func:`delete_resource` with ``kind='Pod'`` instead. This
-        one-step wrapper will be removed in v0.5.0; the two-step
-        preview+confirm flow is the recommended path for all
-        destructive ops going forward. Keep using ``delete_pod`` for
-        now if you specifically need the one-step behavior.
-
-    Args:
-        name: pod name.
-        namespace: pod namespace.
-        grace_period_seconds: how long to wait before force-killing
-            containers (default 30; set to 0 for immediate kill).
-    """
-    if get_settings().read_only:
-        raise PermissionError("Server is in read-only mode.")
-    if not get_settings().ns_allowed(namespace):
-        raise PermissionError(
-            f"Write to namespace '{namespace}' is not allowed by K8S_MCP_NAMESPACE_ALLOWLIST"
-        )
-    body = client.V1DeleteOptions()
-    if grace_period_seconds is not None:
-        body.grace_period_seconds = grace_period_seconds
-    try:
-        _core_v1().delete_namespaced_pod(name, namespace, body=body)
-    except ApiException as e:
-        if e.status == 404:
-            raise LookupError(f"Pod '{namespace}/{name}' not found") from e
-        raise
-    return (
-        f"⚠️ DEPRECATED: delete_pod will be removed in v0.5.0 — "
-        f"use delete_resource(kind='Pod') for the audited two-step flow.\n"
-        f"Pod/{namespace}/{name} deleted (grace={grace_period_seconds}s); "
-        f"controller will recreate"
-    )
 
 
 def exec_pod(
@@ -304,5 +256,4 @@ def exec_pod(
 
 def register(mcp) -> None:
     mcp.tool()(list_pods)
-    mcp.tool()(delete_pod)
     mcp.tool()(exec_pod)

@@ -102,7 +102,7 @@ def get_caller_identity() -> dict:
 
     Shape: `{"username": str, "uid": str, "groups": list[str]}`.
 
-    Used by destructive-op tools (delete / bulk_*) to bind their
+    Used by destructive-op tools (delete_resource) to bind their
     HMAC-signed confirmation tokens to the authenticated identity. A
     leaked token issued by MCP server A cannot be replayed against MCP
     server B running as a different user, because the verify step

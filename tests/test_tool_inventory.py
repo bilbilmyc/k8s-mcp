@@ -1,0 +1,173 @@
+"""Pin the tool inventory at 72 entries.
+
+This is a guard against accidental additions/removals that change the
+tool surface LLM agents see. If you intentionally add or remove a tool,
+update BOTH the expected count AND the expected set in one shot.
+
+`expected_tools` is the canonical list of tools registered on the
+FastMCP instance after v0.5.0 cleanup. Adding a new tool requires
+updating this list in the same PR.
+"""
+from __future__ import annotations
+
+import pytest
+
+EXPECTED_TOOL_COUNT = 72
+EXPECTED_TOOLS: frozenset[str] = frozenset({
+    "ping",
+    # autoscale
+    "create_hpa",
+    "create_pdb",
+    # certs
+    "get_certificate_expiry",
+    # cluster_info
+    "cluster_info",
+    # configmap
+    "get_configmap",
+    "update_configmap",
+    # delete_tool
+    "delete_resource",
+    # diagnostics
+    "diagnose_deployment",
+    "diagnose_pod",
+    # discovery
+    "explain_resource",
+    "find_images",
+    "get_api_resources",
+    # events
+    "get_events_for_object",
+    "list_events",
+    # explain
+    "explain_pod",
+    # generic
+    "add_label",
+    "apply_yaml",
+    "describe_resource",
+    "diff_resource",
+    "get_resource",
+    "get_resource_yaml",
+    "list_resources",
+    "remove_label",
+    "replace_resource",
+    "search_resources",
+    # health
+    "cluster_health_snapshot",
+    # jsonpath
+    "get_resource_jsonpath",
+    # logs
+    "get_pod_logs",
+    # metrics
+    "top_nodes",
+    "top_pods",
+    # networkpolicy
+    "analyze_networkpolicy",
+    "create_networkpolicy",
+    # node_ops
+    "cordon_node",
+    "drain_node",
+    "uncordon_node",
+    # notifier
+    "notify",
+    # pods
+    "exec_pod",
+    "list_pods",
+    # prometheus
+    "expose_prometheus_as_nodeport",
+    "find_prometheus_service",
+    "pod_metrics",
+    "prometheus_query",
+    "prometheus_query_range",
+    # rbac
+    "analyze_rbac",
+    "create_clusterrole",
+    "create_clusterrolebinding",
+    "create_role",
+    "create_rolebinding",
+    "whoami",
+    # resource_usage
+    "analyze_resource_usage",
+    # rollout
+    "rollout_history",
+    "rollout_status",
+    "rollout_undo",
+    # secret
+    "get_secret_value",
+    "list_secrets",
+    # service
+    "create_ingress",
+    "create_service",
+    "expose_workload",
+    # serviceaccount
+    "create_serviceaccount",
+    # storage
+    "bootstrap_local_path_provisioner",
+    "create_pvc",
+    "validate_pv_hostpath_paths",
+    # wait_tool
+    "wait_resource",
+    # workload
+    "create_cronjob",
+    "create_deployment",
+    "create_job",
+    "create_statefulset",
+    "restart_workload",
+    "scale_workload",
+    "set_image",
+    "set_resources",
+})
+
+
+@pytest.fixture
+def server_tools():
+    """Build the server and return the set of registered tool names.
+
+    Function-scoped (not module) because the autouse `_clean_env`
+    conftest fixture wipes K8S_MCP_* env vars per-test and re-injects
+    a real-looking HMAC secret; a module-scoped fixture would inherit
+    the first test's env and then later tests would race the
+    enforce_write_safety guard.
+    """
+    from k8s_mcp.config import reset_settings_cache
+    from k8s_mcp.server import create_server
+
+    reset_settings_cache()
+    mcp = create_server()
+    yield frozenset(mcp._tool_manager._tools.keys())
+    reset_settings_cache()
+
+
+def test_tool_count_matches_expected(server_tools):
+    """Pin the total number of tools. Changing this requires updating
+    `EXPECTED_TOOL_COUNT` and `EXPECTED_TOOLS` together — the guard at
+    the bottom will refuse to accept a one-sided change."""
+    assert len(server_tools) == EXPECTED_TOOL_COUNT, (
+        f"expected {EXPECTED_TOOL_COUNT} tools, got {len(server_tools)}: "
+        f"added={server_tools - EXPECTED_TOOLS}, "
+        f"removed={EXPECTED_TOOLS - server_tools}"
+    )
+
+
+def test_tool_set_matches_expected(server_tools):
+    """Pin the *identity* of every tool. Catches subtle changes (rename,
+    accidental merge of two tools, removal of a deprecated alias) even
+    if the count stays the same."""
+    assert server_tools == EXPECTED_TOOLS, (
+        f"tool set drifted: added={server_tools - EXPECTED_TOOLS}, "
+        f"removed={EXPECTED_TOOLS - server_tools}"
+    )
+
+
+def test_no_deprecated_tools_registered(server_tools):
+    """Defense-in-depth: the 9 deprecated tools removed in v0.5.0 must
+    never reappear in the registry. Catches accidental re-introduction
+    via a merge conflict or a `git revert`."""
+    forbidden = {
+        "bulk_set_image", "bulk_restart", "bulk_scale", "bulk_delete_pvc",
+        "delete_pod", "delete_pvc", "delete_service", "delete_ingress",
+        "delete_configmap",
+    }
+    leaked = forbidden & server_tools
+    assert not leaked, (
+        f"deprecated tools must not be registered: {leaked}. "
+        "If this was intentional, also remove this guard."
+    )

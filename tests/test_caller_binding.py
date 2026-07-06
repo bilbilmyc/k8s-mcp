@@ -14,7 +14,6 @@ from __future__ import annotations
 import pytest
 
 from k8s_mcp import safety
-from k8s_mcp.tools import bulk
 
 # ---------------------------------------------------------------------------
 # safety.make_delete_payload / assert_payload_matches — the binding contract
@@ -102,47 +101,6 @@ def test_assert_payload_matches_rejects_legacy_token_against_bound_caller():
             kind="Pod", name="p1", namespace="default", grace_period_seconds=30,
             caller={"username": "test-user", "uid": "test-uid", "groups": []},
         )
-
-
-# ---------------------------------------------------------------------------
-# bulk._verify_bulk_token — the same binding enforced on the bulk path
-# ---------------------------------------------------------------------------
-
-
-def test_bulk_token_roundtrip_with_same_identity(monkeypatch):
-    """Issue + verify with the same identity (the common case)."""
-    monkeypatch.setattr(
-        "k8s_mcp.client.get_caller_identity",
-        lambda: {"username": "alice", "uid": "u-1", "groups": []},
-    )
-    monkeypatch.setattr(
-        "k8s_mcp.tools.bulk.get_caller_identity",
-        lambda: {"username": "alice", "uid": "u-1", "groups": []},
-    )
-    token = bulk._issue_bulk_token({"op": "bulk_restart", "label_selector": "app=x"})
-    payload = bulk._verify_bulk_token(token, expected_op="bulk_restart")
-    assert payload["op"] == "bulk_restart"
-    assert payload["caller"] == {"username": "alice", "uid": "u-1"}
-
-
-def test_bulk_token_rejected_when_caller_changes(monkeypatch):
-    """A token issued as alice cannot be replayed by a process now
-    running as bob — even if the secret is the same."""
-    def alice():
-        return {"username": "alice", "uid": "u-1", "groups": []}
-
-    def bob():
-        return {"username": "bob", "uid": "u-2", "groups": []}
-
-    monkeypatch.setattr("k8s_mcp.client.get_caller_identity", alice)
-    monkeypatch.setattr("k8s_mcp.tools.bulk.get_caller_identity", alice)
-    token = bulk._issue_bulk_token({"op": "bulk_restart"})
-
-    # Simulate process-rotation (e.g. kubeconfig reload to a different SA).
-    monkeypatch.setattr("k8s_mcp.client.get_caller_identity", bob)
-    monkeypatch.setattr("k8s_mcp.tools.bulk.get_caller_identity", bob)
-    with pytest.raises(safety.TokenError, match="caller mismatch"):
-        bulk._verify_bulk_token(token, expected_op="bulk_restart")
 
 
 # ---------------------------------------------------------------------------

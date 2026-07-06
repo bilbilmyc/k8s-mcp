@@ -1,4 +1,4 @@
-"""Tests for secret, discovery, replace/diff, delete_pod, rollout_history,
+"""Tests for secret, discovery, replace/diff, delete_resource, rollout_history,
 set_resources, and the create_xxx shortcuts.
 
 These tests focus on:
@@ -16,6 +16,7 @@ import pytest
 from k8s_mcp.config import reset_settings_cache
 from k8s_mcp.tools import (
     autoscale,
+    delete_tool,
     discovery,
     generic,
     networkpolicy,
@@ -25,7 +26,6 @@ from k8s_mcp.tools import (
     storage,
     workload,
 )
-from k8s_mcp.tools import pods as pods_mod
 
 
 @pytest.fixture(autouse=True)
@@ -219,40 +219,24 @@ def test_diff_reports_no_changes_when_identical(monkeypatch):
 
 
 # =============================================================================
-# delete_pod
+# delete_resource (covers the read-only / allowlist guards previously
+# exercised by the deprecated delete_pod tool; the two-step token flow
+# lives in tests/test_safety_delete.py)
 # =============================================================================
 
 
-def test_delete_pod_rejects_in_read_only(monkeypatch):
+def test_delete_resource_rejects_in_read_only(monkeypatch):
     monkeypatch.setenv("K8S_MCP_READ_ONLY", "true")
     reset_settings_cache()
     with pytest.raises(PermissionError, match="read-only"):
-        pods_mod.delete_pod("p1", "default")
+        delete_tool.delete_resource(kind="Pod", name="p1", namespace="default")
 
 
-def test_delete_pod_rejects_when_namespace_not_allowed(monkeypatch):
+def test_delete_resource_rejects_when_namespace_not_allowed(monkeypatch):
     monkeypatch.setenv("K8S_MCP_NAMESPACE_ALLOWLIST", "allowed")
     reset_settings_cache()
     with pytest.raises(PermissionError, match="not allowed"):
-        pods_mod.delete_pod("p1", "other")
-
-
-def test_delete_pod_calls_api(monkeypatch):
-    called = {}
-
-    class FakeApi:
-        def delete_namespaced_pod(self, name, namespace, body=None, **kw):
-            called["name"] = name
-            called["ns"] = namespace
-            called["body"] = body
-            return None
-
-    monkeypatch.setattr(pods_mod, "_core_v1", lambda: FakeApi())
-    out = pods_mod.delete_pod("p1", "default", grace_period_seconds=0)
-    assert "deleted" in out
-    assert called["name"] == "p1"
-    assert called["ns"] == "default"
-    assert called["body"].grace_period_seconds == 0
+        delete_tool.delete_resource(kind="Pod", name="p1", namespace="other")
 
 
 # =============================================================================

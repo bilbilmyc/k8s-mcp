@@ -180,26 +180,80 @@ def explain_resource(
 # explain_resource call would be wasteful. We TTL the cache for 5 minutes so
 # a long-running MCP session that installs a CRD mid-flight sees the new type
 # within 5 minutes without paying the fetch cost on every explain_resource.
+#
+# We also cap at `_OPENAPI_CACHE_MAX_BYTES` (post JSON-serialize). The core
+# K8s schema fits comfortably (≈1–2 MiB), but CRD-heavy clusters can push it
+# past tens of MiB. A long-lived MCP server pinning 50 MiB of rarely-touched
+# schema is a memory bomb waiting to happen. When the freshly-fetched schema
+# would exceed the cap, we return it but skip caching — next call refetches.
 _openapi_cache: dict | None = None
 _openapi_cache_at: float = 0.0
 _OPENAPI_CACHE_TTL_SECONDS = 300
+_OPENAPI_CACHE_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB
+
+
+def _fetch_openapi_spec() -> dict:
+    """Hit apiserver for the OpenAPI v3 schema. Returns the raw spec dict.
+
+    Uses the lower-level `call_api("/openapi/v3", "GET")` route because
+    `kubernetes.client.OpenApiApi` was removed in client v36+. If the
+    cluster only exposes `/openapi/v2` (older clusters), the helper
+    falls back transparently.
+    """
+    api = get_api_client()
+    for path in ("/openapi/v3", "/openapi/v2"):
+        try:
+            spec, _status, _hdrs = api.call_api(
+                path, "GET",
+                response_type="object",
+                auth_settings=["BearerToken"],
+            )
+            if isinstance(spec, dict):
+                return spec
+        except Exception:  # noqa: BLE001 — try next path
+            continue
+    return {}
+
+
+def _store_openapi_spec_if_within_cap(spec: dict | None) -> dict:
+    """Apply the size-cap policy to a freshly-fetched spec.
+
+    Returns the spec to cache (or `None` if it's too big to retain). Split
+    out from `_get_openapi_schema` so the cap policy is testable without
+    touching the kubernetes client.
+    """
+    global _openapi_cache, _openapi_cache_at
+    import json
+    schemas = (
+        spec.get("components", {}).get("schemas", {})
+        if isinstance(spec, dict)
+        else {}
+    )
+    if len(json.dumps(schemas)) <= _OPENAPI_CACHE_MAX_BYTES:
+        _openapi_cache = schemas
+        _openapi_cache_at = _now()
+        return _openapi_cache
+    # Schema too big to cache — leave cache empty so next call refetches.
+    _openapi_cache = None
+    _openapi_cache_at = 0.0
+    return schemas
+
+
+def _now() -> float:
+    """Inlined so tests can monkeypatch `time.monotonic` without import
+    weirdness. Defaults to a real monotonic clock."""
+    import time
+    return time.monotonic()
 
 
 def _get_openapi_schema() -> dict:
-    """Fetch and cache the cluster's OpenAPI v3 schema (lazy, TTL'd)."""
+    """Fetch and cache the cluster's OpenAPI v3 schema (lazy, TTL'd, size-capped)."""
     global _openapi_cache, _openapi_cache_at
-    import time
-    now = time.monotonic()
-    if _openapi_cache is None or (now - _openapi_cache_at) > _OPENAPI_CACHE_TTL_SECONDS:
-        spec = client.OpenApiApi(get_api_client()).get_openapi_spec()
-        # The spec is a nested dict under "components"/"schemas" in v3.
-        _openapi_cache = (
-            spec.get("components", {}).get("schemas", {})
-            if isinstance(spec, dict)
-            else {}
-        )
-        _openapi_cache_at = now
-    return _openapi_cache
+    if _openapi_cache is not None and (_now() - _openapi_cache_at) <= _OPENAPI_CACHE_TTL_SECONDS:
+        return _openapi_cache
+    spec = _fetch_openapi_spec()
+    schemas = _store_openapi_spec_if_within_cap(spec)
+    return schemas
 
 
 def reset_openapi_cache() -> None:

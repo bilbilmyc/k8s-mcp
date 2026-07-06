@@ -101,17 +101,3 @@ def test_delete_resource_refuses_default_secret(monkeypatch):
     with pytest.raises(RuntimeError, match="literal source-tree default"):
         delete_tool.delete_resource("Pod", "x", namespace="default", confirm=False)
     reset_settings_cache()
-
-
-def test_bulk_refuses_default_secret_at_issue(monkeypatch):
-    """bulk's _issue_bulk_token is the per-call entrypoint for token
-    issuance; it must refuse the default before issuing a forge-able
-    token."""
-    from k8s_mcp.tools import bulk
-
-    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
-    monkeypatch.setenv("K8S_MCP_DELETE_TOKEN_SECRET", "change-me")
-    reset_settings_cache()
-    with pytest.raises(RuntimeError, match="literal source-tree default"):
-        bulk._issue_bulk_token({"op": "bulk_restart"})
-    reset_settings_cache()

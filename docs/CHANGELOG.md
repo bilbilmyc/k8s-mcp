@@ -6,6 +6,60 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+### Added — P0 hardening (production safety nets)
+
+Three production-grade safeguards applied uniformly at the `_K8sMCP`
+`call_tool` boundary in `server.py`. None of them are opt-in — the
+defaults are conservative and the gates can be lifted independently.
+32 new tests (`tests/test_safety_nets.py` + `tests/test_call_tool_safety_nets.py`),
+709 passing total.
+
+- **P0-1: per-tool rate limit** — `K8S_MCP_RATE_LIMIT_RPM` (default
+  `120`) caps how often any single tool can be called per minute.
+  Implementation: in-memory token bucket, one bucket per tool name.
+  Burst size = rpm/6 (= 20 at 120 RPM — a 10-second window worth of
+  calls). A runaway agent that hammers `list_pods` cannot saturate the
+  apiserver or the MCP transport; busy agents can still mix call types
+  (list + describe + logs in parallel) without one starving the other.
+  Process-local; restarts reset (matches the existing "server restart
+  clears in-memory caches" convention). Set `0` to disable.
+- **P0-2: per-call wall-clock timeout** — `K8S_MCP_TOOL_TIMEOUT_S`
+  (default `60.0`) bounds how long any single tool call can run.
+  Implementation: bypasses FastMCP's async wrapper and dispatches the
+  registered sync tool body on the default executor, then
+  `asyncio.wait_for`s the resulting future from the main loop. The
+  orphan executor task is **not** cancelled (Python has no portable way
+  to kill a sync thread; the kubernetes client is fully blocking),
+  but the MCP request returns immediately with a `ToolTimeoutError`
+  carrying `tool` and `timeout_seconds`, and the LLM can move on. The
+  orphan will finish (or hit the apiserver's own timeout) in the
+  background. Set `0` to disable.
+- **P1-4: apiserver error sanitization** — every `kubernetes.client.rest.ApiException`
+  raised by a tool body is mapped to a curated `SafeApiError` whose
+  message is a one-liner with status + operation context. The raw
+  `body` / `reason` (RBAC details, internal hostnames, manifest field
+  paths, audit-trail fragments) is **never** exposed to the LLM. A
+  short `hint` naming the next tool to try (`whoami` for 403,
+  `diff_resource` for 422, `retry with backoff` for 429/503/504, ...)
+  is attached so the agent can recover without re-asking the user.
+  Non-`ApiException` failures surface only the exception class name
+  (never the `args` — `urllib3` may embed URLs+headers there). The
+  boundary normalizes both classes via `safe_apiserver_error(...)`.
+  Always on; there is no opt-out (turning it off would defeat the
+  point).
+
+### Rationale
+
+Before this, a single misbehaving agent could `kubectl` a cluster into
+the ground in seconds, a slow apiserver call could pin the MCP request
+forever (no clean shutdown), and every 403/422/500 leaked the
+apiserver's full body to the LLM. The three gates are layered:
+rate-limit rejects before the apiserver call (cheap), timeout enforces
+the upper bound on a single call (medium), error sanitization keeps
+the failure messages terse (cheap + critical for LLM security).
+Net result: a safer production posture without changing any of the
+79 tool bodies.
+
 ## [0.4.5] — 2026-07-06
 
 ### Added

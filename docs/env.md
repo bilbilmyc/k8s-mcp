@@ -55,6 +55,25 @@ k8s-mcp 通过 pydantic-settings 读取环境变量，所有变量以 `K8S_MCP_`
 | `K8S_MCP_DELETE_TOKEN_SECRET` | `change-me` | 删除二次确认 token 的 HMAC 签名密钥。**必填**：`K8S_MCP_READ_ONLY=false` 时若保留字面默认值 `change-me` 或留空，server 拒绝启动（v0.4.2 起从软警告升级为启动闸门）。生产用 `openssl rand -hex 32` 生成；任何持有源码的人都能伪造默认值签名的 token，所以默认密钥等同于无认证。 |
 | `K8S_MCP_DELETE_TOKEN_TTL_SECONDS` | `300` | token 有效期（秒），默认 5 分钟 |
 
+### 运行时安全网（P0 hardening，v0.4.6 起）
+
+在 `_K8sMCP.call_tool` 边界统一生效；任何工具实现都自动获得这层兜底，
+不需要修改每个工具。三道闸都可以独立关掉（`0` 即关闭）。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `K8S_MCP_RATE_LIMIT_RPM` | `120` | 单个工具的 RPM 上限（进程内 token bucket）。防失控 agent 把 apiserver / MCP 通道打满；burst = rpm/6（10 秒窗口的调用量）。设 `0` 关闭。 |
+| `K8S_MCP_TOOL_TIMEOUT_S` | `60.0` | 单次工具调用的墙钟上限（秒）。通过把同步工具体派到 default executor 再 `asyncio.wait_for` 实现；触发后返回 `ToolTimeoutError(tool, timeout_seconds)` 给 LLM，executor 里的孤儿线程不杀（Python 没有可移植的同步线程取消方式），让它后台跑完或撞 apiserver 自己的超时。设 `0` 关闭。 |
+
+错误脱敏（`SafeApiError`）默认开、不接受关闭：所有 `ApiException` 在
+`call_tool` 边界被映射成 `SafeApiError(status, reason, message, hint)`
+—— message 是一行摘要（status + 操作 + 资源标识），`body`（RBAC 细节、
+内部 hostname、manifest 字段路径）**绝不**进入 LLM context；`hint`
+字面建议下一步工具（如 `whoami` 看权限 / `diff_resource` 对比当前
+manifest）。非 `ApiException` 只暴露类名不暴露 args（`urllib3` 连接
+错误里有时会带 URL+headers）。
+
+
 ### Prometheus（可选，监控查询）
 
 **URL 解析 4 层优先级（由高到低）**：

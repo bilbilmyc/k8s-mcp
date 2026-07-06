@@ -9,35 +9,81 @@
 
 整个 server 是单进程的，所有 tool 调用串行执行；状态都保存在
 进程内（client 缓存、OpenAPI schema 缓存）。
+
+Operational safety nets applied at the `call_tool` boundary (see
+`k8s_mcp.safety` for details): per-tool rate limit, per-call wall-clock
+timeout, and apiserver-error sanitization. Each is opt-out via
+`K8S_MCP_RATE_LIMIT_RPM=0` / `K8S_MCP_TOOL_TIMEOUT_S=0`.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import signal
+from collections.abc import Sequence
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ContentBlock
 
 from . import __version__
 from .config import Settings, enforce_write_safety, get_settings
+from .safety import (
+    RateLimiter,
+    SafeApiError,
+    ToolTimeoutError,
+    safe_apiserver_error,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class _K8sMCP(FastMCP):
-    """FastMCP subclass that defaults structured_output=None → False.
+    """FastMCP subclass that defaults structured_output=None → False AND
+    enforces three production safety nets on every `call_tool`:
 
-    FastMCP 1.28.1 wraps tools that have a typed return (incl. `-> str`) in
-    a `{"result": ...}` envelope and emits an outputSchema. Cherry Studio
-    then JSON-encodes that envelope into `content[0].text`, forcing agent
-    code to unwrap a second layer just to read the table string. With
-    structured_output=False, outputSchema is None and `content[0].text`
-    is the raw string — what Claude Desktop / spec-compliant clients
-    show anyway.
+      1. **Per-tool rate limit** — `K8S_MCP_RATE_LIMIT_RPM` (default 120)
+         caps how often a single tool can be called per minute. A
+         runaway agent that hammers `list_pods` cannot saturate the
+         apiserver or the MCP transport. The cap is per-tool-name, not
+         global, so a busy agent can still mix calls (list + describe +
+         logs in parallel) without one blocking the other.
+      2. **Per-call wall-clock timeout** — `K8S_MCP_TOOL_TIMEOUT_S`
+         (default 60s) bounds how long any single tool call can run.
+         Implemented by offloading the sync tool body to the default
+         executor and `asyncio.wait_for`-ing the future. The orphan
+         task is *not* cancelled (Python has no portable way to kill a
+         sync thread); it will complete or hit the apiserver's own
+         timeout. The MCP request returns immediately.
+      3. **Apiserver error sanitization** — every `ApiException` from
+         the kubernetes client is mapped to a curated `SafeApiError`
+         whose message is a one-liner. The raw `body` (which can
+         include RBAC details, internal hostnames, manifest field
+         paths) is never exposed to the LLM.
 
-    Tools that genuinely want structured content can opt in explicitly
-    with `@mcp.tool(structured_output=True)`.
+    Each safety net can be disabled independently: `RATE_LIMIT_RPM=0`
+    turns the limiter off; `TOOL_TIMEOUT_S=0` skips the timeout wrap;
+    the error sanitizer is always on (turning it off would defeat the
+    point of having it).
+
+    `structured_output` defaults to `False` for the same reason as
+    before: FastMCP 1.28.1 wraps `-> str` returns in a `{"result": ...}`
+    envelope and Cherry Studio JSON-encodes that envelope into
+    `content[0].text`, forcing the agent to unwrap a second layer. With
+    `structured_output=False` the LLM sees the raw table string.
     """
+
+    def __init__(self, *args, settings: Settings | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        s = settings or get_settings()
+        # RateLimiter is a no-op when rpm=0; check() is the gate.
+        self._rate_limiter = RateLimiter(rpm=s.rate_limit_rpm)
+        self._tool_timeout_s = float(s.tool_timeout_s)
+        logger.info(
+            "safety nets: rate_limit_rpm=%d tool_timeout_s=%s",
+            s.rate_limit_rpm,
+            f"{self._tool_timeout_s:g}s" if self._tool_timeout_s > 0 else "off",
+        )
 
     def add_tool(
         self,
@@ -65,6 +111,109 @@ class _K8sMCP(FastMCP):
             **kwargs,
         )
 
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
+        # 1. Rate limit — fail fast BEFORE entering the apiserver call.
+        if self._rate_limiter._rpm > 0:
+            self._rate_limiter.check(name)
+
+        # 2. Per-call timeout + 3. apiserver-error sanitization.
+        # The registered tool bodies are all sync (kubernetes client
+        # calls are blocking). `asyncio.wait_for(super().call_tool(...))`
+        # does NOT work for timeout enforcement: the sync body runs
+        # inline inside FastMCP's async `tool.run()`, and wait_for has
+        # no yield point to cancel at — the sleep / apiserver call
+        # runs to completion no matter what the timeout is set to.
+        #
+        # Workaround: bypass FastMCP's async wrapper and dispatch the
+        # sync tool body on the default executor. Then `wait_for` on
+        # the returned future will actually fire at the timeout. The
+        # orphan executor task isn't cancelled (Python can't kill a
+        # sync thread), but the MCP request returns immediately with a
+        # `ToolTimeoutError` and the LLM can move on; the orphan will
+        # finish (or hit the apiserver's own timeout) on its own.
+        tool = self._tool_manager._tools.get(name)
+        if tool is None:
+            # Unknown tool — let FastMCP raise its standard ToolError
+            # so the error path is identical to the pre-hardening
+            # behavior for typos / unknown names.
+            return await super().call_tool(name, arguments)
+
+        # Capture the context on the main loop (it touches the running
+        # session), then pass it into the executor thread. `Context` is
+        # not safe to construct from a worker thread.
+        ctx = self.get_context() if tool.context_kwarg else None
+        meta = tool.fn_metadata
+        loop = asyncio.get_event_loop()
+
+        def _invoke() -> Any:
+            # Replicate what `Tool.run` does for a sync tool, but
+            # without the `async` wrapper — so this function blocks
+            # the executor thread (and `asyncio.wait_for` on the main
+            # loop can actually cancel the future at the timeout).
+            #
+            # We deliberately skip `meta.convert_result` here: that
+            # helper returns a `(unstructured, structured)` tuple for
+            # `-> str` tools, which the call_tool / lowlevel boundary
+            # then re-normalizes. Returning the raw string / dict /
+            # etc. and letting the lowlevel layer wrap it matches
+            # FastMCP's pre-hardening output exactly.
+            pre_parsed = meta.pre_parse_json(arguments)
+            parsed_model = meta.arg_model.model_validate(pre_parsed)
+            kwargs = parsed_model.model_dump_one_level()
+            if ctx is not None and tool.context_kwarg:
+                kwargs[tool.context_kwarg] = ctx
+            return tool.fn(**kwargs)
+
+        try:
+            if self._tool_timeout_s > 0:
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(None, _invoke),
+                    timeout=self._tool_timeout_s,
+                )
+            else:
+                raw = await loop.run_in_executor(None, _invoke)
+        except TimeoutError as e:
+            logger.warning("tool %r hit %ss timeout", name, self._tool_timeout_s)
+            raise ToolTimeoutError(name, self._tool_timeout_s) from e
+        except SafeApiError:
+            raise
+        except Exception as e:
+            # FastMCP's `Tool.run` wraps every tool-body exception in
+            # `ToolError(f"Error executing tool {name}: {e}")` from e.
+            # We DO go through `Tool.run` (via the executor path), so
+            # the raw `ApiException` / `ValueError` is at
+            # `e.__cause__`, not `e` itself. Recover it for
+            # sanitization; the operator still sees the full chain
+            # in the log warning.
+            from kubernetes.client.rest import ApiException
+            cause = e.__cause__ or e.__context__ or e
+            if isinstance(cause, ApiException):
+                safe = safe_apiserver_error(cause, op="call", kind=name)
+                logger.info(
+                    "tool %r: apiserver HTTP %s sanitized to %r",
+                    name, cause.status, str(safe),
+                )
+                raise safe from e
+            logger.warning(
+                "tool %r failed: %s (cause=%s): %s",
+                name, type(cause).__name__, type(e).__name__, cause,
+            )
+            raise SafeApiError(
+                status=0,
+                reason=type(cause).__name__,
+                message=f"call {name} failed: internal {type(cause).__name__}",
+                hint="this is an internal error; check the server logs for details",
+            ) from e
+
+        # Tool body succeeded. Wrap the raw return into the
+        # ContentBlock list the call_tool contract expects. We do this
+        # here (not inside `_invoke`) so the executor thread stays
+        # strictly synchronous — that way `asyncio.wait_for` on the
+        # main loop can actually fire at the timeout.
+        return meta.convert_result(raw)
+
 
 def create_server(settings: Settings | None = None) -> FastMCP:
     """构建并返回 FastMCP server，所有 tool 已注册。
@@ -88,7 +237,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
 
     _install_signal_handlers()
 
-    mcp = _K8sMCP("k8s-mcp")
+    mcp = _K8sMCP("k8s-mcp", settings=settings)
 
     @mcp.tool()
     def ping() -> str:

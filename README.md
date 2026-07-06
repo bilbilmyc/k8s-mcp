@@ -143,6 +143,28 @@ export K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32)
 export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 ```
 
+## 运行时安全网（v0.4.6+）
+
+三道生产级兜底统一在 `_K8sMCP.call_tool` 边界生效——任何工具实现都
+**自动**获得，不需要挨个改代码：
+
+```bash
+# P0-1：每工具 RPM 上限（默认 120），防失控 agent 把 apiserver 刷爆
+export K8S_MCP_RATE_LIMIT_RPM=120
+
+# P0-2：单次工具墙钟超时（默认 60s），触发后立刻返回 ToolTimeoutError
+# 设 0 关闭；如果依赖 rollout_status(watch=True) / Prometheus range query
+# 之类长任务，调高即可
+export K8S_MCP_TOOL_TIMEOUT_S=60
+
+# P1-4：apiserver 错误脱敏（默认开，不可关闭）
+# ApiException.body（RBAC 细节 / 内部 hostname / manifest 字段路径）
+# 绝不进入 LLM；SafeApiError.hint 字面告诉 agent 下一步该调哪个工具
+```
+
+详见 [`docs/env.md → 运行时安全网`](./docs/env.md#运行时安全网p0-hardeningv046-起)。
+
+
 ## 通知 webhook
 
 把 `cluster_health_snapshot` / `get_certificate_expiry` 这类只读结果主动推到 IM：

@@ -56,6 +56,19 @@ class Settings(BaseSettings):
     delete_token_secret: str = "change-me"
     delete_token_ttl_seconds: int = 300
 
+    # Operational safety nets (P0 hardening for production). Applied at
+    # the FastMCP call_tool boundary in server.py:
+    #   - rate_limit_rpm: per-tool requests-per-minute cap. 0 = disabled.
+    #     120 RPM (~2 RPS) is the default — generous for an interactive
+    #     agent, restrictive enough to keep one runaway loop from
+    #     saturating the apiserver.
+    #   - tool_timeout_s: wall-clock cap on a single tool call. 60s is
+    #     enough for list/describe/apply; raise it if you depend on
+    #     long-running `rollout_status(watch=True)` or Prometheus range
+    #     queries that legitimately need minutes.
+    rate_limit_rpm: int = 120
+    tool_timeout_s: float = 60.0
+
     # Prometheus（可选，监控查询）
     # 显式 URL 优先；未设置则按候选 (namespace, service) 自动探测。
     prometheus_url: str | None = None

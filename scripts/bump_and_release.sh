@@ -73,7 +73,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 else
     # `tomllib` is read-only; we use a tiny in-place rewrite that
     # only touches the project.version line.
-    python - <<PY
+    uv run --no-project python - <<PY
 import re, pathlib
 p = pathlib.Path("$PYPROJECT")
 src = p.read_text(encoding="utf-8")
@@ -90,7 +90,7 @@ TODAY="$(date -u +%Y-%m-%d)"
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "  [dry-run] would promote [Unreleased] → [${NEW_VERSION}] — ${TODAY}"
 else
-python - <<PY
+uv run --no-project python - <<PY
 import re, pathlib
 p = pathlib.Path("$CHANGELOG")
 src = p.read_text(encoding="utf-8")

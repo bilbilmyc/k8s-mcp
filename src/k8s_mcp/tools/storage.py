@@ -203,30 +203,21 @@ def delete_pvc(name: str, namespace: str) -> str:
 def _list_matched_pvcs(
     namespace: str | None, label_selector: str,
 ) -> list[dict]:
-    """Return PVCs matching the selector, as plain dicts."""
+    """Return PVCs matching the selector, as plain dicts.
+
+    `_to_dict` already normalizes k8s objects (calls `.to_dict()` if
+    available, else casts via `dict()`); the previous version of this
+    helper had a second `.to_dict()` call and a manual fallback dict
+    that could never run — both were dead branches because `_to_dict`
+    guarantees a plain dict return.
+    """
     api = _core_v1()
     get_kwargs: dict = {"label_selector": label_selector}
     if namespace:
         ret = api.list_namespaced_persistent_volume_claim(namespace, **get_kwargs)
     else:
         ret = api.list_persistent_volume_claim_for_all_namespaces(**get_kwargs)
-    out = []
-    for item in ret.items:
-        obj = generic._to_dict(item)
-        if hasattr(obj, "to_dict"):
-            obj = obj.to_dict()
-        # The CoreV1Api returns V1PersistentVolumeClaim objects; convert.
-        if not isinstance(obj, dict):
-            obj = {
-                "metadata": {
-                    "name": item.metadata.name,
-                    "namespace": item.metadata.namespace,
-                },
-                "spec": {"volumeName": item.spec.volume_name} if item.spec.volume_name else {},
-                "status": {"phase": item.status.phase} if item.status else {},
-            }
-        out.append(obj)
-    return out
+    return [generic._to_dict(item) for item in ret.items]
 
 
 def bulk_delete_pvc(

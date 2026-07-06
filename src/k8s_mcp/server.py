@@ -160,6 +160,7 @@ def _register_tools(mcp: FastMCP) -> None:
         diagnostics,
         discovery,
         events,
+        explain,
         generic,
         health,
         logs,
@@ -187,6 +188,7 @@ def _register_tools(mcp: FastMCP) -> None:
     events.register(mcp)
     pods.register(mcp)
     diagnostics.register(mcp)
+    explain.register(mcp)
     workload.register(mcp)
     service.register(mcp)
     configmap.register(mcp)

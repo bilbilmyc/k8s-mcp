@@ -40,7 +40,12 @@ from kubernetes.client.rest import ApiException
 from ..client import get_api_client, get_caller_identity  # noqa: F401  (used by tests indirectly)
 from ..config import enforce_write_safety, get_settings
 from ..formatters import short_table
-from ..safety import TokenError, issue_token, verify_token
+from ..safety import (
+    TokenError,
+    assert_caller_matches,
+    issue_token,
+    verify_token,
+)
 from . import generic
 
 logger = logging.getLogger(__name__)
@@ -367,21 +372,8 @@ def _bulk_delete_pvc_impl(
         raise TokenError("Token label_selector does not match this call")
     if (payload.get("namespace") or "") != (namespace or ""):
         raise TokenError("Token namespace does not match this call")
-    # Caller binding check — same defense-in-depth as bulk._verify_bulk_token
-    caller = get_caller_identity()
-    token_caller = payload.get("caller") or {}
-    if token_caller.get("username", "") != caller.get("username", ""):
-        raise TokenError(
-            f"Token caller mismatch: issued for "
-            f"{token_caller.get('username')!r}, current server runs as "
-            f"{caller.get('username')!r}. A leaked token cannot be "
-            f"replayed across MCP servers with different identities."
-        )
-    if token_caller.get("uid", "") != caller.get("uid", ""):
-        raise TokenError(
-            "Token caller UID mismatch — same username but different "
-            "underlying identity (token replay across distinct SAs?)"
-        )
+    # Caller binding — see safety.assert_caller_matches.
+    assert_caller_matches(payload.get("caller"), get_caller_identity())
 
     matched_set = {tuple(p) for p in payload.get("matched_names", [])}
     api = _core_v1()

@@ -170,3 +170,44 @@ def test_delete_preview_returns_token(monkeypatch):
     assert payload["kind"] == "Pod"
     assert payload["name"] == "x"
     assert payload["namespace"] == "default"
+
+
+# =============================================================================
+# assert_caller_matches — shared caller-binding check used by bulk + storage
+# =============================================================================
+
+
+def test_assert_caller_matches_passes_when_identical():
+    safety.assert_caller_matches(
+        {"username": "alice", "uid": "u-1"},
+        {"username": "alice", "uid": "u-1"},
+    )
+
+
+def test_assert_caller_matches_rejects_username_mismatch():
+    with pytest.raises(safety.TokenError, match="caller mismatch"):
+        safety.assert_caller_matches(
+            {"username": "alice", "uid": "u-1"},
+            {"username": "mallory", "uid": "u-1"},
+        )
+
+
+def test_assert_caller_matches_rejects_uid_mismatch():
+    """Same username, different UID — username can collide across
+    SAs/namespaces, but UID is the stable identifier. Defense-in-depth
+    against token replay across distinct ServiceAccounts."""
+    with pytest.raises(safety.TokenError, match="UID mismatch"):
+        safety.assert_caller_matches(
+            {"username": "alice", "uid": "u-1"},
+            {"username": "alice", "uid": "u-2"},
+        )
+
+
+def test_assert_caller_matches_treats_none_token_caller_as_empty():
+    """A token with no embedded caller dict (older payload or hand-rolled
+    token) must be rejected — never silently accepted."""
+    with pytest.raises(safety.TokenError):
+        safety.assert_caller_matches(
+            None,
+            {"username": "alice", "uid": "u-1"},
+        )

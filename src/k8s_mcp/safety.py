@@ -115,18 +115,37 @@ def assert_payload_matches(payload: dict[str, Any], *, kind: str, name: str,
             f"{payload.get('grace_period_seconds')} vs {grace_period_seconds}"
         )
     if caller is not None:
-        token_caller = payload.get("caller") or {}
-        if token_caller.get("username", "") != caller.get("username", ""):
-            raise TokenError(
-                f"Token caller mismatch: issued for "
-                f"{token_caller.get('username')!r}, current server runs as "
-                f"{caller.get('username')!r}. A leaked token cannot be "
-                f"replayed across MCP servers with different identities."
-            )
-        # UID check is a defense-in-depth: username is the primary
-        # identity claim in Kubernetes, UID is stable across renames.
-        if token_caller.get("uid", "") != caller.get("uid", ""):
-            raise TokenError(
-                "Token caller UID mismatch — same username but different "
-                "underlying identity (token replay across distinct SAs?)"
-            )
+        assert_caller_matches(payload.get("caller"), caller)
+
+
+def assert_caller_matches(
+    token_caller: dict | None, current_caller: dict,
+) -> None:
+    """Reject tokens issued for a different MCP-server kube identity.
+
+    The bulk tools (`bulk_set_image`, `bulk_restart`, `bulk_scale`,
+    `bulk_delete_pvc`) all sign their tokens with the issuer's
+    `get_caller_identity()` snapshot. A leaked token replayed against
+    a different MCP server (which is running as a different ServiceAccount
+    / user) must be rejected — otherwise the "two-step confirmation"
+    pattern collapses into "anyone with the token can execute".
+
+    `token_caller` is the embedded `{"username", "uid"}` dict from the
+    token's payload; `current_caller` is the live `get_caller_identity()`
+    result. Mismatch on either field raises TokenError.
+    """
+    tc = token_caller or {}
+    if tc.get("username", "") != current_caller.get("username", ""):
+        raise TokenError(
+            f"Token caller mismatch: issued for "
+            f"{tc.get('username')!r}, current server runs as "
+            f"{current_caller.get('username')!r}. A leaked token cannot be "
+            "replayed across MCP servers with different identities."
+        )
+    # UID check is a defense-in-depth: username is the primary identity
+    # claim in Kubernetes, UID is stable across renames.
+    if tc.get("uid", "") != current_caller.get("uid", ""):
+        raise TokenError(
+            "Token caller UID mismatch — same username but different "
+            "underlying identity (token replay across distinct SAs?)"
+        )

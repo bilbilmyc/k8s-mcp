@@ -57,7 +57,12 @@ from kubernetes.client.rest import ApiException
 from ..client import get_caller_identity
 from ..config import enforce_write_safety, get_settings
 from ..formatters import short_table
-from ..safety import TokenError, issue_token, verify_token
+from ..safety import (
+    TokenError,
+    assert_caller_matches,
+    issue_token,
+    verify_token,
+)
 from . import generic
 
 logger = logging.getLogger(__name__)
@@ -191,23 +196,10 @@ def _verify_bulk_token(token: str, *, expected_op: str) -> dict:
             f"Token was issued for op={payload.get('op')!r}, "
             f"but you called an op={expected_op!r} tool with it."
         )
-    # Caller binding check — same defense-in-depth as
-    # safety.assert_payload_matches. A token issued by another MCP
-    # process running as a different user is rejected here.
-    caller = get_caller_identity()
-    token_caller = payload.get("caller") or {}
-    if token_caller.get("username", "") != caller.get("username", ""):
-        raise TokenError(
-            f"Token caller mismatch: issued for "
-            f"{token_caller.get('username')!r}, current server runs as "
-            f"{caller.get('username')!r}. A leaked token cannot be "
-            f"replayed across MCP servers with different identities."
-        )
-    if token_caller.get("uid", "") != caller.get("uid", ""):
-        raise TokenError(
-            "Token caller UID mismatch — same username but different "
-            "underlying identity (token replay across distinct SAs?)"
-        )
+    # Caller binding — see safety.assert_caller_matches. A token issued
+    # by another MCP process running as a different user is rejected
+    # here so a leaked token can't be replayed across identities.
+    assert_caller_matches(payload.get("caller"), get_caller_identity())
     return payload
 
 

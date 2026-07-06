@@ -161,9 +161,7 @@ def rollout_undo(
             raise LookupError(f"StatefulSet '{namespace}/{name}' not found") from e
         raise
 
-    revs = api.list_namespaced_controller_revision(namespace, label_selector=(
-        f"app.kubernetes.io/name={name}" if False else None
-    ))
+    revs = api.list_namespaced_controller_revision(namespace, label_selector=None)
     # Find the current revision; pick the one before it
     cur_rev = (ss.status.current_revision or "").split(",")[0].strip()
     rev_list = sorted(revs.items, key=lambda r: r.revision, reverse=True)

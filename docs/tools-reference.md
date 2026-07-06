@@ -20,7 +20,7 @@
 
 ### 通用查询（CRD 感知）
 
-- `list_resources(kind, namespace=None, label_selector=None, api_version=None, wide=False)` — 任意 Kind；CRD 需显式传 `api_version`
+- `list_resources(kind, namespace=None, label_selector=None, field_selector=None, limit=None, api_version=None, wide=False)` — 任意 Kind；CRD 需显式传 `api_version`；`field_selector` / `limit` 推到 apiserver 端过滤；命中 `limit` 时 footer 提示可加 selector 或提高 limit
 - `get_resource(kind, name, namespace=None, api_version=None)` — 完整 JSON（CRD 感知）
 - `get_resource_yaml(kind, name, namespace=None, reveal_secrets=False, api_version=None, include_managed_fields=False)` — YAML 清单；Secret 默认脱敏
 - `describe_resource(kind, name, namespace=None, api_version=None)` — kubectl-describe 风格摘要
@@ -38,7 +38,7 @@
 
 - `find_images(image_substring, namespace=None, kinds=None)` — 扫所有工作负载找匹配 image
 - `list_pods(namespace=None, label_selector=None, field_selector=None, include_all=False)` — Pod 列表（PHASE / RESTARTS / NODE）
-- `list_events(namespace=None, field_selector=None, warning_only=False, limit=50)` — 集群 / namespace 事件
+- `list_events(namespace=None, namespaces=None, field_selector=None, warning_only=False, limit=50)` — 集群 / namespace 事件；`namespaces=["a","b"]` 多 ns 并行 fan-out 后按 lastTimestamp 降序合并，避免误把单 ns 查询扩到全集群
 - `get_events_for_object(kind, name, namespace=None, limit=50)` — 单个对象的事件
 - `get_pod_logs(pod_name|label_selector, namespace, container=None, tail_lines=None, since_seconds=None, since_time=None, until_time=None, strict_time=False, previous=False, timestamps=False, pattern=None, context_lines=0, max_bytes=1MiB, output_format="text|json")` — 详见 [tools.md → `get_pod_logs`](./tools.md#get_pod_logs)
 - `get_configmap(name, namespace)` — ConfigMap 内容
@@ -67,6 +67,7 @@
 
 - `notify(message, level="info", notifier_name=None, title=None)` — 把只读结果推到 webhook；按 notifier 配置的 `type` 走不同 payload：
   - `feishu` 纯文本 / `feishu_post` 飞书富文本 / **`feishu_card`** 飞书交互卡片（header 颜色随 level 变化，每个 `## 章节` 渲染成独立 lark_md 块，生产推荐） / `slack` / `wecom` / `generic`
+  - **URL scheme gate**：默认仅 `https://`；`http://` 需 `K8S_MCP_NOTIFIER_URL_ALLOW_HTTP=true`（local-dev 用）；`file://` / `gopher://` 等一律拒收
 
 ---
 
@@ -107,9 +108,9 @@
 
 ### RBAC / NetworkPolicy / ServiceAccount
 
-- `create_role(name, namespace, rules)`
+- `create_role(name, namespace, rules, allow_wildcard=False)` — 默认拒绝 `verbs=["*"] ∧ resources=["*"] ∧ apiGroups=["*"]` 三重通配（= cluster-admin），必须显式 `allow_wildcard=True` 才能建；防漏 `resources` / `apiGroups` 时静默授予 cluster-admin
 - `create_rolebinding(name, namespace, role, subjects)`
-- `create_clusterrole(name, rules)`
+- `create_clusterrole(name, rules, allow_wildcard=False)` — 同上
 - `create_clusterrolebinding(name, role, subjects)`
 - `create_serviceaccount(name, namespace, image_pull_secrets=[])` — `image_pull_secrets` 可选
 - `create_networkpolicy(name, namespace, pod_selector, policy_types=["Ingress"|"Egress"], ingress=[], egress=[])`

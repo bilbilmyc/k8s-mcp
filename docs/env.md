@@ -52,7 +52,7 @@ k8s-mcp 通过 pydantic-settings 读取环境变量，所有变量以 `K8S_MCP_`
 | --- | --- | --- |
 | `K8S_MCP_READ_ONLY` | `false` | `true` 时所有写工具（apply / create / patch / delete）拒绝并抛 `PermissionError` |
 | `K8S_MCP_NAMESPACE_ALLOWLIST` | (空) | 逗号分隔的 namespace 白名单。设置后，**仅这些 namespace 允许写**；cluster-scoped 资源（无 namespace）的写入也会被拒。读取不受影响。 |
-| `K8S_MCP_DELETE_TOKEN_SECRET` | `change-me` | 删除二次确认 token 的 HMAC 签名密钥。**生产环境务必用 `openssl rand -hex 32` 重新生成**。 |
+| `K8S_MCP_DELETE_TOKEN_SECRET` | `change-me` | 删除二次确认 token 的 HMAC 签名密钥。**必填**：`K8S_MCP_READ_ONLY=false` 时若保留字面默认值 `change-me` 或留空，server 拒绝启动（v0.4.2 起从软警告升级为启动闸门）。生产用 `openssl rand -hex 32` 生成；任何持有源码的人都能伪造默认值签名的 token，所以默认密钥等同于无认证。 |
 | `K8S_MCP_DELETE_TOKEN_TTL_SECONDS` | `300` | token 有效期（秒），默认 5 分钟 |
 
 ### Prometheus（可选，监控查询）
@@ -105,6 +105,7 @@ find_prometheus_service(namespace=None)
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `K8S_MCP_NOTIFIERS` | (空) | JSON 数组，每条 `{name, type, url, cluster_label?}`。`type` 支持 `feishu` / `feishu_post` / `feishu_card` / `slack` / `wecom` / `generic`，由 `notify` 工具按 type 拼 payload。生产推荐 `feishu_card`：交互卡片 + header 颜色随 `level` 变化 + 每个 `## 章节` 独立渲染。 |
+| `K8S_MCP_NOTIFIER_URL_ALLOW_HTTP` | `false` | 默认拒收非 `https` 的 webhook URL（防 SSRF + cleartext 泄露）。设 `true` 允许 `http://`（**仅 local-dev hook 用**，生产严禁）。`file://` / `gopher://` 等其他 scheme 一律拒收。 |
 
 ### dev / 离线
 

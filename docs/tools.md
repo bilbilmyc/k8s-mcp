@@ -161,7 +161,8 @@ API group 找唯一匹配。
    `kind / name / namespace / grace_period` 必须匹配。
 
 Token 是 HMAC-SHA256 签名（`K8S_MCP_DELETE_TOKEN_SECRET`），默认 5 分钟过期。
-**生产环境务必把 `K8S_MCP_DELETE_TOKEN_SECRET` 用 `openssl rand -hex 32` 改掉**。
+**v0.4.2 起**：写模式下若保留字面默认值 `change-me` 或留空，server 拒绝启动（之前只是软警告）。
+生产用 `openssl rand -hex 32` 生成密钥——任何持有源码的人都能伪造默认值签名的 token，所以默认密钥等同于无认证。
 
 ### 一步删除工具（恢复友好，无级联）
 

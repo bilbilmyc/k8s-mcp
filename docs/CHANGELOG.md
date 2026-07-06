@@ -6,6 +6,32 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-07-06
+
+### Security
+- **RBAC triple-wildcard blocker** — `create_role` / `create_clusterrole` now reject the dangerous `verbs=["*"] ∧ resources=["*"] ∧ apiGroups=["*"]` triple (i.e. cluster-admin) unless `allow_wildcard=True`. Footgun: a missing `resources` or `apiGroups` entry has silently granted cluster-admin to whoever applies the Role.
+- **HMAC delete-token startup gate** — the server refuses to start when `K8S_MCP_DELETE_TOKEN_SECRET` is the literal default value `change-me` (or empty) with writes enabled. Real deployments must set a per-environment secret; the default was previously a soft warning that any operator could ignore.
+- **Notifier URL scheme gate** — `_validate_notifier` rejects `http://`, `file://`, `gopher://`, and other non-https schemes by default, closing SSRF + cleartext-leak paths. Opt in with `K8S_MCP_NOTIFIER_URL_ALLOW_HTTP=true` for local-dev hooks.
+- **Caller-bound confirmation tokens** — destructive-op tokens (`bulk_*`, `delete_resource`) now embed the MCP server's kube identity (`username` + `uid`) and reject on identity mismatch. A leaked token can no longer be replayed across MCP servers running as different ServiceAccounts.
+- **Secret reveal audit log** — `get_secret_value(reveal=True)` now emits a structured audit line (`secret_reveal name=… namespace=… key=… caller_user=… caller_uid=…`). The reveal is the most damaging read in the toolset; before this it had no audit trail.
+
+### Performance
+- **Prometheus wide-scan** — replaced N×`list_namespaced_service` with one `list_service_for_all_namespaces` call. On a 50-ns cluster this is one apiserver round-trip instead of 50.
+- **Bulk apply N+1 fix** — `_execute_patches` no longer re-reads each workload to verify existence before patching. The token's `matched_names` is the authoritative set.
+- **`list_resources` server-side selectors** — added `field_selector=…` and `limit=…` parameters that push filtering to the apiserver, plus a footer hint when the response hits the limit so the agent knows there's more to narrow against.
+- **Multi-pod log fan-out** — `_fetch_logs_multi` now uses a `ThreadPoolExecutor` (max 8 workers) when ≥ 5 pods match. Five-pod × 60ms fetches go from ~300ms serial to ~60ms parallel; below the threshold we stay serial to keep small-query call order stable for existing tests.
+- **Multi-namespace events** — `_section_recent_warnings` no longer silently broadens a 2+-namespace query to cluster-wide. New `events.list_events(namespaces=[...])` fans out per-namespace and merges by last-seen desc.
+
+### Fixed
+- `health._section_recent_warnings` was passing a 2+-entry `namespaces` list to a path that collapsed to `None`, broadening the query to cluster-wide. Now properly per-namespace.
+- `rollout.rollout_undo_statefulset` had a dead `if False else None` branch in the `label_selector` arg — leftover scaffolding cleaned up.
+- `storage._list_matched_pvcs` had a second `.to_dict()` call after `_to_dict` already returned a plain dict, plus an unreachable fallback that could have lost `metadata.uid/labels` if it ever did fire.
+
+### Internal
+- `health._count_from_section` helper deleted — its only call site dropped the value on the floor.
+- `safety.assert_caller_matches` extracted as a shared helper; `bulk._verify_bulk_token` and `storage.bulk_delete_pvc` now call it instead of duplicating the username/UID mismatch logic.
+- `_wide_scan_prometheus_matches` now accepts `namespace=` and handles both single-namespace and cluster-wide discovery. `find_prometheus_service` no longer branches on namespace; the helper owns the dispatch.
+
 ## [0.4.1] — 2026-07-05
 
 ### Fixed

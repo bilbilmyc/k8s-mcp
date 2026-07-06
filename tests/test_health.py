@@ -403,6 +403,50 @@ def test_section_recent_warnings_delegates_to_events(monkeypatch):
     assert "OOMKilled" in out
 
 
+def test_section_recent_warnings_multi_namespace_does_not_silently_broaden(
+    monkeypatch,
+):
+    """Regression for P5: when the caller passes a 2+ entry `namespaces`
+    list, the section must pass it through to `list_events(namespaces=…)`
+    instead of silently dropping to cluster-wide. Before the fix this
+    query for two specific namespaces would have surfaced warnings from
+    kube-system / monitoring / anywhere else — making the snapshot
+    noisy and the per-namespace scope a lie."""
+    captured: dict = {}
+
+    def fake_list_events(**kw):
+        captured.update(kw)
+        return "TYPE REASON OBJECT MESSAGE\nWarning BackOff Pod/x OOMKilled"
+
+    monkeypatch.setattr(health.events, "list_events", fake_list_events)
+    out = health._section_recent_warnings(
+        minutes=60, namespaces=["app", "data"],
+    )
+    # The `namespaces` kwarg must reach list_events with all entries
+    # intact — not collapsed to the first element, not dropped to None.
+    assert captured.get("namespaces") == ["app", "data"]
+    # And the rendered output still surfaces the table from list_events.
+    assert "Warning" in out
+    assert "OOMKilled" in out
+
+
+def test_section_recent_warnings_single_namespace_still_works(monkeypatch):
+    """Single-namespace queries still go through the same path — this
+    is the dominant case for the snapshot, so we want to be sure the
+    multi-namespace fan-out didn't regress the simple path."""
+    captured: dict = {}
+
+    def fake_list_events(**kw):
+        captured.update(kw)
+        return "TYPE REASON OBJECT MESSAGE\nWarning BackOff Pod/x OOMKilled"
+
+    monkeypatch.setattr(health.events, "list_events", fake_list_events)
+    health._section_recent_warnings(minutes=60, namespaces=["app"])
+    assert captured.get("namespaces") == ["app"]
+    assert captured.get("warning_only") is True
+    assert captured.get("limit") == 20
+
+
 # ---------- end-to-end cluster_health_snapshot -----------------------------
 
 

@@ -200,3 +200,141 @@ def test_get_events_for_object_cluster_scoped(monkeypatch):
                                        namespace=None)
     assert captured.get("all_ns") is True
     assert "no events" in out
+
+
+# =============================================================================
+# list_events — multi-namespace support (P5)
+# =============================================================================
+
+
+def _ev(kind, name, reason, msg, *, ts=None):
+    """Build a fake k8s Event object with the fields _collect_events reads."""
+    from datetime import datetime, timezone
+    e = type("E", (), {})()
+    e.type = "Warning"
+    e.reason = reason
+    e.involved_object = type("O", (), {"kind": kind, "name": name})()
+    e.message = msg
+    e.last_timestamp = ts or datetime(2026, 1, 1, tzinfo=timezone.utc)
+    e.first_timestamp = None
+    e.event_time = None
+    e.metadata = type("M", (), {"creation_timestamp": None})()
+    e.count = 1
+    return e
+
+
+def test_list_events_namespaces_param_empty_returns_no_events(monkeypatch):
+    """An empty namespaces list is a valid query — caller wanted 'no
+    namespaces', not 'all namespaces'. Surface "(no events)" cleanly."""
+    # If anything tries to hit the apiserver the test should fail because
+    # _core_v1 is not monkeypatched; provide one that asserts non-call.
+    called = {"n": 0}
+
+    class _CoreV1:
+        def list_namespaced_event(self, *a, **kw):
+            called["n"] += 1
+            return _FakeList([])
+
+        def list_event_for_all_namespaces(self, *a, **kw):
+            called["n"] += 1
+            return _FakeList([])
+
+    monkeypatch.setattr(events, "_core_v1", lambda: _CoreV1())
+    out = events.list_events(namespaces=[])
+    assert out == "(no events)"
+    # Empty list short-circuits before any apiserver call.
+    assert called["n"] == 0
+
+
+def test_list_events_namespaces_single_collapses_to_namespace(monkeypatch):
+    """A single-element namespaces list takes the same code path as the
+    legacy `namespace=` arg — no per-namespace fan-out overhead."""
+    captured: dict = {}
+
+    class _CoreV1:
+        def list_namespaced_event(self, namespace, field_selector=None):
+            captured["ns"] = namespace
+            return _FakeList([_ev("Pod", "web", "BackOff", "boom")])
+
+    monkeypatch.setattr(events, "_core_v1", lambda: _CoreV1())
+    out = events.list_events(namespaces=["app"], warning_only=True)
+    assert captured["ns"] == "app"
+    assert "BackOff" in out
+
+
+def test_list_events_namespaces_multi_fans_out_per_namespace(monkeypatch):
+    """2+ namespaces → call list_namespaced_event once per namespace,
+    never the cluster-wide list. Before P5 this would silently broaden
+    to list_event_for_all_namespaces and pollute the snapshot with
+    unrelated namespaces' noise."""
+    captured: dict = {"nss": []}
+
+    class _CoreV1:
+        def list_namespaced_event(self, namespace, field_selector=None):
+            captured["nss"].append(namespace)
+            if namespace == "app":
+                return _FakeList([_ev("Pod", "web", "BackOff", "restarting")])
+            return _FakeList([_ev("Pod", "db", "OOMKilled", "killed")])
+
+        def list_event_for_all_namespaces(self, *a, **kw):
+            captured["all_ns_called"] = True
+            return _FakeList([])
+
+    monkeypatch.setattr(events, "_core_v1", lambda: _CoreV1())
+    out = events.list_events(namespaces=["app", "data"], warning_only=True)
+    assert sorted(captured["nss"]) == ["app", "data"]
+    assert not captured.get("all_ns_called")
+    # Both rows present in output
+    assert "BackOff" in out
+    assert "OOMKilled" in out
+
+
+def test_list_events_namespaces_multi_sorts_by_recency(monkeypatch):
+    """When fanned-out results merge, the newest events surface first —
+    not the order of namespace iteration. Verified by stamping distinct
+    lastTimestamp values and checking the rendered row order."""
+    from datetime import datetime, timedelta, timezone
+
+    newer = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    older = newer - timedelta(hours=2)
+
+    class _CoreV1:
+        def list_namespaced_event(self, namespace, field_selector=None):
+            # "app" returns the older event; "data" returns the newer.
+            if namespace == "app":
+                return _FakeList([_ev("Pod", "web", "BackOff", "old", ts=older)])
+            return _FakeList([_ev("Pod", "db", "OOMKilled", "new", ts=newer)])
+
+    monkeypatch.setattr(events, "_core_v1", lambda: _CoreV1())
+    out = events.list_events(namespaces=["app", "data"], warning_only=True)
+    # Newer event renders before the older one.
+    assert out.index("OOMKilled") < out.index("BackOff")
+
+
+def test_list_events_namespaces_multi_truncates_to_limit(monkeypatch):
+    """Merged fan-out truncates to `limit`, not 2×limit. We push 4
+    events (2 per namespace) and ask for 3 → exactly 3 rendered."""
+    from datetime import datetime, timedelta, timezone
+    base = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+
+    def _events_for(ns):
+        # 2 events per namespace, with descending timestamps
+        return _FakeList([
+            _ev("Pod", f"{ns}-1", f"R-{ns}-1", f"m-{ns}-1",
+                ts=base - timedelta(minutes=0)),
+            _ev("Pod", f"{ns}-2", f"R-{ns}-2", f"m-{ns}-2",
+                ts=base - timedelta(minutes=10)),
+        ])
+
+    class _CoreV1:
+        def list_namespaced_event(self, namespace, field_selector=None):
+            return _events_for(namespace)
+
+    monkeypatch.setattr(events, "_core_v1", lambda: _CoreV1())
+    out = events.list_events(
+        namespaces=["app", "data"], warning_only=True, limit=3,
+    )
+    # Each rendered row corresponds to a REASON. Count REASON tokens.
+    reasons = [r for r in ["R-app-1", "R-app-2", "R-data-1", "R-data-2"]
+               if r in out]
+    assert len(reasons) == 3, f"expected 3 reasons, got {reasons}"

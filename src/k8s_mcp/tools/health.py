@@ -267,9 +267,11 @@ def _section_recent_warnings(minutes: int, namespaces: list[str] | None) -> str:
         # take a "since" arg), but listing top-N warning events sorted by
         # lastTimestamp descending and truncating client-side is good
         # enough for an MVP snapshot.
-        ns = namespaces[0] if namespaces and len(namespaces) == 1 else None
+        #
+        # Pass `namespaces` (plural) so a 2+-entry query fans out per
+        # namespace instead of silently broadening to cluster-wide.
         out = events.list_events(
-            namespace=ns,
+            namespaces=namespaces,
             warning_only=True,
             limit=20,
         )

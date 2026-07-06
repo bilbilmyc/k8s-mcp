@@ -71,19 +71,33 @@ def verify_token(token: str, secret: str) -> dict[str, Any]:
 
 
 def make_delete_payload(kind: str, name: str, namespace: str | None,
-                        grace_period_seconds: int) -> dict[str, Any]:
-    """Payload to sign when issuing a delete confirmation token."""
-    return {
+                        grace_period_seconds: int,
+                        caller: dict | None = None) -> dict[str, Any]:
+    """Payload to sign when issuing a delete confirmation token.
+
+    `caller` binds the token to the MCP server's authenticated kube
+    identity (`{"username", "uid", "groups"}`). A leaked token cannot
+    be replayed by a different MCP process running as a different user
+    — `assert_payload_matches` rejects caller mismatches.
+    """
+    payload: dict[str, Any] = {
         "op": "delete",
         "kind": kind,
         "name": name,
         "namespace": namespace or "",
         "grace_period_seconds": int(grace_period_seconds),
     }
+    if caller is not None:
+        payload["caller"] = {
+            "username": caller.get("username", "(unknown)"),
+            "uid": caller.get("uid", ""),
+        }
+    return payload
 
 
 def assert_payload_matches(payload: dict[str, Any], *, kind: str, name: str,
-                            namespace: str | None, grace_period_seconds: int) -> None:
+                            namespace: str | None, grace_period_seconds: int,
+                            caller: dict | None = None) -> None:
     """Ensure the token's payload matches the current delete request."""
     if payload.get("op") != "delete":
         raise TokenError("Token was not issued for a delete operation")
@@ -100,3 +114,19 @@ def assert_payload_matches(payload: dict[str, Any], *, kind: str, name: str,
             f"Token grace_period mismatch: "
             f"{payload.get('grace_period_seconds')} vs {grace_period_seconds}"
         )
+    if caller is not None:
+        token_caller = payload.get("caller") or {}
+        if token_caller.get("username", "") != caller.get("username", ""):
+            raise TokenError(
+                f"Token caller mismatch: issued for "
+                f"{token_caller.get('username')!r}, current server runs as "
+                f"{caller.get('username')!r}. A leaked token cannot be "
+                f"replayed across MCP servers with different identities."
+            )
+        # UID check is a defense-in-depth: username is the primary
+        # identity claim in Kubernetes, UID is stable across renames.
+        if token_caller.get("uid", "") != caller.get("uid", ""):
+            raise TokenError(
+                "Token caller UID mismatch — same username but different "
+                "underlying identity (token replay across distinct SAs?)"
+            )

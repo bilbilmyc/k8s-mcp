@@ -12,6 +12,7 @@ HTTP 连接），只有认证字段变化时才重新构造。
 from __future__ import annotations
 
 import logging
+import time
 
 from kubernetes import client
 
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 _cached_client: client.ApiClient | None = None
 _cached_key: tuple | None = None
+_caller_identity_cache: dict | None = None
+_caller_identity_ts: float = 0.0
+_CALLER_IDENTITY_TTL = 300  # 5 min — short enough to pick up kubeconfig reload
 
 
 # HTTP timeout / pool defaults — applied to every Configuration we hand to
@@ -84,3 +88,57 @@ def reset_client_cache() -> None:
     global _cached_client, _cached_key
     _cached_client = None
     _cached_key = None
+
+
+def reset_caller_identity_cache() -> None:
+    """Drop the cached caller identity (used by tests)."""
+    global _caller_identity_cache, _caller_identity_ts
+    _caller_identity_cache = None
+    _caller_identity_ts = 0.0
+
+
+def get_caller_identity() -> dict:
+    """Return the kube identity this MCP server is running as.
+
+    Shape: `{"username": str, "uid": str, "groups": list[str]}`.
+
+    Used by destructive-op tools (delete / bulk_*) to bind their
+    HMAC-signed confirmation tokens to the authenticated identity. A
+    leaked token issued by MCP server A cannot be replayed against MCP
+    server B running as a different user, because the verify step
+    rejects the caller mismatch.
+
+    The result is cached for 5 minutes — long enough that a busy
+    `delete_resource` session doesn't pay 2 apiserver round-trips per
+    call, short enough that a kubeconfig / ServiceAccount token reload
+    picks up within the TTL. Cache miss + apiserver failure falls back
+    to `{"username": "(unknown)", ...}` so the call can still complete
+    (but a token bound to "(unknown)" is treated as forged on any
+    later verify where the apiserver is reachable, which is the
+    intended fail-closed behavior).
+    """
+    global _caller_identity_cache, _caller_identity_ts
+    now = time.time()
+    if (
+        _caller_identity_cache is not None
+        and (now - _caller_identity_ts) < _CALLER_IDENTITY_TTL
+    ):
+        return _caller_identity_cache
+    identity: dict = {"username": "(unknown)", "uid": "", "groups": []}
+    try:
+        authn = client.AuthenticationV1Api(get_api_client())
+        review = authn.create_self_subject_review(body={})
+        identity["username"] = (
+            getattr(review.status, "username", None) or "(anonymous)"
+        )
+        identity["uid"] = getattr(review.status, "uid", None) or ""
+        identity["groups"] = list(getattr(review.status, "groups", None) or [])
+    except Exception as e:  # noqa: BLE001
+        # Apiserver unreachable / RBAC denied / etc. — fall back to
+        # "(unknown)" so the call can still complete. The token verify
+        # side will see this as a mismatch if the apiserver is later
+        # reachable, which is the intended fail-closed behavior.
+        logger.debug("get_caller_identity: SelfSubjectReview failed: %s", e)
+    _caller_identity_cache = identity
+    _caller_identity_ts = now
+    return identity

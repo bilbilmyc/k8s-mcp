@@ -24,6 +24,7 @@ from typing import Any
 from kubernetes import dynamic
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
 
+from ..client import get_caller_identity
 from ..config import Settings, enforce_write_safety, get_settings
 from ..formatters import mask_secret_data, to_yaml
 from ..safety import (
@@ -101,6 +102,7 @@ def delete_resource(
         name=name,
         namespace=namespace,
         grace_period_seconds=grace_period_seconds,
+        caller=get_caller_identity(),
     )
 
     return _execute(kind, name, namespace, grace_period_seconds, settings)
@@ -117,7 +119,10 @@ def _preview(kind: str, name: str, namespace: str | None,
         obj = mask_secret_data(obj)
     preview_yaml = to_yaml(obj)
 
-    payload = make_delete_payload(kind, name, namespace, grace_period_seconds)
+    payload = make_delete_payload(
+        kind, name, namespace, grace_period_seconds,
+        caller=get_caller_identity(),
+    )
     token = issue_token(
         payload,
         secret=settings.delete_token_secret,

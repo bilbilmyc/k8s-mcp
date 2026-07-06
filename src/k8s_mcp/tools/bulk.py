@@ -54,6 +54,7 @@ from typing import Any
 import yaml
 from kubernetes.client.rest import ApiException
 
+from ..client import get_caller_identity
 from ..config import enforce_write_safety, get_settings
 from ..formatters import short_table
 from ..safety import TokenError, issue_token, verify_token
@@ -165,6 +166,15 @@ def _patch_replicas(workload: dict, replicas: int) -> dict:
 def _issue_bulk_token(payload: dict) -> str:
     settings = get_settings()
     enforce_write_safety(settings)
+    # Bind the token to the MCP server's authenticated identity so a
+    # leaked token cannot be replayed by a different MCP process running
+    # as a different user (see safety.assert_payload_matches).
+    caller = get_caller_identity()
+    payload = dict(payload)
+    payload["caller"] = {
+        "username": caller.get("username", "(unknown)"),
+        "uid": caller.get("uid", ""),
+    }
     return issue_token(payload, settings.delete_token_secret,
                        settings.delete_token_ttl_seconds)
 
@@ -180,6 +190,23 @@ def _verify_bulk_token(token: str, *, expected_op: str) -> dict:
         raise TokenError(
             f"Token was issued for op={payload.get('op')!r}, "
             f"but you called an op={expected_op!r} tool with it."
+        )
+    # Caller binding check — same defense-in-depth as
+    # safety.assert_payload_matches. A token issued by another MCP
+    # process running as a different user is rejected here.
+    caller = get_caller_identity()
+    token_caller = payload.get("caller") or {}
+    if token_caller.get("username", "") != caller.get("username", ""):
+        raise TokenError(
+            f"Token caller mismatch: issued for "
+            f"{token_caller.get('username')!r}, current server runs as "
+            f"{caller.get('username')!r}. A leaked token cannot be "
+            f"replayed across MCP servers with different identities."
+        )
+    if token_caller.get("uid", "") != caller.get("uid", ""):
+        raise TokenError(
+            "Token caller UID mismatch — same username but different "
+            "underlying identity (token replay across distinct SAs?)"
         )
     return payload
 

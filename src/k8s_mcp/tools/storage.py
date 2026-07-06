@@ -37,7 +37,7 @@ import yaml
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
-from ..client import get_api_client  # noqa: F401  (used by tests indirectly)
+from ..client import get_api_client, get_caller_identity  # noqa: F401  (used by tests indirectly)
 from ..config import enforce_write_safety, get_settings
 from ..formatters import short_table
 from ..safety import TokenError, issue_token, verify_token
@@ -339,12 +339,17 @@ def _bulk_delete_pvc_impl(
         )
 
     if not confirm:
+        caller = get_caller_identity()
         token = issue_token(
             {
                 "op": "bulk_delete_pvc",
                 "label_selector": label_selector,
                 "namespace": namespace or "",
                 "matched_names": [(p["NAMESPACE"], p["NAME"]) for p in plans],
+                "caller": {
+                    "username": caller.get("username", "(unknown)"),
+                    "uid": caller.get("uid", ""),
+                },
             },
             settings.delete_token_secret,
             settings.delete_token_ttl_seconds,
@@ -371,6 +376,21 @@ def _bulk_delete_pvc_impl(
         raise TokenError("Token label_selector does not match this call")
     if (payload.get("namespace") or "") != (namespace or ""):
         raise TokenError("Token namespace does not match this call")
+    # Caller binding check — same defense-in-depth as bulk._verify_bulk_token
+    caller = get_caller_identity()
+    token_caller = payload.get("caller") or {}
+    if token_caller.get("username", "") != caller.get("username", ""):
+        raise TokenError(
+            f"Token caller mismatch: issued for "
+            f"{token_caller.get('username')!r}, current server runs as "
+            f"{caller.get('username')!r}. A leaked token cannot be "
+            f"replayed across MCP servers with different identities."
+        )
+    if token_caller.get("uid", "") != caller.get("uid", ""):
+        raise TokenError(
+            "Token caller UID mismatch — same username but different "
+            "underlying identity (token replay across distinct SAs?)"
+        )
 
     matched_set = {tuple(p) for p in payload.get("matched_names", [])}
     api = _core_v1()

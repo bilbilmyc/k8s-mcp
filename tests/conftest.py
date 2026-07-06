@@ -32,14 +32,38 @@ def _clean_env(monkeypatch):
     Default-inject a real-looking HMAC secret so the `enforce_write_safety`
     guard (refuses the source-tree literal 'change-me') does not fire
     spuriously on tests that exercise delete/bulk flows without explicitly
-    setting K8S_MCP_DELETE_TOKEN_SECRET.
+    setting K8S_MCP_DELETE_TOKEN_SECRET. Also mock the caller-identity
+    helper so destructive-op tokens get a stable, predictable identity
+    bound to them.
     """
     for k in _K8S_MCP_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("K8S_MCP_DELETE_TOKEN_SECRET", "test-secret-not-change-me")
     reset_settings_cache()
+
+    # Stable caller identity for tests so token-issue + token-verify
+    # stay in the same identity without standing up an apiserver.
+    from k8s_mcp.client import get_caller_identity, reset_caller_identity_cache
+    reset_caller_identity_cache()
+    monkeypatch.setattr(
+        "k8s_mcp.client.get_caller_identity",
+        lambda: {"username": "test-user", "uid": "test-uid", "groups": ["system:mcp"]},
+    )
+    # The tools import the symbol directly — patch on the calling side too.
+    for mod in ("k8s_mcp.tools.delete_tool",
+                "k8s_mcp.tools.bulk",
+                "k8s_mcp.tools.storage"):
+        try:
+            monkeypatch.setattr(
+                f"{mod}.get_caller_identity",
+                lambda: {"username": "test-user", "uid": "test-uid", "groups": ["system:mcp"]},
+            )
+        except AttributeError:
+            pass  # tool module didn't import it (e.g. test modules)
+
     yield
     reset_settings_cache()
+    reset_caller_identity_cache()
 
 
 @pytest.fixture

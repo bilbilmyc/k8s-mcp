@@ -67,17 +67,17 @@ def main() -> int:
 
     # Tool count
     tool_count = count_registered_tools()
-    if tool_count != 70:
+    if tool_count != 80:
         failures.append(
-            f"Tool count drift: README claims 70 tools but code has {tool_count}. "
-            "Update README.md and docs/tools-reference.md."
+            f"Tool count drift: code has {tool_count} tools, pre_release_check.py expects 80. "
+            "Update pyproject.toml description + docs/tools-reference.md + this script."
         )
 
     # Test count (skip in CI-only environment if pytest unavailable — but here we have it)
     test_count = count_tests()
     if test_count < 0:
         failures.append("Could not determine test count (pytest --collect-only failed).")
-    elif test_count < 400:
+    elif test_count < 600:
         failures.append(
             f"Test count dropped to {test_count}. Update CHANGELOG.md 'Internal' section."
         )

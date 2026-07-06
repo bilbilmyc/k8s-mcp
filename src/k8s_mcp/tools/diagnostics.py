@@ -1,11 +1,16 @@
-"""Pod-centric diagnostics — one-shot triage aggregators.
+"""Pod / Deployment diagnostics — one-shot triage aggregators.
 
 中文说明：
 - `diagnose_pod`：拿一个 Pod 名，按 phase 自动分派出一份分层报告。
   Pending 走调度诊断（突出调度器自己的 Unschedulable 裁决 + PVC 绑定 +
   requests 汇总，不重算每节点拟合——那是重复调度器且易错），Running /
   CrashLoop 走运行时诊断（容器 state/lastState、OOMKilled、exit code、
-  restart，CrashLoop 时自动 tail previous 容器日志）。全只读。
+  restart，CrashLoop 时自动 tail previous 容器日志）。
+- `diagnose_deployment`：拿一个 Deployment 名，输出一份排障报告：replicas
+  desired/ready/updated/available、Strategy、owned ReplicaSets（old 缩
+  zero + new 拉伸中、或 new 已就绪），new RS 的 Pod 阶段分布 + 引用
+  `diagnose_pod` 进一步下钻，最近 events。
+  全只读。
 """
 from __future__ import annotations
 
@@ -26,6 +31,10 @@ _EVENTS_LIMIT = 10
 
 def _core_v1():
     return client.CoreV1Api(get_api_client())
+
+
+def _apps_v1():
+    return client.AppsV1Api(get_api_client())
 
 
 def _describe_state(state) -> tuple[str, str, str]:
@@ -277,5 +286,238 @@ def diagnose_pod(name: str, namespace: str = "default") -> str:
     return "\n".join(sections)
 
 
+# ---------------------------------------------------------------------------
+# Deployment-level diagnosis
+# ---------------------------------------------------------------------------
+
+
+def _owned_replica_sets(deployment, apps, namespace: str) -> list:
+    """Find the ReplicaSets owned by this Deployment.
+
+    Strategy: K8s tags every RS created by a Deployment with
+    `pod-template-hash`; the deployment name itself is NOT a default label
+    on the RS, but the RS's `ownerReferences` points at the Deployment.
+    We use a label-selector of `spec.selector.matchLabels` (which the
+    controller-manager copies verbatim onto the RS) — that avoids walking
+    every RS in the namespace to filter by ownerRef.
+    """
+    match = (deployment.spec.selector.match_labels or {}) if deployment.spec.selector else {}
+    if not match:
+        return []
+    label_selector = ",".join(f"{k}={v}" for k, v in match.items())
+    ret = apps.list_namespaced_replica_set(namespace, label_selector=label_selector)
+    return list(ret.items)
+
+
+def _rs_image(rs) -> str:
+    """Return the image of the first container in the RS pod template."""
+    containers = (rs.spec.template.spec.containers or []) if rs.spec and rs.spec.template else []
+    if not containers:
+        return ""
+    return containers[0].image or ""
+
+
+def _new_replica_set(replicasets) -> tuple | None:
+    """Pick the active (newest) RS — the one with the highest pod-template-hash.
+
+    Returns (rs, is_old) where is_old=True means the RS is being scaled
+    down (current_replicas == 0). Returns None if there is no RS at all.
+    """
+    active = None
+    for rs in replicasets:
+        # K8s always injects `pod-template-hash` into the pod-template labels.
+        labels = (rs.spec.template.metadata.labels or {}) if rs.spec and rs.spec.template else {}
+        h = labels.get("pod-template-hash") or ""
+        if active is None or h > (active[1] or ""):
+            active = (rs, h)
+    if active is None:
+        return None
+    return active
+
+
+def _rollout_summary(deployment) -> str:
+    """One-line: desired vs ready vs updated vs available + Progressing condition."""
+    s = deployment.status
+    desired = (deployment.spec.replicas if deployment.spec.replicas is not None else 0)
+    ready = s.ready_replicas or 0
+    updated = s.updated_replicas or 0
+    available = s.available_replicas or 0
+    parts = [
+        f"desired={desired}",
+        f"ready={ready}",
+        f"updated={updated}",
+        f"available={available}",
+    ]
+    line = "  " + " | ".join(parts)
+    progressing = next(
+        (c for c in (s.conditions or []) if c.type == "Progressing"), None
+    )
+    if progressing is not None:
+        marker = "✅" if progressing.status == "True" else "❌"
+        reason = progressing.reason or "?"
+        line += f"\n  Progressing: {marker} {reason} — {progressing.message or ''}"
+    return line
+
+
+def diagnose_deployment(name: str, namespace: str = "default") -> str:
+    """🔍 DIAGNOSE DEPLOYMENT — one-shot triage for a single Deployment.
+
+    Aggregates the ~5 calls an agent otherwise makes serially (get
+    deployment, list owned RS, list pods owned by the new RS, tail their
+    phases, read events) into a single layered report:
+
+    - **Rollout** — `desired/ready/updated/available` summary + the
+      `Progressing` condition's reason & message (the controller's own
+      verdict — e.g. `NewReplicaSetAvailable` or `ProgressDeadlineExceeded`).
+    - **ReplicaSets** — owned RS list, one row each: template-hash,
+      desired/current/ready replicas, and the first container's image
+      (so an old vs new image diff is obvious from a single table).
+    - **New ReplicaSet** — pod phase distribution (`Running / Pending /
+      CrashLoop / Failed`). If any pod is in `Pending` or
+      `CrashLoopBackOff`, the report ends with a literal "next step:
+      call `diagnose_pod(name=<pod>, namespace=<ns>)`" so the agent
+      doesn't have to guess.
+    - **Recent events** — the deployment + new RS event stream.
+
+    Read-only — no mutations, safe to call repeatedly.
+
+    Args:
+        name: Deployment name.
+        namespace: target namespace (default "default").
+
+    Returns a multi-section markdown report. Raises ValueError if the
+    Deployment does not exist.
+    """
+    apps = _apps_v1()
+    core = _core_v1()
+    try:
+        deployment = apps.read_namespaced_deployment(name, namespace)
+    except ApiException as e:
+        if e.status == 404:
+            raise ValueError(
+                f"Deployment {namespace}/{name} not found"
+            ) from e
+        raise RuntimeError(
+            f"failed to read Deployment {namespace}/{name}: "
+            f"{e.status} {e.reason}"
+        ) from e
+
+    age = format_age(deployment.metadata.creation_timestamp)
+    strategy = (deployment.spec.strategy.type or "RollingUpdate") if deployment.spec.strategy else "?"
+    selector = (deployment.spec.selector.match_labels or {}) if deployment.spec.selector else {}
+
+    sections: list[str] = [
+        f"## Deployment {namespace}/{name}",
+        f"Strategy: {strategy} | Age: {age} | Selector: {selector or '(empty)'}",
+    ]
+
+    # Rollout summary — this is the cheapest "is it done?" signal.
+    sections.append("\n## Rollout")
+    sections.append(_rollout_summary(deployment))
+
+    # Owned ReplicaSets — the meat of "which version is running".
+    replicasets = _owned_replica_sets(deployment, apps, namespace)
+    if replicasets:
+        rs_rows = []
+        for rs in replicasets:
+            labels = (
+                (rs.spec.template.metadata.labels or {})
+                if rs.spec and rs.spec.template else {}
+            )
+            hash_label = labels.get("pod-template-hash") or "?"
+            rs_rows.append({
+                "REPLICASET": rs.metadata.name,
+                "HASH": hash_label[:8],
+                "DESIRED": str(rs.spec.replicas or 0),
+                "CURRENT": str(rs.status.replicas or 0),
+                "READY": str(rs.status.ready_replicas or 0),
+                "IMAGE": _rs_image(rs),
+            })
+        # Newest first.
+        rs_rows.sort(key=lambda r: r["HASH"], reverse=True)
+        sections.append("\n## ReplicaSets")
+        sections.append(short_table(
+            rs_rows,
+            ["REPLICASET", "HASH", "DESIRED", "CURRENT", "READY", "IMAGE"],
+        ))
+    else:
+        sections.append("\n## ReplicaSets")
+        sections.append("(no ReplicaSets found for selector — controller not yet reconciled?)")
+
+    # New ReplicaSet + its pods — the "what is the rollout actually doing
+    # right now" view.
+    active = _new_replica_set(replicasets) if replicasets else None
+    if active is not None:
+        new_rs, _hash = active
+        new_rs_name = new_rs.metadata.name
+        new_rs_image = _rs_image(new_rs)
+        new_rs_desired = new_rs.spec.replicas or 0
+        new_rs_ready = new_rs.status.ready_replicas or 0
+        sections.append("\n## New ReplicaSet")
+        sections.append(
+            f"{new_rs_name} — image: {new_rs_image or '(none)'} — "
+            f"ready {new_rs_ready}/{new_rs_desired}"
+        )
+
+        # List the pods owned by THIS rs only.
+        pod_rows: list[dict] = []
+        try:
+            pod_list = core.list_namespaced_pod(
+                namespace,
+                label_selector=(
+                    f"pod-template-hash={_hash}" if _hash else None
+                ),
+            )
+        except ApiException as e:
+            pod_list = None
+            sections.append(f"  (failed to list pods: {e.status} {e.reason})")
+
+        if pod_list is not None and pod_list.items:
+            for p in pod_list.items:
+                phase = (p.status.phase or "?") if p.status else "?"
+                restarts = sum(
+                    cs.restart_count for cs in (p.status.container_statuses or [])
+                )
+                pod_rows.append({
+                    "POD": p.metadata.name,
+                    "PHASE": phase,
+                    "RESTARTS": str(restarts),
+                    "NODE": p.spec.node_name or "",
+                    "AGE": format_age(p.metadata.creation_timestamp),
+                })
+            sections.append(short_table(
+                pod_rows,
+                ["POD", "PHASE", "RESTARTS", "NODE", "AGE"],
+            ))
+
+            problem_pods = [
+                p for p in pod_list.items
+                if (p.status.phase or "") in ("Pending", "Failed")
+                or any(
+                    (cs.state.waiting and cs.state.waiting.reason == "CrashLoopBackOff")
+                    for cs in (p.status.container_statuses or [])
+                )
+            ]
+            if problem_pods:
+                first = problem_pods[0]
+                sections.append(
+                    f"\n⚠️ {len(problem_pods)}/{len(pod_list.items)} pod(s) "
+                    f"need attention. Next step: call "
+                    f"`diagnose_pod(name={first.metadata.name!r}, "
+                    f"namespace={namespace!r})` for the first one."
+                )
+
+    # Recent events — the controller + scheduler narrative.
+    sections.append("\n## Recent events")
+    sections.append(
+        events_mod.get_events_for_object(
+            "Deployment", name, namespace, limit=_EVENTS_LIMIT,
+        )
+    )
+
+    return "\n".join(sections)
+
+
 def register(mcp) -> None:
     mcp.tool()(diagnose_pod)
+    mcp.tool()(diagnose_deployment)

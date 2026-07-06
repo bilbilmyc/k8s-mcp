@@ -1,6 +1,6 @@
 # k8s-mcp
 
-Kubernetes MCP server for LLM agents. Exposes **70 tools** covering CRUD on
+Kubernetes MCP server for LLM agents. Exposes **80 tools** covering CRUD on
 Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services,
 Ingresses, ConfigMaps, PVCs, RBAC, NetworkPolicies, plus logs/events, node
 ops, top, rollout, wait, bulk YAML apply, Prometheus queries, health
@@ -121,7 +121,7 @@ the pod's SA token automatically.
 }
 ```
 
-Restart the agent. You should see **70 tools** listed under "k8s".
+Restart the agent. You should see **80 tools** listed under "k8s".
 
 Full environment variable reference: [docs/env.md](./docs/env.md).
 
@@ -171,7 +171,7 @@ webhook can multiplex multiple clusters.
 
 **Tools:**
 
-- [docs/tools-reference.md](./docs/tools-reference.md) — **Full 70-tool catalog** (one line per tool, full signature)
+- [docs/tools-reference.md](./docs/tools-reference.md) — **Full 79-tool catalog** (one line per tool, full signature)
 - [docs/tools.md](./docs/tools.md) — Deep dives + flows (new-session protocol, delete confirmation, bulk 3-step, Prometheus bridge)
 
 **Config / architecture:**
@@ -195,14 +195,14 @@ webhook can multiplex multiple clusters.
 
 ```bash
 uv sync
-uv run pytest              # 416 tests
+uv run pytest              # 666 tests
 uv run ruff check .        # lint
 uv run k8s-mcp             # run over stdio
 uv build                   # produce dist/*.whl + .tar.gz
 ```
 
-Release workflow: [docs/publishing.md](./docs/publishing.md). Full design
-doc: [PLAN.md](./docs/PLAN.md).
+Release workflow: [docs/publishing.md](./docs/publishing.md) (**GitHub Actions + OIDC**, no local `uv publish`).
+Roadmap: [docs/ROADMAP.md](./docs/ROADMAP.md). Archived design doc: [docs/PLAN.md](./docs/PLAN.md).
 
 ## Out of scope (v2+)
 

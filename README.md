@@ -2,7 +2,7 @@
 
 [English version](./README.en.md)
 
-面向 LLM Agent 的 Kubernetes MCP server。提供 **70 个**工具，覆盖 Pod /
+面向 LLM Agent 的 Kubernetes MCP server。提供 **80 个**工具，覆盖 Pod /
 Deployment / StatefulSet / DaemonSet / Job / CronJob / Service / Ingress
 / ConfigMap / PVC / RBAC / NetworkPolicy 等资源的增删改查，加上日志 /
 事件 / 节点运维 / top / rollout / wait / 批量 YAML apply / Prometheus
@@ -122,7 +122,7 @@ claude mcp add-json k8s '{"command": "k8s-mcp", "env": {"K8S_MCP_LOG_LEVEL": "IN
 }
 ```
 
-重启 Agent，应该看到 "k8s" 下挂着 **70 个**工具。
+重启 Agent，应该看到 "k8s" 下挂着 **80 个**工具。
 
 完整环境变量清单见 [docs/env.md](./docs/env.md)。
 
@@ -164,7 +164,7 @@ export K8S_MCP_NOTIFIERS='[
 
 **工具相关：**
 
-- [docs/tools-reference.md](./docs/tools-reference.md) — **70 工具完整目录**（每条带签名）
+- [docs/tools-reference.md](./docs/tools-reference.md) — **79 工具完整目录**（每条带签名）
 - [docs/tools.md](./docs/tools.md) — 重点工具 deep-dive + 流程（新会话协议 / 删除二次确认 / 批量三步 / Prometheus 桥接）
 
 **配置 / 架构：**
@@ -188,14 +188,14 @@ export K8S_MCP_NOTIFIERS='[
 
 ```bash
 uv sync
-uv run pytest              # 416 个测试
+uv run pytest              # 666 个测试
 uv run ruff check .        # lint
 uv run k8s-mcp             # stdio 启动
 uv build                   # 生成 dist/*.whl + .tar.gz
 ```
 
-发版流程见 [docs/publishing.md](./docs/publishing.md)。完整设计文档见
-[PLAN.md](./docs/PLAN.md)。
+发版流程见 [docs/publishing.md](./docs/publishing.md)（**走 GitHub Actions + OIDC**，本地不推 PyPI）。路线图见
+[docs/ROADMAP.md](./docs/ROADMAP.md)。设计档案见 [docs/PLAN.md](./docs/PLAN.md)（archived）。
 
 ## 后续计划（v2+）
 

@@ -6,6 +6,24 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+### Added
+- `diagnose_deployment(name, namespace="default")` — one-shot Deployment
+  triage. Aggregates the ~5 calls an agent otherwise makes serially (get
+  Deployment, list owned ReplicaSets, list pods under the new RS, parse
+  their phases, read events) into a layered report. Sections: **Rollout**
+  (desired/ready/updated/available + the `Progressing` condition's own
+  verdict — `NewReplicaSetAvailable` ✅ or `ProgressDeadlineExceeded` ❌);
+  **ReplicaSets** (owned RS table with pod-template-hash, desired/current/
+  ready, first-container image — old-vs-new image diff is visible in one
+  row); **New ReplicaSet** (ready count, pod phase table; if any pods
+  are `Pending` or `CrashLoopBackOff`, the report ends with a literal
+  `Next step: call diagnose_pod(name=<pod>, namespace=<ns>)` so the agent
+  doesn't have to guess where to drill down); **Recent events**.
+  Complements `diagnose_pod` (depth on one Pod) and
+  `cluster_health_snapshot` (breadth across the cluster) with the
+  missing middle layer: depth on one Deployment. Read-only. 11 new tests
+  in `tests/test_diagnose_deployment.py`.
+
 ## [0.4.4] — 2026-07-06
 
 ### Changed

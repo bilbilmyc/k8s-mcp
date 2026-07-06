@@ -2,20 +2,20 @@
 
 ## 目录结构
 
-```
+```text
 src/k8s_mcp/
 ├── server.py         # FastMCP 入口，注册所有工具
 ├── config.py         # Settings（pydantic-settings，K8S_MCP_* env）
 ├── auth.py           # 三档认证（apiserver+token / kubeconfig / in-cluster）
 ├── client.py         # 缓存的 ApiClient 工厂
 ├── formatters.py     # YAML / Table / Describe + Secret 脱敏
-├── safety.py         # HMAC 二次确认 token
+├── safety.py         # HMAC 二次确认 token + caller-bound 校验
 └── tools/
-    ├── generic.py    # list/get/get_yaml/describe/apply_yaml
+    ├── generic.py    # list/get/get_yaml/describe/apply_yaml/replace/diff + label add/remove
     ├── workload.py   # create_deployment/statefulset/job/cronjob, scale/restart/set_image
     ├── service.py    # create_service/ingress, expose_workload, delete_service/ingress
-    ├── logs.py       # get_pod_logs（长日志优化）
-    ├── pods.py       # list_pods
+    ├── logs.py       # get_pod_logs（长日志优化 + 多 Pod 并发）
+    ├── pods.py       # list_pods + exec_pod（批模式容器内执行）
     ├── events.py     # list_events + get_events_for_object
     ├── configmap.py  # get/update/delete_configmap
     ├── delete_tool.py# delete_resource（两步确认）
@@ -24,25 +24,31 @@ src/k8s_mcp/
     ├── node_ops.py   # cordon / uncordon / drain
     ├── wait_tool.py  # wait_resource（condition 或 JSONPath）
     ├── jsonpath.py   # get_resource_jsonpath
-    ├── secret.py     # list_secrets + get_secret_value（单 key）
+    ├── secret.py     # list_secrets + get_secret_value（单 key + reveal 审计）
     ├── discovery.py  # get_api_resources + explain_resource + find_images
     ├── autoscale.py  # create_hpa + create_pdb
-    ├── rbac.py       # Role / RoleBinding / ClusterRole / ClusterRoleBinding + whoami
+    ├── rbac.py       # Role / RoleBinding / ClusterRole / ClusterRoleBinding + whoami + analyze_rbac
     ├── serviceaccount.py # create_serviceaccount
-    ├── networkpolicy.py # create_networkpolicy
+    ├── networkpolicy.py # create_networkpolicy + analyze_networkpolicy
     ├── storage.py    # create_pvc / delete_pvc / bulk_delete_pvc / bootstrap_local_path_provisioner
     ├── prometheus.py # prometheus_query / prometheus_query_range / pod_metrics
     ├── certs.py      # get_certificate_expiry（CRD + 内置 kind 都用 DynamicClient）
-    ├── health.py     # cluster_health_snapshot（7 维集群体检）
-    ├── bulk.py       # bulk_set_image / bulk_restart / bulk_scale
+    ├── health.py     # cluster_health_snapshot（11 维集群体检）
+    ├── bulk.py       # bulk_set_image / bulk_restart / bulk_scale（@deprecated v0.5.0 删除）
     ├── cluster_info.py # cluster_info（apiserver / 版本 / 计数）
+    ├── diagnostics.py   # diagnose_pod（单 Pod 一键体检）
+    ├── explain.py       # explain_pod（owner 链 + siblings + spec）
+    ├── resource_usage.py # analyze_resource_usage（requests/limits 审计）
     └── notifier.py   # notify 推送 webhook
+}
 ```
 
-`generic.py` 还额外暴露 `replace_resource`（PUT 带 ResourceVersion）和
-`diff_resource`（apply 前预览差异）。
+`generic.py` 还额外暴露 `replace_resource`（PUT 带 ResourceVersion）、
+`diff_resource`（apply 前预览差异）、`search_resources`（跨 kind 名字子串搜）、
+`add_label` / `remove_label`（单 label 原子改，RFC 6901 转义）。
 
-完整设计文档见 [PLAN.md](./PLAN.md)，用法示例见 [tests/](../tests/)。
+完整设计档案见 [PLAN.md](./PLAN.md)（archived），当前路线图见
+[ROADMAP.md](./ROADMAP.md)，用法示例见 [tests/](../tests/)。
 
 ## 设计要点
 
@@ -50,7 +56,7 @@ src/k8s_mcp/
 
 每个 `tools/*.py` 模块暴露一个 `register(mcp)` 函数。新增工具模块只要在
 `server.py` 的 `_register_tools` 里 import + 调用一次，**不需要**改其他模块。
-70 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
+80 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
 
 ### 配置 + 守门分层
 
@@ -59,7 +65,8 @@ src/k8s_mcp/
   写工具调工具前先过两层。**`read_only`** 全局拒绝；**`namespace_allowlist`**
   按目标 namespace 校验。
 - **删除守门**（`safety.py`）：两步 HMAC 确认，所有 `delete_resource` / `bulk_*`
-  共用一套 token 签发校验。
+  共用一套 token 签发校验；v0.4.2 起 token 嵌入 MCP server 自己的 kube
+  identity（`username` + `uid`），跨进程 replay 直接拒收。
 
 ### 为什么是 stdio 而不是 HTTP/SSE？
 
@@ -83,7 +90,7 @@ LLM Agent（Cherry Studio / Claude Desktop）的 UI 重启**不会**重启 MCP s
 
 ### 测试策略
 
-416 个测试覆盖所有写 / 读 / 守门路径。模式：
+666 个测试覆盖所有写 / 读 / 守门路径。模式：
 
 - **mock ApiClient** —— 在 tool 模块级别 monkeypatch `_core_v1` / `_apps_v1` 等
   为 recording fake，捕获调用 + 模拟 404 / Forbidden。
@@ -91,4 +98,5 @@ LLM Agent（Cherry Studio / Claude Desktop）的 UI 重启**不会**重启 MCP s
   在 `generic._dyn_client` / `generic._resource_for_kind` 边界 patch。
 - **lint** —— `uv run ruff check src tests`（pyproject 配的 `E F W I N UP B`）。
 
-`uv run pytest` 一条命令全过；CI 加上去是 v2 的事。
+`uv run pytest` 一条命令全过；CI（`.github/workflows/ci.yml`）跑
+Python 3.11 / 3.12 / 3.13 lint + test 矩阵。

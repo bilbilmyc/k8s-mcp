@@ -536,7 +536,7 @@ def cluster_health_snapshot(
         pods = None  # sections fall back to their own fetch on None
 
     section_builders = [
-        ("Nodes", _section_nodes, lambda s: _count_from_section(s, "NotReady:") and "  "),
+        ("Nodes", _section_nodes, lambda s: 0),  # _node_counts extracts both fields directly
         ("Resource Usage", lambda: _section_resource_usage(namespaces),
          lambda s: 0),  # informational; no headline contribution
         ("Pending Pods", lambda: _section_pending_pods(namespaces, pods),
@@ -598,11 +598,6 @@ def cluster_health_snapshot(
 
 
 # ---------- tiny parsers used by the headline ------------------------------
-
-
-def _count_from_section(s: str, marker: str) -> bool:
-    """Placeholder for future use; not all sections need a boolean."""
-    return marker in s
 
 
 def _int_after(s: str, marker: str) -> int:

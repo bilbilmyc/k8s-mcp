@@ -31,6 +31,7 @@ def create_role(
     name: str,
     namespace: str,
     rules: list[dict[str, Any]],
+    allow_wildcard: bool = False,
 ) -> str:
     """Create a namespaced Role.
 
@@ -44,6 +45,11 @@ def create_role(
               "verbs": ["get", "list", "watch"],
               "resourceNames": ["..."]      # optional
             }
+        allow_wildcard: must be True to allow any rule whose `verbs`,
+            `resources`, and `apiGroups` are all `["*"]` (cluster-admin
+            equivalent). Single-axis wildcards (e.g. `verbs=["*"]` on a
+            specific resource) are still allowed without this flag — they
+            are a normal K8s pattern for controller ServiceAccounts.
     Returns the apply result.
     """
     if not rules:
@@ -52,7 +58,7 @@ def create_role(
         "apiVersion": "rbac.authorization.k8s.io/v1",
         "kind": "Role",
         "metadata": {"name": name, "namespace": namespace},
-        "rules": [_validate_rule(r) for r in rules],
+        "rules": [_validate_rule(r, allow_wildcard=allow_wildcard) for r in rules],
     }
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
@@ -96,7 +102,11 @@ def create_rolebinding(
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
 
-def create_clusterrole(name: str, rules: list[dict[str, Any]]) -> str:
+def create_clusterrole(
+    name: str,
+    rules: list[dict[str, Any]],
+    allow_wildcard: bool = False,
+) -> str:
     """⚠️ WRITE / ⚠️ CLUSTER-SCOPED — ClusterRole bypasses the
     K8S_MCP_NAMESPACE_ALLOWLIST (ClusterRoles have no namespace) and the
     permissions are visible to every namespace.
@@ -105,6 +115,8 @@ def create_clusterrole(name: str, rules: list[dict[str, Any]]) -> str:
     schema is identical — see `create_role`.
 
     Args: name + rules (same shape as create_role).
+    `allow_wildcard` gates the cluster-admin triple (`verbs=*` ∧
+    `resources=*` ∧ `apiGroups=*`); without it, _validate_rule refuses.
     """
     if not rules:
         raise ValueError("Provide at least one rule")
@@ -112,7 +124,7 @@ def create_clusterrole(name: str, rules: list[dict[str, Any]]) -> str:
         "apiVersion": "rbac.authorization.k8s.io/v1",
         "kind": "ClusterRole",
         "metadata": {"name": name},
-        "rules": [_validate_rule(r) for r in rules],
+        "rules": [_validate_rule(r, allow_wildcard=allow_wildcard) for r in rules],
     }
     return generic.apply_yaml(yaml.safe_dump(manifest))
 
@@ -147,15 +159,39 @@ def create_clusterrolebinding(
 # ---------- internals ----------------------------------------------------------
 
 
-def _validate_rule(rule: dict) -> dict:
-    """Validate + normalize a single RBAC rule."""
+def _validate_rule(rule: dict, *, allow_wildcard: bool = False) -> dict:
+    """Validate + normalize a single RBAC rule.
+
+    Refuses the cluster-admin triple (`verbs=["*"]` ∧ `resources=["*"]` ∧
+    `apiGroups=["*"]`) unless `allow_wildcard=True` is set by the caller.
+    Single-axis wildcards (e.g. `verbs=["*"]` on specific resources) are
+    still allowed — they are a normal K8s pattern for controller SAs.
+    """
     verbs = rule.get("verbs")
     if not verbs:
         raise ValueError("Rule missing 'verbs'")
+    api_groups = list(rule.get("apiGroups", [""]))
+    resources = list(rule.get("resources", []))
+
+    if (
+        not allow_wildcard
+        and verbs == ["*"]
+        and resources == ["*"]
+        and api_groups == ["*"]
+    ):
+        raise PermissionError(
+            "Refusing cluster-admin wildcard triple (verbs=['*'] ∧ "
+            "resources=['*'] ∧ apiGroups=['*']). This grants cluster-admin "
+            "on every resource and is one prompt-injection away from full "
+            "cluster takeover. Pass allow_wildcard=True to opt in "
+            "explicitly (or use apply_yaml with a hand-written manifest "
+            "for fine-grained rules)."
+        )
+
     out = {
         "verbs": list(verbs),
-        "apiGroups": list(rule.get("apiGroups", [""])),
-        "resources": list(rule.get("resources", [])),
+        "apiGroups": api_groups,
+        "resources": resources,
     }
     if "resourceNames" in rule:
         out["resourceNames"] = list(rule["resourceNames"])

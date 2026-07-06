@@ -6,6 +6,8 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-07-06
+
 ### Added — P0 hardening (production safety nets)
 
 Three production-grade safeguards applied uniformly at the `_K8sMCP`
@@ -279,3 +281,4 @@ Net result: a safer production posture without changing any of the
 [0.1.2]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/bilbilmyc/k8s-mcp/releases/tag/0.1.1
 [0.4.5]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.3...v0.4.5
+[0.4.6]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.5...v0.4.6

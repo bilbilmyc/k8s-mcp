@@ -39,6 +39,7 @@
 
 - `find_images(image_substring, namespace=None, kinds=None)` — 扫所有工作负载找匹配 image
 - `list_pods(namespace=None, label_selector=None, field_selector=None, include_all=False)` — Pod 列表（PHASE / RESTARTS / NODE）
+- `exec_pod(pod_name, command, namespace="default", container=None, timeout_seconds=30)` — ⚠️ 高权限：批模式在 Pod 容器里跑命令（argv list，不走 shell；要 pipe/redirect 显式 `["sh","-c","..."]`）；自动选单容器 Pod 的第一个容器，多容器必须显式 `container=`；stdout / stderr 分离 + 真 exit code；超时断开 WebSocket（pod 里命令可能不终止）
 - `list_events(namespace=None, namespaces=None, field_selector=None, warning_only=False, limit=50)` — 集群 / namespace 事件；`namespaces=["a","b"]` 多 ns 并行 fan-out 后按 lastTimestamp 降序合并，避免误把单 ns 查询扩到全集群
 - `get_events_for_object(kind, name, namespace=None, limit=50)` — 单个对象的事件
 - `get_pod_logs(pod_name|label_selector, namespace, container=None, tail_lines=None, since_seconds=None, since_time=None, until_time=None, strict_time=False, previous=False, timestamps=False, pattern=None, context_lines=0, max_bytes=1MiB, output_format="text|json")` — 详见 [tools.md → `get_pod_logs`](./tools.md#get_pod_logs)

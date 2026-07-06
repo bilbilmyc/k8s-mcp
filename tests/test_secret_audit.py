@@ -2,8 +2,8 @@
 
 The audit log line is what SOC has to grep when investigating a leaked
 secret — the rule is: every successful reveal MUST emit one INFO line
-with secret name + namespace + key + caller identity, and the actual
-bytes MUST NEVER appear in the log.
+with secret name + namespace + key, and the actual bytes MUST NEVER
+appear in the log.
 """
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ class _D:
         return _R(self._s)
 
 
-def test_reveal_true_logs_audit_line_with_caller(monkeypatch, caplog):
+def test_reveal_true_logs_audit_line_with_metadata(monkeypatch, caplog):
     fake = _FakeSecret({"password": base64.b64encode(b"hunter2").decode()})
     monkeypatch.setattr(secret, "_dyn", lambda: _D(fake))
     with caplog.at_level(logging.INFO, logger="k8s_mcp.tools.secret"):
@@ -80,8 +80,6 @@ def test_reveal_true_logs_audit_line_with_caller(monkeypatch, caplog):
     assert "name=db" in msg
     assert "namespace=default" in msg
     assert "key=password" in msg
-    assert "caller_user=test-user" in msg  # conftest default
-    assert "caller_uid=test-uid" in msg
 
 
 def test_reveal_true_audit_does_not_leak_value(monkeypatch, caplog):

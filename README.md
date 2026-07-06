@@ -153,8 +153,7 @@ export K8S_MCP_DEFAULT_TAIL_LINES=100                         # get_pod_logs 默
 # ---------- 3. 写守门（默认全部放行） ----------
 # export K8S_MCP_READ_ONLY=true                               # true = 所有写工具抛 PermissionError
 # export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod         # 仅这些 ns 可写；cluster-scoped 写入也拒
-export K8S_MCP_DELETE_TOKEN_SECRET="$(openssl rand -hex 32)"  # 必填——删除二次确认 token 的 HMAC 密钥
-export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300                   # token TTL 秒数，默认 5 分钟
+# v0.5.2 起：删除是单步，没有 token 二次确认
 
 # ---------- 4. 运行时安全网（默认已合理） ----------
 export K8S_MCP_RATE_LIMIT_RPM=120                             # 单工具 RPM 上限；0 = 关闭
@@ -189,12 +188,6 @@ export K8S_MCP_READ_ONLY=true
 # 写操作的 namespace 白名单。读不受限制。
 # 设置后，cluster-scoped 写入（无 namespace）一律拒绝。
 export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod
-
-# 删除二次确认 token 的 HMAC 密钥。生产环境务必改！
-export K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32)
-
-# token 有效期（秒），默认 300 = 5 分钟
-export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 ```
 
 ## 运行时安全网（v0.4.6+）
@@ -241,7 +234,7 @@ export K8S_MCP_NOTIFIERS='[
 **工具相关：**
 
 - [docs/tools-reference.md](./docs/tools-reference.md) — **79 工具完整目录**（每条带签名）
-- [docs/tools.md](./docs/tools.md) — 重点工具 deep-dive + 流程（新会话协议 / 删除二次确认 / 批量三步 / Prometheus 桥接）
+- [docs/tools.md](./docs/tools.md) — 重点工具 deep-dive + 流程（新会话协议 / 单步删除 / 批量三步 / Prometheus 桥接）
 
 **配置 / 架构：**
 

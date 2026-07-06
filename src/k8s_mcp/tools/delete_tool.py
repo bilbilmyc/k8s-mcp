@@ -1,20 +1,29 @@
-"""Delete with two-step confirmation (preview → confirm).
+"""Delete a Kubernetes resource.
 
-NEVER delete without first showing the user what will be deleted and getting
-their explicit approval. The tool enforces this with a signed short-lived
-confirmation_token.
+v0.5.2: single-step delete. The previous two-step preview → confirm flow
+required an HMAC-signed `confirmation_token` round-trip; it was removed
+because the threat model of an LLM agent driving this MCP is that the
+agent both issues and confirms the token in the same call, so the
+two-step pattern provides no defense the agent can't bypass in one
+shot. Single-step deletes are now guarded by:
+
+  - `K8S_MCP_READ_ONLY=true` (global kill switch — every write tool
+    raises PermissionError when this is on)
+  - `K8S_MCP_NAMESPACE_ALLOWLIST` (per-namespace write scoping; cluster-
+    scoped writes are rejected when this is set)
+
+If you need an additional safety net in a sensitive environment, gate
+the MCP server itself with an external RBAC layer (e.g. only run as a
+read-mostly SA) rather than relying on the agent to honor a confirmation
+handshake.
 
 中文说明：
-删除是 k8s-mcp 中最危险的工具，所以强制走"预览 → 二次确认"两步流程：
-
-  1. 第一步：`confirm=False`，工具返回当前对象的 YAML（Secret 会脱敏）
-     + 一个 HMAC 签名的 token（默认 5 分钟过期）。
-  2. 第二步：Agent 把预览展示给用户，得到明确同意后用 `confirm=True`
-     + 同一个 token 再调一次，token 里的 kind/name/namespace/grace_period
-     必须与本次请求完全一致才执行真正的删除。
-
-这一步无法跳过，也无法批量复用 token。任何 token 不匹配、过期、伪造、
-read_only、或 namespace 不在 allowlist 内的情况都会被拒。
+v0.5.2 起改成一步删除。之前的两步预览（confirm=False 拿 preview_yaml +
+HMAC token → confirm=True 真删）在 LLM 驱动的场景下不构成实际防护——
+agent 自己既是 token 签发者也是 token 提交者，单次调用就能完成两步。
+改成单步后唯一的安全开关是 `K8S_MCP_READ_ONLY`（一刀切）和
+`K8S_MCP_NAMESPACE_ALLOWLIST`（ns 维度）。高敏环境请在 MCP server 外部
+加 RBAC（例如 SA 用只读角色），不要依赖 agent 自觉。
 """
 from __future__ import annotations
 
@@ -24,17 +33,8 @@ from typing import Any
 from kubernetes import dynamic
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
 
-from ..client import get_caller_identity
-from ..config import Settings, enforce_write_safety, get_settings
-from ..formatters import mask_secret_data, to_yaml
-from ..safety import (
-    TokenError,
-    assert_payload_matches,
-    issue_token,
-    make_delete_payload,
-    verify_token,
-)
-from .generic import _api_version_for, _dyn_client, _fetch
+from ..config import get_settings
+from .generic import _api_version_for, _dyn_client
 
 logger = logging.getLogger(__name__)
 
@@ -43,105 +43,61 @@ def delete_resource(
     kind: str,
     name: str,
     namespace: str | None = None,
-    confirm: bool = False,
-    confirmation_token: str | None = None,
     grace_period_seconds: int = 30,
 ) -> dict[str, Any]:
-    """Delete a Kubernetes resource. Two-step (preview → confirm) flow.
+    """Delete a Kubernetes resource.
 
-    DANGEROUS: this is IRREVERSIBLE. Always confirm with the user before
-    calling with confirm=True.
+    DANGEROUS: this is IRREVERSIBLE. The MCP server itself does NOT prompt
+    the operator — the LLM agent is responsible for surfacing the target
+    (kind / name / namespace / grace_period_seconds) to the human before
+    calling. If your deployment needs an additional check, set
+    `K8S_MCP_READ_ONLY=true` to disable every write tool.
 
-    Workflow:
-      1. Call with confirm=False (default). The tool returns:
-         - preview_yaml: the YAML of the resource as it currently exists
-         - confirmation_token: an HMAC-signed, short-lived (5 min) token
-         - expires_in_seconds: how long the token is valid
-         - instruction: a reminder for the agent
-      2. Show the preview_yaml to the user and ask them to confirm.
-      3. After the user explicitly approves, re-call with confirm=True AND the
-         same confirmation_token. The token's payload must match the current
-         call (same kind/name/namespace/grace_period_seconds).
+    Args:
+        kind: the Kubernetes kind (Pod, Deployment, ConfigMap, ...).
+        name: the resource name.
+        namespace: namespace for namespaced resources. Omit for
+            cluster-scoped resources.
+        grace_period_seconds: how long the apiserver waits for graceful
+            termination before force-killing. Default 30s matches the
+            Kubernetes default.
 
-    Safety:
-      - Refused when settings.read_only is True.
-      - Refused when settings.namespace_allowlist is set and the target
-        namespace is not allowed.
-      - Refused if confirm=True but no confirmation_token provided.
-      - Refused if confirmation_token is expired, forged, or doesn't match
-        the current request's parameters.
+    Returns:
+        `{"deleted": True, "kind": ..., "name": ..., "namespace": ...,
+          "grace_period_seconds": ...}`.
+
+    Raises:
+        PermissionError — server is in read-only mode OR namespace is
+            outside the allowlist.
+        LookupError — resource already gone.
+        ValueError — unknown kind.
+        RuntimeError — apiserver conflict.
+        ApiException — other apiserver failures (RBAC, quota, ...).
     """
     settings = get_settings()
     if settings.read_only:
         raise PermissionError(
-            "Server is in read-only mode (K8S_MCP_READ_ONLY=true). delete is disabled."
+            "Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
+            "delete is disabled."
         )
-    enforce_write_safety(settings)
     if not settings.ns_allowed(namespace):
         raise PermissionError(
             f"Delete in namespace '{namespace}' is not allowed by "
             "K8S_MCP_NAMESPACE_ALLOWLIST"
         )
 
-    if not confirm:
-        return _preview(kind, name, namespace, grace_period_seconds, settings)
-
-    if not confirmation_token:
-        raise TokenError(
-            "confirm=True requires the confirmation_token returned by the "
-            "preview step. Call with confirm=False first."
-        )
-    try:
-        payload = verify_token(confirmation_token, settings.delete_token_secret)
-    except TokenError:
-        raise  # propagate to caller
-
-    assert_payload_matches(
-        payload,
-        kind=kind,
-        name=name,
-        namespace=namespace,
-        grace_period_seconds=grace_period_seconds,
-        caller=get_caller_identity(),
-    )
-
-    return _execute(kind, name, namespace, grace_period_seconds, settings)
+    return _execute(kind, name, namespace, grace_period_seconds)
 
 
 # ---------- private ------------------------------------------------------------
 
 
-def _preview(kind: str, name: str, namespace: str | None,
-              grace_period_seconds: int, settings: Settings) -> dict[str, Any]:
-    """Return a preview dict containing the current YAML and a confirmation token."""
-    obj = _fetch(kind, name, namespace)
-    if kind.lower() == "secret":
-        obj = mask_secret_data(obj)
-    preview_yaml = to_yaml(obj)
-
-    payload = make_delete_payload(
-        kind, name, namespace, grace_period_seconds,
-        caller=get_caller_identity(),
-    )
-    token = issue_token(
-        payload,
-        secret=settings.delete_token_secret,
-        ttl_seconds=settings.delete_token_ttl_seconds,
-    )
-    return {
-        "preview_yaml": preview_yaml,
-        "confirmation_token": token,
-        "expires_in_seconds": int(settings.delete_token_ttl_seconds),
-        "instruction": (
-            "Show the preview_yaml to the user. ONLY after they explicitly "
-            "approve, re-call delete_resource with confirm=True and the "
-            "confirmation_token above."
-        ),
-    }
-
-
-def _execute(kind: str, name: str, namespace: str | None,
-              grace_period_seconds: int, settings: Settings) -> dict[str, Any]:
+def _execute(
+    kind: str,
+    name: str,
+    namespace: str | None,
+    grace_period_seconds: int,
+) -> dict[str, Any]:
     dc = _dyn_client()
     api_version = _api_version_for(kind)
     try:
@@ -156,7 +112,8 @@ def _execute(kind: str, name: str, namespace: str | None,
         else:
             resource.delete(name=name, **delete_kwargs)
     except dynamic.exceptions.NotFoundError as e:
-        raise LookupError(f"{kind} '{name}' already gone{suffix(namespace)}") from e
+        suffix = f" from namespace '{namespace}'" if namespace else ""
+        raise LookupError(f"{kind} '{name}' already gone{suffix}") from e
     except dynamic.exceptions.ConflictError as e:
         raise RuntimeError(f"{kind} delete conflict: {e}") from e
 
@@ -170,6 +127,9 @@ def _execute(kind: str, name: str, namespace: str | None,
 
 
 def suffix(namespace: str | None) -> str:
+    """Backwards-compat helper kept for any callers (was used by the old
+    two-step error path). Returns `" from namespace 'X'"` or empty string.
+    """
     return f" from namespace '{namespace}'" if namespace else ""
 
 

@@ -44,14 +44,12 @@ out = workload.create_deployment(
 )
 print(out)
 
-# 5) 删除二次确认 —— 与 MCP 流程一致
+# 5) 删除 —— v0.5.2 起单步（受 READ_ONLY + NAMESPACE_ALLOWLIST 守门）
 from k8s_mcp.tools import generic as gen
-# 第一步：不带 confirm，先拿到预览 + token
-preview = gen.delete_resource(kind="Deployment", name="web", namespace="default")
-print(preview)  # 含 confirmation_token
-# 第二步：人工确认后，带 confirm=True + token 真正执行
-# gen.delete_resource(kind="Deployment", name="web", namespace="default",
-#                    confirm=True, confirmation_token="<token-from-preview>")
+out = gen.delete_resource(kind="Deployment", name="web", namespace="default")
+print(out)
+# {"deleted": True, "kind": "Deployment", "name": "web",
+#  "namespace": "default", "grace_period_seconds": 30}
 ```
 
 `k8s_mcp.client.get_api_client()` 返回缓存的

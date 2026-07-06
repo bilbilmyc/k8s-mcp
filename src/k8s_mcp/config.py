@@ -53,8 +53,6 @@ class Settings(BaseSettings):
     # 安全守门 / Safety
     read_only: bool = False
     namespace_allowlist: list[str] | None = None
-    delete_token_secret: str = "change-me"
-    delete_token_ttl_seconds: int = 300
 
     # Operational safety nets (P0 hardening for production). Applied at
     # the FastMCP call_tool boundary in server.py:
@@ -164,45 +162,3 @@ def get_settings() -> Settings:
 def reset_settings_cache() -> None:
     """清掉 Settings 单例缓存，方便测试改环境变量后重新加载。"""
     get_settings.cache_clear()
-
-
-# Literal default shipped in the source. Anything still using this string as
-# the delete-token HMAC secret on a write-enabled deployment means an
-# attacker who can read this codebase can forge tokens. Startup must refuse
-# to come up in that state — see `enforce_write_safety`. CI / read-only mode
-# is fine, the secret isn't load-bearing there.
-_DEFAULT_DELETE_TOKEN_SECRET = "change-me"
-
-
-def enforce_write_safety(s: Settings | None = None) -> None:
-    """Refuse to operate when writes are enabled with the forge-able default
-    (or empty) HMAC secret. Raises RuntimeError.
-
-    Called at server startup AND from every write tool that issues or
-    verifies a delete/bulk confirmation token. Belt-and-suspenders: the
-    startup call prevents the misconfigured deployment from ever accepting
-    connections; the per-tool call prevents a deploy that was started in
-    read-only mode (where the default is fine) from silently inheriting the
-    forge-able secret if writes are flipped on later in-process.
-
-    Tests that need to exercise the default-secret code path can pass a
-    Settings instance with the secret explicitly overridden — the function
-    checks the live value, not env state.
-    """
-    s = s or get_settings()
-    if s.read_only:
-        return  # read-only mode never issues delete/bulk tokens
-    if not s.delete_token_secret:
-        raise RuntimeError(
-            "SECURITY: K8S_MCP_DELETE_TOKEN_SECRET is empty while writes are "
-            "ENABLED — every delete/bulk confirmation token would be forge-able. "
-            "Set K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32) and restart."
-        )
-    if s.delete_token_secret == _DEFAULT_DELETE_TOKEN_SECRET:
-        raise RuntimeError(
-            "SECURITY: K8S_MCP_DELETE_TOKEN_SECRET is the literal source-tree "
-            "default 'change-me' while writes are ENABLED — anyone with read "
-            "access to the source code can forge delete/bulk confirmation "
-            "tokens and execute arbitrary destructive operations. Set "
-            "K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32) and restart."
-        )

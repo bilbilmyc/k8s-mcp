@@ -9,7 +9,7 @@ src/k8s_mcp/
 ├── auth.py           # 三档认证（apiserver+token / kubeconfig / in-cluster）
 ├── client.py         # 缓存的 ApiClient 工厂
 ├── formatters.py     # YAML / Table / Describe + Secret 脱敏
-├── safety.py         # HMAC 二次确认 token + caller-bound 校验
+├── safety.py         # RateLimit + ToolTimeout + SafeApiError 脱敏
 └── tools/
     ├── generic.py    # list/get/get_yaml/describe/apply_yaml/replace/diff + label add/remove
     ├── workload.py   # create_deployment/statefulset/job/cronjob, scale/restart/set_image/set_resources
@@ -18,7 +18,7 @@ src/k8s_mcp/
     ├── pods.py       # list_pods + exec_pod（批模式容器内执行）
     ├── events.py     # list_events + get_events_for_object
     ├── configmap.py  # get/update configmap
-    ├── delete_tool.py# delete_resource（两步确认）
+    ├── delete_tool.py# delete_resource（单步；受 READ_ONLY + NS allowlist 守门）
     ├── metrics.py    # top_pods / top_nodes
     ├── rollout.py    # rollout_status / rollout_undo / rollout_history
     ├── node_ops.py   # cordon / uncordon / drain
@@ -63,7 +63,10 @@ src/k8s_mcp/
 - **守门**（`config.Settings` + 各 tool 内的 `_read_only_guard` / `_ensure_ns`）：
   写工具调工具前先过两层。**`read_only`** 全局拒绝；**`namespace_allowlist`**
   按目标 namespace 校验。
-- **删除守门**（`safety.py`）：两步 HMAC 确认，所有 `delete_resource` 共用一套 token 签发校验；v0.4.2 起 token 嵌入 MCP server 自己的 kube identity（`username` + `uid`），跨进程 replay 直接拒收。
+- **删除守门**：v0.5.2 起删除是**单步**——无 preview / 无 token 二次确认。守门由
+  `K8S_MCP_READ_ONLY`（全局 kill switch）+ `K8S_MCP_NAMESPACE_ALLOWLIST`（namespace 白名单）承担。
+  原来的两步 HMAC 流程在 LLM-driven 场景里没有防护意义（agent 自己就能
+  发 preview + confirm 两个调用），故 v0.5.2 移除。
 
 ### 为什么是 stdio 而不是 HTTP/SSE？
 
@@ -80,14 +83,14 @@ MCP server 是单进程的，3 处 in-memory 缓存：
 
 - **apiserver ApiClient** —— 跟 settings 的 auth 字段绑定。auth 字段变就重建。
 - **Prometheus 候选 Service 列表** —— 走 stale-on-error，失败重扫。
-- **HMAC delete tokens** —— 5 分钟 TTL，自然过期。
+- **Token bucket（rate limit）** —— 进程内，per-tool。重启即重置。
 
 LLM Agent（Cherry Studio / Claude Desktop）的 UI 重启**不会**重启 MCP server；
 要看 MCP server 是不是在跑新代码，**MCP 客户端连接重连**（删了再加）即可。
 
 ### 测试策略
 
-655 个测试覆盖所有写 / 读 / 守门路径。模式：
+630 个测试覆盖所有写 / 读 / 守门路径。模式：
 
 - **mock ApiClient** —— 在 tool 模块级别 monkeypatch `_core_v1` / `_apps_v1` 等
   为 recording fake，捕获调用 + 模拟 404 / Forbidden。

@@ -31,7 +31,7 @@ import logging
 from kubernetes import dynamic
 from kubernetes.client.rest import ApiException
 
-from ..client import get_api_client, get_caller_identity
+from ..client import get_api_client
 from ..formatters import format_age, short_table
 
 logger = logging.getLogger(__name__)
@@ -168,16 +168,11 @@ def get_secret_value(
 
     # reveal=True path
     # Audit log — every successful reveal leaves an INFO line so SOC can
-    # grep `secret_reveal` to see who exposed what. The actual bytes are
-    # NOT logged (only key + secret + namespace + caller). Logged at INFO
-    # so it shows up in default-config stdout, not just DEBUG.
-    caller = get_caller_identity()
-    logger.info(
-        "secret_reveal name=%s namespace=%s key=%s caller_user=%s caller_uid=%s",
-        name, namespace, key,
-        caller.get("username", "(unknown)"),
-        caller.get("uid", ""),
-    )
+    # grep `secret_reveal` to see what was exposed (which Secret / key /
+    # namespace). The actual bytes are NOT logged. Logged at INFO so it
+    # shows up in default-config stdout, not just DEBUG.
+    logger.info("secret_reveal name=%s namespace=%s key=%s",
+                name, namespace, key)
 
     data = obj.get("data") or {}
     string_data = obj.get("stringData") or {}

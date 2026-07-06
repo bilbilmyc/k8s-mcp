@@ -164,8 +164,41 @@ apply → write → 验证 这条链上的"验证"环节。**Read-only。**
 
 ---
 
+## v0.5.2 — 单步删除 + Prometheus 外部可达 URL（2026-07-07）
+
+**主题**：删掉 v0.4.2 引入的 HMAC delete-token 二次确认（LLM-driven 场景里无效防护），同时修 `find_prometheus_service` 早就在用 NodePort 但 URL 一直返回 ClusterIP 的老 bug。
+
+- [x] **F1 · `delete_resource` 单步化**
+  - 移除 `confirm` / `confirmation_token` 两步流程
+  - 移除 `K8S_MCP_DELETE_TOKEN_SECRET` + `K8S_MCP_DELETE_TOKEN_TTL_SECONDS` 配置
+  - 移除 `enforce_write_safety()` 启动闸门（v0.4.2 的 `change-me` 字面默认值硬拒）
+  - 移除 `safety.py` 里所有 token 辅助（`TokenError` / `issue_token` / `verify_token` / `make_delete_payload` / `assert_payload_matches` / `assert_caller_matches`）
+  - 移除 `client.get_caller_identity()` 及 5 分钟 TTL 缓存
+  - 守门完全交给 `K8S_MCP_READ_ONLY` + `K8S_MCP_NAMESPACE_ALLOWLIST`
+- [x] **F2 · Prometheus 自动发现 URL 修正**
+  - 新增 `_node_internal_ip()` + `_external_service_url()`
+  - NodePort → `http://<first-node-internal-ip>:<nodePort>`
+  - LoadBalancer → `http://<lb-ingress>:<port>`
+  - ClusterIP 兜底 → `None`（让调用方退回 `_service_url` 老逻辑）
+- [x] **F3 · 测试与文档**
+  - `tests/test_delete.py`（7 测试）
+  - `tests/test_prometheus.py` 新增 3 测试覆盖 NodePort / 兜底 / 硬编码候选
+  - `tests/test_secret_audit.py` 删 caller_user / caller_uid 断言
+  - 删除 `tests/test_caller_binding.py` / `tests/test_safety_delete.py` / `tests/test_write_safety.py`
+  - CHANGELOG / README / env.md / tools-reference.md / tools.md / usage.md / examples.md / architecture.md 同步刷新
+
+**威胁模型笔记**：在 LLM agent 既发起 preview 又发起 confirm 的场景里，
+HMAC token 校验不构成任何额外防护——agent 完全可以一次性发两个调用。
+v0.5.2 起删除完全靠 `READ_ONLY`（全局 kill switch）+ `NAMESPACE_ALLOWLIST`
+（namespace 白名单 + cluster-scoped 一并拒）。如需更精细的"agent + 用户
+双确认"，交给 agent 框架自己处理（如 Anthropic Computer Use 风格的
+HITL），不再让工具层背锅。
+
+---
+
 **变更记录**
 - 2026-07-05 初稿：从 plan 转成 checkbox 列表
 - 2026-07-05 B2 完成：bulk_* → list variant，修复 2 处重复检查 bug，所有 23 个 bulk 测试通过
 - 2026-07-06 v0.4.3 完成: Phase E 4+ 个分析器/diagnose/explain 工具 + search/add_label/remove_label/exec_pod，666 tests passing
 - 2026-07-06 v0.5.0 完成: A1+A2 收尾 + B1+B2 收尾（删 9 个 deprecated）+ C2 OpenAPI cap + docs 刷新，655 tests passing
+- 2026-07-07 v0.5.2 完成: 单步删除（删 HMAC token subsystem）+ Prometheus NodePort/LoadBalancer URL 修正，630 tests passing

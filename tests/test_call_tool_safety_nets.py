@@ -28,7 +28,7 @@ def _build_server(*, rate_limit_rpm: int = 120, tool_timeout_s: float = 5.0) -> 
     # Bypass the env / lru_cache by passing a Settings directly. The
     # `Settings` model is the only kwarg the server cares about.
     settings = Settings(
-        read_only=True,  # avoid the enforce_write_safety token check
+        read_only=True,
         rate_limit_rpm=rate_limit_rpm,
         tool_timeout_s=tool_timeout_s,
     )

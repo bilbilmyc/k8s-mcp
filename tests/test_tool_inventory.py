@@ -122,10 +122,8 @@ def server_tools():
     """Build the server and return the set of registered tool names.
 
     Function-scoped (not module) because the autouse `_clean_env`
-    conftest fixture wipes K8S_MCP_* env vars per-test and re-injects
-    a real-looking HMAC secret; a module-scoped fixture would inherit
-    the first test's env and then later tests would race the
-    enforce_write_safety guard.
+    conftest fixture wipes K8S_MCP_* env vars per-test; a module-scoped
+    fixture would inherit the first test's env.
     """
     from k8s_mcp.config import reset_settings_cache
     from k8s_mcp.server import create_server

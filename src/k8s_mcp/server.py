@@ -27,11 +27,10 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ContentBlock
 
 from . import __version__
-from .config import Settings, enforce_write_safety, get_settings
+from .config import Settings, get_settings
 from .safety import (
     RateLimiter,
     SafeApiError,
-    TokenError,
     ToolTimeoutError,
     safe_apiserver_error,
 )
@@ -180,13 +179,6 @@ class _K8sMCP(FastMCP):
             raise ToolTimeoutError(name, self._tool_timeout_s) from e
         except SafeApiError:
             raise
-        except TokenError:
-            # TokenError messages are user-actionable ("name mismatch",
-            # "signature invalid", "expired", "Missing confirmation_token")
-            # and contain no secret material — surface them so the LLM
-            # agent can react (request a fresh preview, etc.) rather than
-            # seeing a useless generic wrapper.
-            raise
         except PermissionError:
             # App-layer permission denials (read-only mode / namespace
             # allowlist). The message names the violated setting so the
@@ -243,10 +235,6 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     logger.info(
         "k8s-mcp %s starting (read_only=%s)", __version__, settings.read_only
     )
-    # Refuse to start with the forge-able HMAC default. This is the
-    # load-bearing startup check — see config.enforce_write_safety for
-    # the per-tool belt-and-suspenders duplicate.
-    enforce_write_safety(settings)
 
     _install_signal_handlers()
 

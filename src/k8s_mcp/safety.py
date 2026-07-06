@@ -1,15 +1,8 @@
-"""Safety primitives: HMAC-signed confirmation tokens, rate limit, per-call
-timeout, and apiserver-error sanitization for destructive ops.
+"""Safety primitives: rate limit, per-call timeout, and apiserver-error
+sanitization.
 
-The delete tool requires a two-step flow:
-  1. confirm=False returns a preview + confirmation_token.
-  2. confirm=True with the token verifies and executes the deletion.
-
-Tokens are short-lived (settings.delete_token_ttl_seconds, default 300s) and
-HMAC-signed so the server can validate without external state.
-
-This module also owns three operational safety nets applied at the
-FastMCP `call_tool` boundary (in server.py):
+This module owns three operational safety nets applied at the FastMCP
+`call_tool` boundary (in server.py):
 
   - `TokenBucket` / `RateLimiter` — per-tool in-memory token bucket so a
     runaway agent can't fan out `list_pods` / `get_pod_logs` and saturate
@@ -24,156 +17,21 @@ FastMCP `call_tool` boundary (in server.py):
     boundary raises. Tool code can keep using `raise RuntimeError(...)`
     or letting `ApiException` propagate; the boundary normalizes.
 
-中文说明：
-本模块除了签发 / 校验 HMAC delete token 外，还提供三个生产级安全
-兜底（都在 server.py 的 call_tool 边界统一接入）：
-
-  - 速率限制：per-tool token bucket，进程内，默认每工具 120 RPM；
-    防止失控的 agent 反复 list / get 把 apiserver 刷爆或 MCP 通道撑爆。
-  - apiserver 错误脱敏：把 k8s client 抛出的 `ApiException`（status /
-    reason / body 含 RBAC 细节、内部 hostname、审计片段）转成只暴露
-    status + 标准化一句话摘要的 `SafeApiError`，避免把 K8s 内部信息
-    直接喂给 LLM。
-  - 单次调用超时：包一层 `asyncio.wait_for` 防止单个 tool 卡死把整个
-    MCP 会会拖死。
+Note: the previous two-step delete confirmation flow (HMAC-signed token,
+preview → confirm) was removed in v0.5.2. The threat model of an LLM
+agent driving the MCP is that the agent both issues and confirms tokens
+on its own, so the confirmation step provides no defense the LLM can't
+circumvent in a single call. Single-step deletes are guarded only by
+`K8S_MCP_READ_ONLY` (a global kill switch) and
+`K8S_MCP_NAMESPACE_ALLOWLIST` (per-namespace write scoping).
 """
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
 import logging
 import threading
 import time
-from typing import Any
 
 logger = logging.getLogger(__name__)
-
-
-class TokenError(Exception):
-    """Raised when a confirmation token is missing, malformed, expired, or forged."""
-
-
-def issue_token(payload: dict[str, Any], secret: str, ttl_seconds: int) -> str:
-    """Create a signed token. Returns the token string."""
-    if not secret:
-        raise TokenError("delete_token_secret is not configured")
-    payload = dict(payload)
-    payload["exp"] = int(time.time()) + int(ttl_seconds)
-    body_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    body_b64 = base64.urlsafe_b64encode(body_bytes).decode("ascii").rstrip("=")
-    sig = hmac.new(secret.encode("utf-8"), body_b64.encode("ascii"), hashlib.sha256).digest()
-    sig_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
-    return f"{body_b64}.{sig_b64}"
-
-
-def verify_token(token: str, secret: str) -> dict[str, Any]:
-    """Validate the token's signature and expiry. Returns the payload."""
-    if not token:
-        raise TokenError("Missing confirmation_token")
-    if not secret:
-        raise TokenError("delete_token_secret is not configured")
-    parts = token.split(".")
-    if len(parts) != 2:
-        raise TokenError("Malformed confirmation_token")
-    body_b64, sig_b64 = parts
-    expected_sig = base64.urlsafe_b64encode(
-        hmac.new(secret.encode("utf-8"), body_b64.encode("ascii"), hashlib.sha256).digest()
-    ).decode("ascii").rstrip("=")
-    if not hmac.compare_digest(sig_b64, expected_sig):
-        raise TokenError("Invalid confirmation_token signature")
-    try:
-        body_bytes = base64.urlsafe_b64decode(body_b64.encode("ascii") + b"==")
-        payload = json.loads(body_bytes)
-    except (ValueError, json.JSONDecodeError) as e:
-        raise TokenError(f"Malformed token body: {e}") from e
-    exp = int(payload.get("exp", 0))
-    if exp < int(time.time()):
-        raise TokenError("confirmation_token expired; please request a new preview")
-    return payload
-
-
-def make_delete_payload(kind: str, name: str, namespace: str | None,
-                        grace_period_seconds: int,
-                        caller: dict | None = None) -> dict[str, Any]:
-    """Payload to sign when issuing a delete confirmation token.
-
-    `caller` binds the token to the MCP server's authenticated kube
-    identity (`{"username", "uid", "groups"}`). A leaked token cannot
-    be replayed by a different MCP process running as a different user
-    — `assert_payload_matches` rejects caller mismatches.
-    """
-    payload: dict[str, Any] = {
-        "op": "delete",
-        "kind": kind,
-        "name": name,
-        "namespace": namespace or "",
-        "grace_period_seconds": int(grace_period_seconds),
-    }
-    if caller is not None:
-        payload["caller"] = {
-            "username": caller.get("username", "(unknown)"),
-            "uid": caller.get("uid", ""),
-        }
-    return payload
-
-
-def assert_payload_matches(payload: dict[str, Any], *, kind: str, name: str,
-                            namespace: str | None, grace_period_seconds: int,
-                            caller: dict | None = None) -> None:
-    """Ensure the token's payload matches the current delete request."""
-    if payload.get("op") != "delete":
-        raise TokenError("Token was not issued for a delete operation")
-    if payload.get("kind") != kind:
-        raise TokenError(f"Token kind mismatch: {payload.get('kind')} vs {kind}")
-    if payload.get("name") != name:
-        raise TokenError(f"Token name mismatch: {payload.get('name')} vs {name}")
-    if (payload.get("namespace") or "") != (namespace or ""):
-        raise TokenError(
-            f"Token namespace mismatch: {payload.get('namespace')!r} vs {namespace!r}"
-        )
-    if int(payload.get("grace_period_seconds", 0)) != int(grace_period_seconds):
-        raise TokenError(
-            f"Token grace_period mismatch: "
-            f"{payload.get('grace_period_seconds')} vs {grace_period_seconds}"
-        )
-    if caller is not None:
-        assert_caller_matches(payload.get("caller"), caller)
-
-
-def assert_caller_matches(
-    token_caller: dict | None, current_caller: dict,
-) -> None:
-    """Reject tokens issued for a different MCP-server kube identity.
-
-    Destructive-op tools (`delete_resource` and the deprecated
-    bulk_*/delete_* family — the latter removed in v0.5.0) sign their
-    tokens with the issuer's `get_caller_identity()` snapshot. A leaked
-    token replayed against a different MCP server (which is running as
-    a different ServiceAccount / user) must be rejected — otherwise the
-    "two-step confirmation" pattern collapses into "anyone with the
-    token can execute".
-
-    `token_caller` is the embedded `{"username", "uid"}` dict from the
-    token's payload; `current_caller` is the live `get_caller_identity()`
-    result. Mismatch on either field raises TokenError.
-    """
-    tc = token_caller or {}
-    if tc.get("username", "") != current_caller.get("username", ""):
-        raise TokenError(
-            f"Token caller mismatch: issued for "
-            f"{tc.get('username')!r}, current server runs as "
-            f"{current_caller.get('username')!r}. A leaked token cannot be "
-            "replayed across MCP servers with different identities."
-        )
-    # UID check is a defense-in-depth: username is the primary identity
-    # claim in Kubernetes, UID is stable across renames.
-    if tc.get("uid", "") != current_caller.get("uid", ""):
-        raise TokenError(
-            "Token caller UID mismatch — same username but different "
-            "underlying identity (token replay across distinct SAs?)"
-        )
 
 
 # ===========================================================================

@@ -136,8 +136,8 @@
 
 ## 删除
 
-> **统一二次确认模型**，详见 [tools.md → 删除二次确认](./tools.md#删除二次确认)。
+> v0.5.2 起删除是**单步**：`delete_resource(kind, name, namespace=None, grace_period_seconds=30)`。原先的"预览 → confirm_token → 真删"两步流程已移除——LLM agent 既发请求又提交 token，HMAC 二次确认不构成有效防护。守门由 `K8S_MCP_READ_ONLY`（全局 kill switch）+ `K8S_MCP_NAMESPACE_ALLOWLIST`（namespace 白名单）承担。
 
-### 通用两步（任意 Kind）
+### 通用单步（任意 Kind）
 
-- `delete_resource(kind, name, namespace=None, confirm=False, confirmation_token=None, grace_period_seconds=30)` — 任意 Kind；走 `confirm=False` 预览拿 token → `confirm=True + confirmation_token` 真删
+- `delete_resource(kind, name, namespace=None, grace_period_seconds=30)` — 任意 Kind；cluster-scoped 资源（无 namespace）不设 `namespace`。受 `READ_ONLY` 和 `NAMESPACE_ALLOWLIST` 守门。

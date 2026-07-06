@@ -153,8 +153,7 @@ export K8S_MCP_DEFAULT_TAIL_LINES=100                         # default --tail f
 # ---------- 3. Write gates (writes enabled by default) ----------
 # export K8S_MCP_READ_ONLY=true                               # true → every write tool raises PermissionError
 # export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod         # only these namespaces writable; cluster-scoped writes also rejected
-export K8S_MCP_DELETE_TOKEN_SECRET="$(openssl rand -hex 32)"  # required — HMAC key for delete two-step tokens
-export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300                   # token TTL seconds (default 5 min)
+# v0.5.2: deletes are single-step — no token confirmation needed
 
 # ---------- 4. Runtime safety nets (defaults are sane) ----------
 export K8S_MCP_RATE_LIMIT_RPM=120                             # per-tool RPM cap; 0 disables
@@ -189,12 +188,6 @@ export K8S_MCP_READ_ONLY=true
 # Namespace allowlist for writes. Reads are unrestricted.
 # Cluster-scoped writes (no namespace) are rejected when this is set.
 export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod
-
-# HMAC secret for delete confirmation tokens. CHANGE THIS in production.
-export K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32)
-
-# Token TTL in seconds (default 300 = 5 min).
-export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 ```
 
 ## Notifier webhooks

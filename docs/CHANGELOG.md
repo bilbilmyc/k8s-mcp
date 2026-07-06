@@ -6,6 +6,76 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-07-07
+
+### Changed — `delete_resource` is now single-step
+
+Removed the two-step `preview → HMAC confirmation_token → execute` flow.
+`delete_resource(kind, name, namespace=None, grace_period_seconds=30)` now
+executes directly. In an LLM-driven MCP scenario the same agent both
+issues and submits the confirmation token, so HMAC verification adds no
+real defense — it's ceremony that costs configuration surface and
+runtime cost without raising the security bar.
+
+Gating is now solely:
+
+- `K8S_MCP_READ_ONLY=true` — global kill switch, raises `PermissionError`
+  for every write tool.
+- `K8S_MCP_NAMESPACE_ALLOWLIST` — namespace allowlist for writes;
+  cluster-scoped writes (no `namespace=`) are also refused when set.
+
+### Removed
+
+- `K8S_MCP_DELETE_TOKEN_SECRET` setting and its `change-me` startup gate
+  (`enforce_write_safety()`). Any 32-byte secret was previously required
+  to enable writes; that's gone now.
+- `K8S_MCP_DELETE_TOKEN_TTL_SECONDS` setting.
+- All `safety.py` token helpers (`TokenError`, `issue_token`,
+  `verify_token`, `make_delete_payload`, `assert_payload_matches`,
+  `assert_caller_matches`).
+- `client.get_caller_identity()` and its 5-minute TTL cache (was used
+  only for caller-binding on the deleted token flow).
+- `tests/test_caller_binding.py`, `tests/test_safety_delete.py`,
+  `tests/test_write_safety.py` (covered the deleted flow).
+
+### Fixed — `find_prometheus_service` URL on NodePort / LoadBalancer
+
+Previously `_resolve_prometheus_url` always built `clusterIP:port` via
+`_service_url(svc)`, even when matching a NodePort / LoadBalancer
+Service. Test
+`test_resolve_wide_scan_prefers_nodeport_over_clusterip` was literally
+documenting this as expected behavior. Added `_node_internal_ip()` and
+`_external_service_url()`:
+
+- NodePort → `http://<first-node-internal-ip>:<nodePort>`
+- LoadBalancer → `http://<lb-ingress>:<port>` (falls through to
+  ClusterIP if no ingress is provisioned yet)
+- ClusterIP / unknown → `None` (caller falls back to `_service_url`)
+
+URL fallback chain (priority order):
+
+1. `K8S_MCP_PROMETHEUS_URL` (if set)
+2. Service candidate from the hardcoded list (now externally reachable
+   when type allows)
+3. Wide-scan fallback (now externally reachable when type allows)
+
+### Tests
+
+- New `tests/test_delete.py` — 7 tests for single-step delete (read-only
+  rejection, allowlist rejection, cluster-scoped block when allowlist
+  set, happy path namespaced, happy path cluster-scoped, `NotFoundError`
+  → `LookupError`, unknown kind → `ValueError`).
+- Updated `test_prometheus.py` — 3 new tests cover NodePort URL
+  construction, the no-InternalIP fallback, and the hardcoded
+  candidate's external URL.
+- `test_secret_audit.py` — drop `caller_user`/`caller_uid` assertions
+  (caller identity removed).
+- `test_call_tool_safety_nets.py` — drop obsolete "avoid the
+  enforce_write_safety token check" comment.
+
+Total: 630 tests passing (was 655; −37 token tests + 7 new delete + 5
+other minor shifts).
+
 ## [0.5.1] — 2026-07-06
 
 ## [0.5.0] — 2026-07-06

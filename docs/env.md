@@ -50,10 +50,10 @@ k8s-mcp 通过 pydantic-settings 读取环境变量，所有变量以 `K8S_MCP_`
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `K8S_MCP_READ_ONLY` | `false` | `true` 时所有写工具（apply / create / patch / delete）拒绝并抛 `PermissionError` |
+| `K8S_MCP_READ_ONLY` | `false` | `true` 时所有写工具（apply / create / patch / delete）拒绝并抛 `PermissionError`。全局 kill switch。 |
 | `K8S_MCP_NAMESPACE_ALLOWLIST` | (空) | 逗号分隔的 namespace 白名单。设置后，**仅这些 namespace 允许写**；cluster-scoped 资源（无 namespace）的写入也会被拒。读取不受影响。 |
-| `K8S_MCP_DELETE_TOKEN_SECRET` | `change-me` | 删除二次确认 token 的 HMAC 签名密钥。**必填**：`K8S_MCP_READ_ONLY=false` 时若保留字面默认值 `change-me` 或留空，server 拒绝启动（v0.4.2 起从软警告升级为启动闸门）。生产用 `openssl rand -hex 32` 生成；任何持有源码的人都能伪造默认值签名的 token，所以默认密钥等同于无认证。 |
-| `K8S_MCP_DELETE_TOKEN_TTL_SECONDS` | `300` | token 有效期（秒），默认 5 分钟 |
+
+> **v0.5.2 起删除二次确认 token 已移除**——在 LLM-driven 场景里同一个 agent 既发请求又提交 token，HMAC 二次确认不构成有效防护（agent 可以一次性生成、提交两个调用）。唯一需要的守门就是 `READ_ONLY` + `NAMESPACE_ALLOWLIST`。
 
 ### 运行时安全网（P0 hardening，v0.4.6 起）
 
@@ -147,8 +147,6 @@ export K8S_MCP_API_CA_CERT=/etc/k8s/ca.crt
 # 安全
 export K8S_MCP_READ_ONLY=false
 export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod
-export K8S_MCP_DELETE_TOKEN_SECRET=$(openssl rand -hex 32)
-export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300
 
 # Prometheus 发现侧白名单（多租户 / 大集群时建议设置）
 export K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST=monitoring,observability
@@ -167,8 +165,7 @@ export K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST=monitoring,observability
         "K8S_MCP_API_TOKEN": "eyJhbGciOiJSUzI1NiIs...",
         "K8S_MCP_READ_ONLY": "false",
         "K8S_MCP_NAMESPACE_ALLOWLIST": "default,app,prod",
-        "K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST": "monitoring,observability",
-        "K8S_MCP_DELETE_TOKEN_SECRET": "<32字节hex>"
+        "K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST": "monitoring,observability"
       }
     }
   }

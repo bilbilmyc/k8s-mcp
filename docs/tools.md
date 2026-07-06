@@ -148,30 +148,38 @@ API group 找唯一匹配。
 
 ---
 
-## 删除二次确认
+## 删除（v0.5.2 起单步）
 
-### `delete_resource` —— 通用两步流程
+### `delete_resource` —— 单步删除
 
 任意 Kind（包括 Secret、Deployment、Namespace 等）走这个：
 
-1. 调 `delete_resource(kind=..., name=..., namespace=..., confirm=False)`。
-2. 工具返回 `{preview_yaml, confirmation_token, expires_in_seconds}`。
-3. 把 YAML 给用户看，明确确认。
-4. 再调一次，带 `confirm=True` 和 `confirmation_token`。token 里的
-   `kind / name / namespace / grace_period` 必须匹配。
+```python
+delete_resource(kind, name, namespace=None, grace_period_seconds=30)
+```
 
-Token 是 HMAC-SHA256 签名（`K8S_MCP_DELETE_TOKEN_SECRET`），默认 5 分钟过期。
-**v0.4.2 起**：写模式下若保留字面默认值 `change-me` 或留空，server 拒绝启动（之前只是软警告）。
-生产用 `openssl rand -hex 32` 生成密钥——任何持有源码的人都能伪造默认值签名的 token，所以默认密钥等同于无认证。
+- **守门**：`K8S_MCP_READ_ONLY=true` 时直接拒；设了
+  `K8S_MCP_NAMESPACE_ALLOWLIST` 时目标 namespace 不在白名单（或
+  cluster-scoped 资源无 namespace）也拒。
+- **找不到资源**：apiserver 返回 404 → `LookupError("... already gone ...")`。
+- **未知 Kind**：`ValueError("Unknown kind: ...")`,建议先
+  `get_api_resources()` 看支持列表。
 
 ### 一步删除工具（已删除）
 
 v0.5.0 起：`delete_pod` / `delete_pvc` / `delete_configmap` / `delete_service`
-/ `delete_ingress` 全部移除，统一走 `delete_resource` 两步流程。批量工具
+/ `delete_ingress` 全部移除，统一走 `delete_resource`。批量工具
 （`bulk_set_image` / `bulk_restart` / `bulk_scale` / `bulk_delete_pvc`）
 也一并移除 —— `scale_workload` / `restart_workload` / `set_image` 已支持
 列表型 `name=` 参数，PVC 批量清理改用 `apply_yaml` + `label_selector` 收敛后
 走 `delete_resource`。
+
+### 二步预览流程（v0.5.2 起移除）
+
+v0.4.x ~ v0.5.1 的 "预览 + HMAC 确认 token" 流程已移除。理由：在
+LLM-driven 场景里同一个 agent 既发 preview 调用又发 confirm 调用，
+HMAC token 校验不构成任何额外防护（agent 自己就能伪造），徒增配置项。
+守门完全交给 `READ_ONLY` + `NAMESPACE_ALLOWLIST`。
 
 ---
 

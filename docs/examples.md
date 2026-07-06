@@ -120,17 +120,12 @@
 > 你："把 prod namespace 里所有 `app=db` 标签的孤儿 PVC 清掉。"
 
 > Claude → `list_resources(kind="PersistentVolumeClaim", namespace="prod", label_selector="app=db")` 列出所有匹配项 →
-> 用户逐个（或一次性脚本）确认 → `delete_resource(kind="PersistentVolumeClaim", name=..., namespace="prod", confirm=False)` 预览 →
-> `delete_resource(..., confirm=True, confirmation_token=...)` 逐个真删。
+> 用户逐个（或一次性脚本）确认 → 逐个调 `delete_resource(kind="PersistentVolumeClaim", name=..., namespace="prod")`。
 
 ---
 
-## 13. 删除任意资源（两步确认）
+## 13. 删除任意资源（v0.5.2 起单步）
 
 > 你："把它删了。"
 
-> Claude → `delete_resource(confirm=False)` → 给你看 YAML 预览。
-
-> 你："好，删吧。"
-
-> Claude → `delete_resource(confirm=True, confirmation_token=...)`。
+> Claude → 调 `delete_resource(kind="Pod", name="api-1", namespace="default")` 直接执行（受 `READ_ONLY` + `NAMESPACE_ALLOWLIST` 守门）。如需先看预览再确认，Agent 可以先 `get_resource_yaml` 给用户看一眼再删——确认机制由 agent + 用户决定，不再由工具强制。

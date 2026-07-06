@@ -114,10 +114,16 @@ def _resolve_prometheus_url(settings: Settings) -> str:
             logger.debug("prom discovery: unexpected error for %s/%s: %s", ns, svc, e)
             continue
 
-        # Found a candidate. Resolve ClusterIP + port.
+        # Found a candidate. Resolve to an externally-reachable URL:
+        # NodePort / LoadBalancer get a real `<node-ip>:<node_port>` /
+        # LB-ingress URL, ClusterIP gets `10.96.x.x:port` (only useful when
+        # the MCP server runs in-cluster). The MCP client's local process
+        # can't reach ClusterIP, so NodePort auto-discovery is the path
+        # that makes `prometheus_query()` work without an explicit
+        # `K8S_MCP_PROMETHEUS_URL`.
         try:
             obj = core.read_namespaced_service(name=svc, namespace=ns)
-            url = _service_url(obj)
+            url = _external_service_url(core, obj) or _service_url(obj)
         except Exception as e:  # noqa: BLE001 — defensive
             logger.debug("prom discovery: cannot build URL from %s/%s: %s", ns, svc, e)
             continue
@@ -138,7 +144,7 @@ def _resolve_prometheus_url(settings: Settings) -> str:
     if matches:
         ns_name, svc_obj = matches[0]
         try:
-            url = _service_url(svc_obj)
+            url = _external_service_url(core, svc_obj) or _service_url(svc_obj)
         except Exception as e:  # noqa: BLE001 — defensive
             logger.debug("prom discovery: cannot build URL from %s/%s: %s", ns_name, svc_obj.metadata.name, e)
         else:
@@ -256,6 +262,95 @@ def _service_url(svc_obj: Any) -> str:
         else:
             port = spec.ports[0].port
     return f"{scheme}://{spec.cluster_ip}:{port}"
+
+
+def _node_internal_ip(core: client.CoreV1Api) -> str | None:
+    """Return the first Node's InternalIP, or None if no Node / IP found.
+
+    Used by auto-discover to substitute `<node-ip>` for NodePort Services.
+    The MCP server is on the user's workstation, not in-cluster, so the
+    ClusterIP (10.96.x.x) is unroutable; the Node InternalIP is what
+    `kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type==\"InternalIP\")].address}'`
+    returns and is reachable from any host on the cluster network.
+    """
+    try:
+        for node in core.list_node().items:
+            for addr in (node.status.addresses or []):
+                if addr.type == "InternalIP" and addr.address:
+                    return addr.address
+    except Exception as e:  # noqa: BLE001
+        logger.debug("prom discovery: list_node failed: %s", e)
+    return None
+
+
+def _external_service_url(core: client.CoreV1Api, svc_obj: Any) -> str | None:
+    """Build an externally-reachable URL for a Service, or None if unreachable.
+
+    - NodePort: `<node-ip>:<node_port>` (looked up from any Node's
+      InternalIP). This is the case MCP clients actually need — the
+      ClusterIP `10.96.x.x` is not routable from the user's host.
+    - LoadBalancer: `<lb-ingress-ip-or-host>:<port>` from
+      `Service.status.loadBalancer.ingress`. Falls through to ClusterIP
+      URL if the LB hasn't provisioned ingress yet.
+    - ClusterIP / ExternalName / unknown: None (ClusterIP works only
+      when the MCP server runs in-cluster).
+
+    Returns None for unhandleable types so the caller can fall through
+    to the next candidate / wide-scan match.
+    """
+    spec = svc_obj.spec if hasattr(svc_obj, "spec") else None
+    if not spec:
+        return None
+    svc_type = getattr(spec, "type", None) or "ClusterIP"
+
+    if svc_type == "NodePort":
+        node_port = None
+        for p in (spec.ports or []):
+            if getattr(p, "node_port", None):
+                node_port = p.node_port
+                break
+        if node_port is None:
+            return None
+        node_ip = _node_internal_ip(core)
+        if not node_ip:
+            logger.debug(
+                "prom discovery: NodePort service %s but no Node InternalIP found",
+                getattr(svc_obj.metadata, "name", "?"),
+            )
+            return None
+        return f"http://{node_ip}:{node_port}"
+
+    if svc_type == "LoadBalancer":
+        status = getattr(svc_obj, "status", None)
+        ingress_list = (
+            (status.load_balancer.ingress or [])
+            if status and getattr(status, "load_balancer", None)
+            else []
+        )
+        if not ingress_list:
+            # LB not yet provisioned — fall back to ClusterIP URL.
+            try:
+                return _service_url(svc_obj)
+            except ValueError:
+                return None
+        first = ingress_list[0]
+        host = getattr(first, "ip", None) or getattr(first, "hostname", None)
+        if not host:
+            try:
+                return _service_url(svc_obj)
+            except ValueError:
+                return None
+        port = 9090
+        if spec.ports:
+            for p in spec.ports:
+                if p.name == "http" or p.name == "web":
+                    port = p.port
+                    break
+            else:
+                port = spec.ports[0].port
+        return f"http://{host}:{port}"
+
+    return None
 
 
 def _external_url_and_node_port(svc_obj: Any) -> tuple[str | None, int | None]:

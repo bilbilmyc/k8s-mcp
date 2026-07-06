@@ -1591,8 +1591,9 @@ def test_resolve_wide_scan_finds_non_standard_namespace(monkeypatch):
 
 def test_resolve_wide_scan_prefers_nodeport_over_clusterip(monkeypatch):
     """When both ClusterIP and NodePort Prometheus Services exist, the
-    wide scan picks NodePort first — that's the one the MCP client can
-    actually reach without bridging."""
+    wide scan picks NodePort first — and now returns the real externally-
+    reachable URL by looking up a Node InternalIP, not the unreachable
+    ClusterIP `10.96.x.x`."""
     monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
     monkeypatch.delenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", raising=False)
     reset_settings_cache()
@@ -1611,13 +1612,85 @@ def test_resolve_wide_scan_prefers_nodeport_over_clusterip(monkeypatch):
             ],
         },
     )
+    core.list_node = lambda: type("R", (), {
+        "items": [
+            type("N", (), {
+                "status": type("S", (), {
+                    "addresses": [
+                        type("A", (), {"type": "InternalIP", "address": "12.2.40.40"})(),
+                        type("A", (), {"type": "Hostname", "address": "node1"})(),
+                    ],
+                })(),
+            })(),
+        ],
+    })()
     monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
     url = prometheus._resolve_prometheus_url(prometheus.get_settings())
-    # NodePort's URL still goes through `_service_url` (cluster_ip:port) —
-    # the wide scan's job is to *find* the better Service; NodePort→node-ip
-    # substitution is the agent's responsibility via `find_prometheus_service`.
-    # We just verify NodePort is preferred when sorted.
-    assert url == "http://10.96.20.5:9090"
+    # NodePort is preferred, AND the URL is now the real externally-reachable
+    # form (`<node-ip>:<node_port>`) instead of the ClusterIP URL the
+    # MCP client cannot route to.
+    assert url == "http://12.2.40.40:45149"
+
+
+def test_resolve_hardcoded_nodeport_candidate_returns_external_url(monkeypatch):
+    """When the first hardcoded candidate is itself a NodePort Service
+    (e.g. kube-prometheus-stack on a cluster that pre-exposes it), step 2
+    of `_resolve_prometheus_url` must also build the NodePort URL with
+    Node-IP substitution — not just fall through to ClusterIP."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    class _Core:
+        def read_namespaced_service(self, name, namespace, **kw):
+            return _svc(
+                "monitoring", "kube-prometheus-stack-prometheus",
+                ip="10.96.10.20", port=9090,
+                svc_type="NodePort", node_port=31200,
+            )
+
+        def list_node(self):
+            return type("R", (), {
+                "items": [
+                    type("N", (), {
+                        "status": type("S", (), {
+                            "addresses": [
+                                type("A", (), {"type": "InternalIP", "address": "10.0.0.5"})(),
+                            ],
+                        })(),
+                    })(),
+                ],
+            })()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    url = prometheus._resolve_prometheus_url(prometheus.get_settings())
+    assert url == "http://10.0.0.5:31200"
+
+
+def test_resolve_nodeport_falls_back_to_clusterip_when_no_node(monkeypatch):
+    """NodePort Service but no Node has an InternalIP (e.g. partial test
+    fixture): `_external_service_url` returns None and we fall through
+    to `_service_url`'s ClusterIP URL. The MCP client won't be able to
+    reach it, but at least the tool returns a parseable URL and the
+    agent sees a concrete failure on the HTTP call rather than a
+    confusing LookupError."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
+    reset_settings_cache()
+
+    class _Core:
+        def read_namespaced_service(self, name, namespace, **kw):
+            return _svc(
+                "monitoring", "kube-prometheus-stack-prometheus",
+                ip="10.96.10.20", port=9090,
+                svc_type="NodePort", node_port=31200,
+            )
+
+        def list_node(self):
+            # Empty — no addresses found.
+            return type("R", (), {"items": []})()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    url = prometheus._resolve_prometheus_url(prometheus.get_settings())
+    assert url == "http://10.96.10.20:9090"
 
 
 def test_resolve_wide_scan_respects_allowlist(monkeypatch):

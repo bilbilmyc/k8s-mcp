@@ -43,7 +43,7 @@ def _clean_env(monkeypatch):
 
     # Stable caller identity for tests so token-issue + token-verify
     # stay in the same identity without standing up an apiserver.
-    from k8s_mcp.client import get_caller_identity, reset_caller_identity_cache
+    from k8s_mcp.client import reset_caller_identity_cache
     reset_caller_identity_cache()
     monkeypatch.setattr(
         "k8s_mcp.client.get_caller_identity",

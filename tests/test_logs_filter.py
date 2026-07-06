@@ -254,7 +254,7 @@ def test_multi_pod_uses_threadpool_when_count_above_threshold(monkeypatch):
     import threading
     import time
 
-    SLEEP_PER_POD_S = 0.06
+    sleep_per_pod_s = 0.06
     pod_names = [f"web-{i}" for i in range(5)]
     active = {"n": 0, "peak": 0}
     lock = threading.Lock()
@@ -276,7 +276,7 @@ def test_multi_pod_uses_threadpool_when_count_above_threshold(monkeypatch):
                 if active["n"] > active["peak"]:
                     active["peak"] = active["n"]
             try:
-                time.sleep(SLEEP_PER_POD_S)
+                time.sleep(sleep_per_pod_s)
                 return f"2026-01-01T00:00:00.000Z hi from {name}\n"
             finally:
                 with lock:
@@ -287,7 +287,7 @@ def test_multi_pod_uses_threadpool_when_count_above_threshold(monkeypatch):
     out = logs.get_pod_logs(label_selector="app=web", namespace="default")
     elapsed = time.monotonic() - start
 
-    serial_lower_bound = len(pod_names) * SLEEP_PER_POD_S
+    serial_lower_bound = len(pod_names) * sleep_per_pod_s
     # Strictly faster than serial — gives 2× headroom for CI noise.
     assert elapsed < serial_lower_bound * 0.5, (
         f"expected parallel speedup; elapsed={elapsed:.3f}s, "

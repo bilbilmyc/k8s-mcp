@@ -51,7 +51,6 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-import yaml
 from kubernetes.client.rest import ApiException
 
 from ..client import get_caller_identity
@@ -638,7 +637,6 @@ def _execute_patches(
             new_manifest = patcher(resource)
             cached = dc_resource_cache.get(kind)
             if cached is None:
-                from kubernetes import dynamic as _dyn_mod
                 cached = generic._dyn_client().resources.get(
                     api_version=api_version, kind=kind
                 )

@@ -11,14 +11,10 @@ that need a different identity monkeypatch the helper directly.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from k8s_mcp import safety
-from k8s_mcp.config import reset_settings_cache
 from k8s_mcp.tools import bulk
-
 
 # ---------------------------------------------------------------------------
 # safety.make_delete_payload / assert_payload_matches — the binding contract
@@ -132,8 +128,11 @@ def test_bulk_token_roundtrip_with_same_identity(monkeypatch):
 def test_bulk_token_rejected_when_caller_changes(monkeypatch):
     """A token issued as alice cannot be replayed by a process now
     running as bob — even if the secret is the same."""
-    alice = lambda: {"username": "alice", "uid": "u-1", "groups": []}
-    bob = lambda: {"username": "bob", "uid": "u-2", "groups": []}
+    def alice():
+        return {"username": "alice", "uid": "u-1", "groups": []}
+
+    def bob():
+        return {"username": "bob", "uid": "u-2", "groups": []}
 
     monkeypatch.setattr("k8s_mcp.client.get_caller_identity", alice)
     monkeypatch.setattr("k8s_mcp.tools.bulk.get_caller_identity", alice)
@@ -155,10 +154,12 @@ def test_leaked_token_replay_across_identities_fails(monkeypatch):
     """Simulate a token stolen from process-A (running as alice) being
     presented to process-B (running as bob). Even if bob knows the
     HMAC secret (e.g. via env leak), the caller binding refuses."""
-    from k8s_mcp.tools import delete_tool
 
-    alice = lambda: {"username": "alice", "uid": "u-1", "groups": []}
-    bob = lambda: {"username": "bob", "uid": "u-2", "groups": []}
+    def alice():
+        return {"username": "alice", "uid": "u-1", "groups": []}
+
+    def bob():
+        return {"username": "bob", "uid": "u-2", "groups": []}
 
     # Process-A issues the token.
     monkeypatch.setattr("k8s_mcp.client.get_caller_identity", alice)

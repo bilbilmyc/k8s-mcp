@@ -209,13 +209,13 @@ def test_get_events_for_object_cluster_scoped(monkeypatch):
 
 def _ev(kind, name, reason, msg, *, ts=None):
     """Build a fake k8s Event object with the fields _collect_events reads."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     e = type("E", (), {})()
     e.type = "Warning"
     e.reason = reason
     e.involved_object = type("O", (), {"kind": kind, "name": name})()
     e.message = msg
-    e.last_timestamp = ts or datetime(2026, 1, 1, tzinfo=timezone.utc)
+    e.last_timestamp = ts or datetime(2026, 1, 1, tzinfo=UTC)
     e.first_timestamp = None
     e.event_time = None
     e.metadata = type("M", (), {"creation_timestamp": None})()
@@ -293,9 +293,9 @@ def test_list_events_namespaces_multi_sorts_by_recency(monkeypatch):
     """When fanned-out results merge, the newest events surface first —
     not the order of namespace iteration. Verified by stamping distinct
     lastTimestamp values and checking the rendered row order."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    newer = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    newer = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
     older = newer - timedelta(hours=2)
 
     class _CoreV1:
@@ -314,8 +314,8 @@ def test_list_events_namespaces_multi_sorts_by_recency(monkeypatch):
 def test_list_events_namespaces_multi_truncates_to_limit(monkeypatch):
     """Merged fan-out truncates to `limit`, not 2×limit. We push 4
     events (2 per namespace) and ask for 3 → exactly 3 rendered."""
-    from datetime import datetime, timedelta, timezone
-    base = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    from datetime import datetime, timedelta
+    base = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
 
     def _events_for(ns):
         # 2 events per namespace, with descending timestamps

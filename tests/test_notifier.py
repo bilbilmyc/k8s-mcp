@@ -433,6 +433,9 @@ def test_retry_on_5xx_succeeds_on_second_try(monkeypatch, _retry_server):
         (503, b'{"msg":"maintenance"}'),
         (200, b'{"StatusCode":0,"Msg":"ok"}'),
     ])
+    # The local _retry_server binds on http://localhost; permit cleartext
+    # only for this test (the production gate rejects http by default).
+    monkeypatch.setenv("K8S_MCP_NOTIFIER_URL_ALLOW_HTTP", "true")
     monkeypatch.setenv("K8S_MCP_NOTIFIERS", json.dumps([
         {"name": "ops", "type": "feishu", "url": srv.url()},
     ]))
@@ -460,6 +463,7 @@ def test_retry_exhausted_returns_failure(monkeypatch, _retry_server):
         (503, b'{"msg":"down"}'),
         (503, b'{"msg":"down"}'),
     ])
+    monkeypatch.setenv("K8S_MCP_NOTIFIER_URL_ALLOW_HTTP", "true")
     monkeypatch.setenv("K8S_MCP_NOTIFIERS", json.dumps([
         {"name": "ops", "type": "feishu", "url": srv.url()},
     ]))

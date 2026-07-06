@@ -62,6 +62,7 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -167,7 +168,14 @@ def _parse_notifiers() -> list[dict]:
 
 
 def _validate_notifier(n: dict, idx: int) -> str | None:
-    """Return an error message if `n` is missing required fields, else None."""
+    """Return an error message if `n` is missing required fields, else None.
+
+    URL safety check: only `https://` is accepted by default. Operators
+    running against localhost test webhooks can opt in to cleartext via
+    `K8S_MCP_NOTIFIER_URL_ALLOW_HTTP=true`; setting
+    `K8S_MCP_NOTIFIER_URL_ALLOWLIST=hooks.slack.com,open.feishu.cn`
+    further restricts accepted hosts (exact match).
+    """
     if "name" not in n or not isinstance(n["name"], str) or not n["name"]:
         return f"notifier[{idx}]: missing or empty 'name'"
     if "type" not in n or n["type"] not in {"feishu", "feishu_post", "feishu_card",
@@ -175,6 +183,51 @@ def _validate_notifier(n: dict, idx: int) -> str | None:
         return f"notifier[{idx}] ({n.get('name','?')}): 'type' must be one of feishu|feishu_post|feishu_card|slack|wecom|generic"
     if "url" not in n or not isinstance(n["url"], str) or not n["url"]:
         return f"notifier[{idx}] ({n.get('name','?')}): missing or empty 'url'"
+    err = _validate_notifier_url(n["url"])
+    if err:
+        return f"notifier[{idx}] ({n.get('name','?')}): {err}"
+    return None
+
+
+def _validate_notifier_url(url: str) -> str | None:
+    """Return an error message if `url` is not safe to POST to, else None.
+
+    Gate:
+      - scheme must be `https` unless K8S_MCP_NOTIFIER_URL_ALLOW_HTTP=true
+      - if K8S_MCP_NOTIFIER_URL_ALLOWLIST is set, host must be in it
+        (exact match; no subdomain wildcards)
+      - any other scheme (`http`, `file`, `ftp`, `gopher`, etc.) is
+        refused unconditionally
+    """
+    try:
+        parsed = urlparse(url)
+    except (ValueError, TypeError) as e:
+        return f"invalid url: {e}"
+    scheme = (parsed.scheme or "").lower()
+    if scheme == "https":
+        pass
+    elif scheme == "http":
+        if not get_settings().notifier_url_allow_http:
+            return (
+                "url scheme 'http' refused — only 'https' is accepted. "
+                "Set K8S_MCP_NOTIFIER_URL_ALLOW_HTTP=true to permit cleartext "
+                "POSTs (e.g. for localhost test webhooks). NOTE: cleartext "
+                "leaks the full message and any embedded credentials."
+            )
+    else:
+        return (
+            f"url scheme {scheme!r} refused — only 'https' is accepted "
+            "(or 'http' with K8S_MCP_NOTIFIER_URL_ALLOW_HTTP=true)."
+        )
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return "url has no host"
+    allow = get_settings().notifier_url_allowlist
+    if allow and host not in {h.lower() for h in allow}:
+        return (
+            f"url host {host!r} not in K8S_MCP_NOTIFIER_URL_ALLOWLIST "
+            f"({sorted(allow)})"
+        )
     return None
 
 

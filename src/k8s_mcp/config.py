@@ -80,6 +80,15 @@ class Settings(BaseSettings):
     # 例：`K8S_MCP_NOTIFIERS='[{"name":"ops","type":"feishu",
     #   "url":"https://open.feishu.cn/...","cluster_label":"prod"}]'`
     notifiers: str | None = None
+    # notifier URL safety gate. By default only `https://` URLs are
+    # accepted — refusing cleartext POSTs that would leak bearer tokens
+    # / message contents in transit and refusing SSRF to internal hosts.
+    # Set NOTIFIER_URL_ALLOW_HTTP=true to permit http for local testing.
+    # Optional NOTIFIER_URL_ALLOWLIST is a comma-separated host allowlist
+    # (exact match) — when set, https URLs whose host is not in the list
+    # are refused too. Default behavior is "any https host".
+    notifier_url_allow_http: bool = False
+    notifier_url_allowlist: list[str] | None = None
 
     @field_validator("namespace_allowlist", mode="before")
     @classmethod
@@ -99,6 +108,16 @@ class Settings(BaseSettings):
     @field_validator("prometheus_namespace_allowlist", mode="before")
     @classmethod
     def _split_prom_allowlist(cls, v: Any) -> list[str] | None:
+        """与 `namespace_allowlist` 同形的逗号分隔解析（独立字段，独立的解析器）。"""
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
+    @field_validator("notifier_url_allowlist", mode="before")
+    @classmethod
+    def _split_notifier_allowlist(cls, v: Any) -> list[str] | None:
         """与 `namespace_allowlist` 同形的逗号分隔解析（独立字段，独立的解析器）。"""
         if v is None or v == "":
             return None

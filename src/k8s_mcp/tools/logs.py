@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
@@ -286,21 +287,74 @@ def _fetch_logs_multi(
     pod_names = [p.metadata.name for p in ret.items]
     if not pod_names:
         return []
-    records: list[dict[str, str]] = []
-    for pn in pod_names:
+
+    # Parallelize pod log fetches when there are enough to make the
+    # thread-pool overhead worthwhile. Each fetch is an independent HTTP
+    # round-trip to the apiserver, so they parallelize cleanly. Threshold
+    # is small to keep small queries (the common case) free of
+    # concurrency overhead and to preserve stable ordering for tests
+    # that pin pod-call order at low N.
+    if len(pod_names) < _MULTI_PARALLEL_THRESHOLD:
+        records: list[dict[str, str]] = []
+        for pn in pod_names:
+            try:
+                records.extend(_fetch_logs_single(
+                    pn, namespace, container, tail_lines, since_seconds,
+                    since_time, previous, timestamps,
+                ))
+            except (LookupError, ValueError) as e:
+                # Skip pods that errored but keep going
+                logger.warning("logs: skipping pod %s: %s", pn, e)
+                records.append({
+                    "pod": pn, "container": container or "",
+                    "time": "", "line": f"[error: {e}]",
+                })
+        return records
+
+    # Parallel path. We collect per-pod results then merge by pod name so
+    # the final ordering is deterministic regardless of completion order
+    # (as_completed doesn't guarantee FIFO). `max_workers` is capped to
+    # avoid hammering the apiserver on a 50-pod Deployment.
+    per_pod: dict[str, list[dict[str, str]]] = {pn: [] for pn in pod_names}
+    errors: dict[str, str] = {}
+
+    def _worker(pn: str) -> None:
         try:
-            records.extend(_fetch_logs_single(
+            per_pod[pn] = _fetch_logs_single(
                 pn, namespace, container, tail_lines, since_seconds,
                 since_time, previous, timestamps,
-            ))
+            )
         except (LookupError, ValueError) as e:
-            # Skip pods that errored but keep going
-            logger.warning("logs: skipping pod %s: %s", pn, e)
+            errors[pn] = str(e)
+
+    with ThreadPoolExecutor(
+        max_workers=min(_MULTI_PARALLEL_MAX_WORKERS, len(pod_names)),
+    ) as ex:
+        list(ex.map(_worker, pod_names))
+
+    records = []
+    for pn in pod_names:  # iteration in original list order — stable output
+        if pn in errors:
+            logger.warning("logs: skipping pod %s: %s", pn, errors[pn])
             records.append({
                 "pod": pn, "container": container or "",
-                "time": "", "line": f"[error: {e}]",
+                "time": "", "line": f"[error: {errors[pn]}]",
             })
+        else:
+            records.extend(per_pod[pn])
     return records
+
+
+# Above this pod count we fan out log fetches across a thread pool.
+# Each fetch is an independent apiserver round-trip; below the threshold
+# the per-call thread-pool overhead exceeds the win, and serial behavior
+# keeps test assertions that pin call order stable.
+_MULTI_PARALLEL_THRESHOLD = 5
+# Cap on concurrent in-flight apiserver log requests. The default
+# ThreadPoolExecutor would scale to os.cpu_count()+4 (~36 on this dev
+# box); for an apiserver that's fine, but on a busy 200-pod namespace
+# we want to bound the fan-out so we don't drown the apiserver.
+_MULTI_PARALLEL_MAX_WORKERS = 8
 
 
 def _parse_lines(text: str, *, pod: str, container: str) -> list[dict[str, str]]:

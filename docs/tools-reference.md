@@ -1,4 +1,4 @@
-# 工具参考（75 个，按功能分类）
+# 工具参考（76 个，按功能分类）
 
 > 这是**完整目录**——每个工具一行签名，按"读 / 写 / 删"分组。
 > 详细使用说明（陷阱、流程、为什么这么设计）见 [tools.md](./tools.md)。
@@ -38,6 +38,7 @@
 
 ### 排障 / 反向查
 
+- `diagnose_pod(name, namespace="default")` — ⭐ 单 Pod 一键深度体检；按 phase 自动分派：**Pending** 出调度诊断（突出调度器自己的 `Unschedulable` 裁决 + PVC 绑定 + requests 汇总，不重算每节点拟合）/ **Running / CrashLoop / Error** 出运行时诊断（每容器 state/lastState、OOMKilled、exit code、restart，CrashLoop 时自动 tail previous 容器最后 20 行日志）；尾部附最近 events。与 `cluster_health_snapshot` 互补（那个给广度，这个给深度）
 - `find_images(image_substring, namespace=None, kinds=None)` — 扫所有工作负载找匹配 image
 - `list_pods(namespace=None, label_selector=None, field_selector=None, include_all=False)` — Pod 列表（PHASE / RESTARTS / NODE）
 - `exec_pod(pod_name, command, namespace="default", container=None, timeout_seconds=30)` — ⚠️ 高权限：批模式在 Pod 容器里跑命令（argv list，不走 shell；要 pipe/redirect 显式 `["sh","-c","..."]`）；自动选单容器 Pod 的第一个容器，多容器必须显式 `container=`；stdout / stderr 分离 + 真 exit code；超时断开 WebSocket（pod 里命令可能不终止）

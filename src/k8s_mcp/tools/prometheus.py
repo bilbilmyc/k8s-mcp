@@ -159,24 +159,52 @@ def _resolve_prometheus_url(settings: Settings) -> str:
 def _wide_scan_prometheus_matches(
     core: client.CoreV1Api,
     settings: Settings,
+    *,
+    namespace: str | None = None,
 ) -> list[tuple[str, Any]]:
-    """Scan every namespace (or allowlist subset) for Prometheus-looking
-    Services. Returns a list of `(namespace, svc_obj)` tuples sorted by
-    preference: NodePort / LoadBalancer first (externally reachable from
-    the MCP client), ClusterIP last. Empty list = nothing found.
+    """Scan one or every namespace for Prometheus-looking Services.
+
+    Returns a list of `(namespace, svc_obj)` tuples. In cluster-wide
+    mode, sorted by preference: NodePort / LoadBalancer first
+    (externally reachable from the MCP client), ClusterIP last.
+
+    Args:
+        namespace: when set, only that namespace is scanned via
+            `list_namespaced_service`. Allowlist is bypassed because the
+            caller asked for a specific namespace — silently dropping it
+            would be wrong. When None, cluster-wide via
+            `list_service_for_all_namespaces`, bounded by
+            `settings.prometheus_namespace_allowlist` when set (see
+            `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST`).
 
     Used by:
       - `_resolve_prometheus_url` as a fallback after hardcoded candidates miss
-      - `find_prometheus_service` for cluster-wide discovery
-
-    Bounded by `settings.prometheus_namespace_allowlist` when set — see
-    `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST`. None = scan every namespace.
+      - `find_prometheus_service` for both single-ns and cluster-wide discovery
 
     Single cluster-wide `list_service_for_all_namespaces` call (instead
     of N×`list_namespaced_service`). For a 50-ns cluster this is one
     apiserver round-trip instead of 50 — ~50× faster on slow apiservers.
     The allowlist is applied client-side on the resulting items.
     """
+    if namespace is not None:
+        try:
+            items = core.list_namespaced_service(namespace=namespace).items
+        except ApiException as e:
+            logger.debug(
+                "prom scan: namespaced list (%s) failed: %s", namespace, e,
+            )
+            return []
+        except Exception as e:  # noqa: BLE001 — defensive
+            logger.debug(
+                "prom scan: namespaced list (%s) error: %s", namespace, e,
+            )
+            return []
+        # Single-namespace path: trust the apiserver's order; don't
+        # reshuffle by svc type since allowlist is bypassed and the
+        # caller already constrained to one ns.
+        return [(namespace, svc) for svc in items]
+
+    # Cluster-wide path.
     allowlist = settings.prometheus_namespace_allowlist
     try:
         all_services = core.list_service_for_all_namespaces().items
@@ -348,27 +376,23 @@ def find_prometheus_service(namespace: str | None = None) -> str:
         prometheus_query(..., prometheus_url='http://<node-ip>:<nodePort>')
     """
     core = client.CoreV1Api()
-
-    if namespace:
-        # Explicit single-ns path: allowlist does NOT apply (caller knows
-        # what they want; honoring allowlist here would silently drop the
-        # only result the agent is asking for).
-        pairs = [
-            (s.metadata.namespace, s)
-            for s in core.list_namespaced_service(namespace=namespace).items
-        ]
+    settings = get_settings()
+    # One scan path handles both single-namespace and cluster-wide:
+    # the helper bypasses the namespace allowlist when `namespace` is
+    # given (caller is explicit) and honors it for cluster-wide
+    # discovery. Sorting NodePort/LoadBalancer first only applies in
+    # cluster-wide mode — single-namespace scans keep the apiserver's
+    # natural order, which is fine because the agent asked for a
+    # specific ns and just wants what's there.
+    pairs = _wide_scan_prometheus_matches(core, settings, namespace=namespace)
+    if namespace is not None:
         scanned_label = f"namespace={namespace}"
+    elif settings.prometheus_namespace_allowlist is None:
+        scanned_label = f"{len(pairs)} match(es) across namespaces"
     else:
-        # Cluster-wide scan via shared helper. Honors
-        # `prometheus_namespace_allowlist` when set, so on multi-tenant
-        # clusters you can cap the surface (and cost) without losing the
-        # non-standard-install detection this tool is for.
-        settings = get_settings()
-        pairs = _wide_scan_prometheus_matches(core, settings)
         scanned_label = (
-            f"{len(pairs)} match(es) across namespaces"
-            if settings.prometheus_namespace_allowlist is None
-            else f"{len(pairs)} match(es) within allowlist={settings.prometheus_namespace_allowlist}"
+            f"{len(pairs)} match(es) within allowlist="
+            f"{settings.prometheus_namespace_allowlist}"
         )
 
     rows: list[dict[str, str]] = []

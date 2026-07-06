@@ -1744,3 +1744,92 @@ def test_find_prometheus_service_empty_allowlist_surfaces_allowlist_in_message(m
     out = prometheus.find_prometheus_service()
     assert "allowlist" in out.lower()
     assert "monitoring" in out
+
+
+# =============================================================================
+# _wide_scan_prometheus_matches — namespace parameter (C5 merge)
+# =============================================================================
+
+
+def test_wide_scan_with_namespace_uses_namespaced_list(monkeypatch):
+    """When `namespace` is passed, the helper uses list_namespaced_service
+    instead of list_service_for_all_namespaces — cheaper, and the test
+    also verifies the cluster-wide list is NOT called."""
+    monkeypatch.delenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", raising=False)
+    reset_settings_cache()
+
+    called = {"namespaced": [], "all_ns": 0}
+
+    class _Core:
+        def list_namespaced_service(self, namespace, **kw):
+            called["namespaced"].append(namespace)
+            return _SvcList([
+                _svc(namespace, "prometheus",
+                     ip="10.96.1.1", port=9090, svc_type="ClusterIP"),
+            ])
+
+        def list_service_for_all_namespaces(self, **kw):
+            called["all_ns"] += 1
+            return _SvcList([])
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    pairs = prometheus._wide_scan_prometheus_matches(
+        _Core(), prometheus.get_settings(), namespace="monitoring",
+    )
+    assert called["namespaced"] == ["monitoring"]
+    assert called["all_ns"] == 0
+    assert len(pairs) == 1
+    assert pairs[0][0] == "monitoring"
+
+
+def test_wide_scan_with_namespace_bypasses_allowlist(monkeypatch):
+    """Allowlist is meaningless for an explicit namespace request —
+    caller is naming the namespace, not bounding the search surface.
+    If allowlist were applied, the explicit request could be silently
+    dropped, which is the opposite of what the agent asked for."""
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "other-ns")
+    reset_settings_cache()
+
+    class _Core:
+        def list_namespaced_service(self, namespace, **kw):
+            # Namespace != allowlist but caller asked for it explicitly —
+            # we should still return the result.
+            return _SvcList([
+                _svc(namespace, "prometheus",
+                     ip="10.96.1.1", port=9090, svc_type="ClusterIP"),
+            ])
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    pairs = prometheus._wide_scan_prometheus_matches(
+        _Core(), prometheus.get_settings(), namespace="monitoring",
+    )
+    assert len(pairs) == 1
+    assert pairs[0][0] == "monitoring"
+
+
+def test_wide_scan_cluster_wide_still_honors_allowlist(monkeypatch):
+    """Cluster-wide mode keeps the existing allowlist behavior — this
+    is the regression pin for the merge."""
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "monitoring")
+    reset_settings_cache()
+
+    services = [
+        _svc("monitoring", "prometheus",
+             ip="10.96.1.1", port=9090, svc_type="ClusterIP"),
+        _svc("other", "prometheus-other",
+             ip="10.96.2.2", port=9090, svc_type="ClusterIP"),
+    ]
+
+    class _Core:
+        def list_service_for_all_namespaces(self, **kw):
+            return _SvcList(services)
+
+        def list_namespaced_service(self, namespace, **kw):
+            return _SvcList([])
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    pairs = prometheus._wide_scan_prometheus_matches(
+        _Core(), prometheus.get_settings(),
+    )
+    # Allowlist drops the "other" ns service; only monitoring survives.
+    assert [p[0] for p in pairs] == ["monitoring"]

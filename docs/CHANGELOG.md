@@ -8,6 +8,8 @@ behavior changes bump the minor (we're pre-1.0).
 
 ### Added
 - `search_resources(name_substring, namespace=None, kinds=None, label_selector=None, limit_per_kind=50, api_versions=None)` — cross-kind name substring search for the "I forgot what kind or namespace X is in" triage pattern. Defaults to ~25 built-in kinds (Pod / Deployment / Service / ...); CRDs are searchable via `kinds=[...]` + `api_versions={kind: api_version}`. Fans out per kind on a `ThreadPoolExecutor` (≥5 kinds, max 8 workers). Output table is `KIND / NAME / NAMESPACE / STATUS / AGE`, sorted by KIND then NAME. Kinds that fail (RBAC forbidden, CRD not installed) are skipped and the count surfaces in the footer.
+- `add_label(kind, name, key, value, namespace=None, api_version=None)` — atomic single-label add/update via JSON Patch `add`. RFC 6901 token escaping for keys containing `/` or `~`. Touches only the targeted label; every other field (status, managedFields, other labels, annotations) is preserved.
+- `remove_label(kind, name, key, namespace=None, api_version=None)` — atomic single-label remove via strategic-merge patch with `null` value (idempotent: missing label = no-op, mirrors `kubectl label foo bar-`).
 - `list_resources` refactored: extracted `_list_resource_rows` helper so `search_resources` can share the data path without re-parsing rendered text. No behavior change for `list_resources` callers (26 existing tests still pass).
 
 ## [0.4.2] — 2026-07-06

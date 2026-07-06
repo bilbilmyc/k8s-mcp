@@ -493,6 +493,148 @@ def describe_resource(
     return describe_fmt(obj)
 
 
+# ---------- atomic label patches ---------------------------------------------
+
+
+def _jsonpatch_escape(token: str) -> str:
+    """Escape a label key for use as a JSON Pointer reference token (RFC 6901).
+
+    K8s label keys commonly contain `.` (e.g. `app.kubernetes.io/name`) which
+    is fine, but `/` and `~` need escaping because the apiserver's JSON Patch
+    handler parses paths as `/metadata/labels/<escaped-token>`.
+    """
+    return token.replace("~", "~0").replace("/", "~1")
+
+
+def add_label(
+    kind: str,
+    name: str,
+    key: str,
+    value: str,
+    namespace: str | None = None,
+    api_version: str | None = None,
+) -> str:
+    """⚠️ WRITE — atomically add or update a single label on a resource.
+
+    Uses a JSON Patch `add` to touch only the targeted label, leaving
+    every other field (status, managedFields, other labels, annotations)
+    untouched — the safer alternative to `replace_resource` when the goal
+    is just one label change. The patch fails if the resource doesn't
+    exist or RBAC denies writes; the resource is unchanged either way.
+
+    Args:
+        kind, name, namespace, api_version: standard resource locator.
+        key: label key (e.g. `"app.kubernetes.io/name"`). Validated by
+            the apiserver (max 63 chars per part, `[a-z0-9A-Z][-a-z0-9A-Z.]*`).
+        value: label value (e.g. `"web"`).
+
+    Returns a one-line confirmation. Errors propagate.
+
+    Raises PermissionError when read-only / allowlist blocks writes.
+    """
+    if not key or not isinstance(key, str):
+        raise ValueError("label key must be a non-empty string")
+    if value is None or not isinstance(value, str):
+        raise ValueError("label value must be a string")
+
+    settings = get_settings()
+    if settings.read_only:
+        raise PermissionError(
+            "Server is in read-only mode (K8S_MCP_READ_ONLY=true). label is disabled."
+        )
+    if not settings.ns_allowed(namespace):
+        raise PermissionError(
+            f"Write to namespace '{namespace}' is not allowed by K8S_MCP_NAMESPACE_ALLOWLIST"
+        )
+
+    dc = _dyn_client()
+    resource = _resource_for_kind(dc, kind, api_version=api_version)
+    patch_body = [{
+        "op": "add",
+        "path": f"/metadata/labels/{_jsonpatch_escape(key)}",
+        "value": value,
+    }]
+
+    try:
+        patch_kwargs: dict = {
+            "name": name,
+            "body": patch_body,
+            "content_type": "application/json-patch+json",
+        }
+        if namespace:
+            patch_kwargs["namespace"] = namespace
+        resource.patch(**patch_kwargs)
+    except ApiException as e:
+        ns_prefix = f"{namespace}/" if namespace else ""
+        raise RuntimeError(
+            f"failed to add label {key}={value} to {kind}/{ns_prefix}{name}: "
+            f"{e.status} {e.reason}"
+        ) from e
+
+    ns_prefix = f"{namespace}/" if namespace else ""
+    return f"✅ added label {key}={value} to {kind}/{ns_prefix}{name}"
+
+
+def remove_label(
+    kind: str,
+    name: str,
+    key: str,
+    namespace: str | None = None,
+    api_version: str | None = None,
+) -> str:
+    """⚠️ WRITE — atomically remove a single label from a resource.
+
+    Uses a strategic-merge patch with `null` value — K8s interprets this
+    as "remove this key from the labels map". Idempotent: if the label
+    isn't on the resource (or the labels map itself is missing), the
+    patch is a no-op and the call returns a friendly warning.
+
+    Args: same as `add_label` minus `value`.
+
+    Returns a one-line confirmation. Errors other than "label not found"
+    propagate.
+
+    Raises PermissionError when read-only / allowlist blocks writes.
+    """
+    if not key or not isinstance(key, str):
+        raise ValueError("label key must be a non-empty string")
+
+    settings = get_settings()
+    if settings.read_only:
+        raise PermissionError(
+            "Server is in read-only mode (K8S_MCP_READ_ONLY=true). label is disabled."
+        )
+    if not settings.ns_allowed(namespace):
+        raise PermissionError(
+            f"Write to namespace '{namespace}' is not allowed by K8S_MCP_NAMESPACE_ALLOWLIST"
+        )
+
+    dc = _dyn_client()
+    resource = _resource_for_kind(dc, kind, api_version=api_version)
+    # Strategic merge patch: {"metadata":{"labels":{"foo":null}}} removes
+    # the `foo` key. If the labels map doesn't have `foo` (or doesn't
+    # exist at all), the apiserver treats it as a no-op — same as
+    # `kubectl label foo bar-`.
+    patch_body = {"metadata": {"labels": {key: None}}}
+
+    try:
+        patch_kwargs: dict = {"name": name, "body": patch_body}
+        if namespace:
+            patch_kwargs["namespace"] = namespace
+        resource.patch(**patch_kwargs)
+    except ApiException as e:
+        # 404 = the resource itself doesn't exist (real error).
+        # Anything else propagates.
+        ns_prefix = f"{namespace}/" if namespace else ""
+        raise RuntimeError(
+            f"failed to remove label {key} from {kind}/{ns_prefix}{name}: "
+            f"{e.status} {e.reason}"
+        ) from e
+
+    ns_prefix = f"{namespace}/" if namespace else ""
+    return f"✅ removed label {key} from {kind}/{ns_prefix}{name}"
+
+
 def replace_resource(yaml_content: str) -> str:
     """⚠️ WRITE — PUT (full replace) a resource with optimistic concurrency.
     The current `resourceVersion` is read first and stamped into the manifest,
@@ -948,6 +1090,8 @@ def register(mcp) -> None:
     mcp.tool()(get_resource)
     mcp.tool()(get_resource_yaml)
     mcp.tool()(describe_resource)
+    mcp.tool()(add_label)
+    mcp.tool()(remove_label)
     mcp.tool()(apply_yaml)
     mcp.tool()(replace_resource)
     mcp.tool()(diff_resource)

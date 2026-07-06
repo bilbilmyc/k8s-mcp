@@ -78,6 +78,8 @@
 
 - `apply_yaml(yaml_content)` — 单文档或多文档清单
 - `replace_resource(yaml_content)` — PUT 带 ResourceVersion
+- `add_label(kind, name, key, value, namespace=None, api_version=None)` — JSON Patch `add`，原子改单个 label（不丢其他字段；RFC 6901 转义支持 `app.kubernetes.io/name` 这类带 `/` 的 key）
+- `remove_label(kind, name, key, namespace=None, api_version=None)` — strategic-merge `null` 值原子移除单个 label（idempotent，缺失 = no-op；等价 `kubectl label foo bar-`）
 
 ### 工作负载创建
 

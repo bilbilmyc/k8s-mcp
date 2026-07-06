@@ -1,6 +1,6 @@
 [project]
 name = "k8s-mcp-bilbilmyc"
-version = "0.5.0"
+version = "0.5.1"
 description = "Kubernetes MCP server for LLM agents — 80 tools covering CRUD on workloads/services/storage/RBAC, logs/events, Prometheus queries, bulk ops with HMAC 2-step confirmation, plus pod & deployment diagnosis / RBAC & NetworkPolicy & resource-usage analyzers / owner-chain explain."
 readme = "README.md"
 license = { text = "MIT" }

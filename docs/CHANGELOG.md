@@ -6,6 +6,8 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-06
+
 ## [0.5.0] — 2026-07-06
 
 ## [0.4.6] — 2026-07-06
@@ -285,3 +287,4 @@ Net result: a safer production posture without changing any of the
 [0.4.5]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.3...v0.4.5
 [0.4.6]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.5...v0.4.6
 [0.5.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.6...v0.5.0
+[0.5.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.0...v0.5.1

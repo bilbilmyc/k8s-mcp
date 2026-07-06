@@ -6,6 +6,8 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-07-06
+
 ### Added
 - `diagnose_deployment(name, namespace="default")` — one-shot Deployment
   triage. Aggregates the ~5 calls an agent otherwise makes serially (get
@@ -222,3 +224,4 @@ behavior changes bump the minor (we're pre-1.0).
 [0.1.3]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.2...0.1.3
 [0.1.2]: https://github.com/bilbilmyc/k8s-mcp/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/bilbilmyc/k8s-mcp/releases/tag/0.1.1
+[0.4.5]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.3...v0.4.5

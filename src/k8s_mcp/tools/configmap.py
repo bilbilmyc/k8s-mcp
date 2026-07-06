@@ -98,7 +98,10 @@ def update_configmap(
 
 
 def delete_configmap(name: str, namespace: str = "default") -> str:
-    """⚠️ WRITE — delete a ConfigMap (one-step, no two-step HMAC).
+    """⚠️ WRITE / ⚠️ DEPRECATED — delete a ConfigMap (one-step, no two-step HMAC).
+
+    Use `delete_resource(kind='ConfigMap', ...)` for the audited two-step
+    flow. This wrapper will be removed in v0.5.0.
 
     Why one-step: ConfigMaps are loose-coupled config data; deleting one
     will cause Pods that mount it to fail to start, but the failure mode

@@ -275,3 +275,101 @@ k8s-mcp 走"三层发现 + 两套桥接"：
 **`expose_prometheus_as_nodeport` 在 read-only 模式下不可用**——它创建
 新 Service，read-only 整个写流程都被拒。仍然要尊重
 `K8S_MCP_NAMESPACE_ALLOWLIST`：Service 创建校验目标 namespace。
+
+---
+
+## `exec_pod` —— 容器内批模式执行
+
+⚠️ **高权限**。与 `kubectl exec` 等价，但**不是**交互 shell。
+
+签名：
+
+```python
+exec_pod(
+    pod_name: str,
+    command: list[str],
+    namespace: str = "default",
+    container: str | None = None,
+    timeout_seconds: int = 30,
+) -> str
+```
+
+### 三个常踩的坑
+
+1. **`command` 是 argv list，不走 shell** —— 想要 `pipe` / `redirect` /
+   glob 必须显式 `["sh", "-c", "..."]`。这是 K8s exec 协议的设计
+   （避开 shell-injection），不是 bug。
+2. **多容器 Pod 必须显式 `container=`** —— 单容器 Pod 会自动选第一个；
+   多容器不传会报"ambiguous, pick one: <name1>, <name2>"。这是为了
+   避免 Agent 误选 sidecar。
+3. **超时是 wall-clock** —— K8s exec 协议**没有 cancel**，超时只会
+   断开 WebSocket，pod 里的命令可能还在跑。要真杀得 SSH 进节点 / 用
+   metrics-server 看进程 / 进容器自己 kill。
+
+### 适用 vs 不适用
+
+- ✅ 跑一次性探针（`ls` / `cat config` / `curl localhost:8080/health` /
+  `ps aux` 看进程）
+- ✅ 拉取一次性 dump（`tcpdump -c 100 -w -` / `jstack` / `jmap -histo`）
+- ❌ 长时间跑的后台任务（用 `kubectl cp` + nohup / 或者开个 debug
+  container，而不是 `exec_pod`）
+- ❌ 交互式 shell（stdin 没用，`bash -i` 会立刻退）
+
+### 安全守门
+
+- 跟其他写工具一致：`K8S_MCP_READ_ONLY=true` 直接拒收
+- `K8S_MCP_NAMESPACE_ALLOWLIST` 不含目标 ns 拒收
+- **不做命令白名单** —— 信任 K8s RBAC；能 pods/exec 就能跑任意命令
+
+---
+
+## `add_label` / `remove_label` —— 单 label 原子改
+
+跟 `apply_yaml` / `replace_resource` 的边界：**只动一个 label 时**用这两个，
+不要拉整份 manifest 改完再 PUT 回去（会丢 `managedFields` / status / 其他
+labels / annotations，还要管 ResourceVersion）。
+
+```python
+add_label(kind, name, key, value, namespace=None, api_version=None) -> str
+remove_label(kind, name, key, namespace=None, api_version=None) -> str
+```
+
+- **`add_label`** 走 JSON Patch `add`（RFC 6902），**原子**。`value` 字符串。
+  key 含 `/` / `~` 自动 RFC 6901 转义（`app.kubernetes.io/name` 安全）。
+- **`remove_label`** 走 strategic-merge patch `null` 值（`kubectl label
+  foo bar-` 等价）；**idempotent** —— key 不存在 = no-op，不会因为并发
+  改 label 互相覆盖。
+
+`label_selector` 类工作（一次改 N 个资源的同一 label）走 `apply_yaml`
+或 `bulk_set_image` 那种 dry-run → token 流程，不在 `add_label` 的范围。
+
+---
+
+## `search_resources` —— 跨 kind 名字子串搜
+
+跟 `list_resources(kind=X)` 的边界：**不知道在哪个 kind / namespace**
+时用。`list_resources` 一次只看一个 kind，要找"那个名字像 X 的东西"得
+循环 N 次；`search_resources` 默认扫 ~25 个内置 kind，**一次**返回。
+
+签名：
+
+```python
+search_resources(
+    name_substring: str,
+    namespace: str | None = None,
+    kinds: list[str] | None = None,         # 缩窄到这几种
+    label_selector: str | None = None,
+    limit_per_kind: int = 50,
+    api_versions: dict[str, str] | None = None,  # CRD: {kind: "group/v1"}
+) -> str
+```
+
+输出表 `KIND / NAME / NAMESPACE / STATUS / AGE`，按 KIND 排序。
+
+性能特性：≥ 5 个 kind 时走 `ThreadPoolExecutor`（max 8 workers）并发 fan-out；
+RBAC 拒绝 / CRD 未装的 kind 静默 skip，footer 给 skip 计数。
+
+CRD 场景：`kinds=["MyCRD"]` + `api_versions={"MyCRD": "example.com/v1"}`，
+不加 `api_versions` DynamicClient 会扫所有 group 找唯一匹配，CRD 重名
+时直接 `Ambiguous` 报错。
+

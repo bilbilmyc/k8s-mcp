@@ -90,6 +90,11 @@ def list_events(
 ) -> str:
     """List Kubernetes Events.
 
+    Use this for cluster-wide or namespace-wide event streams. For events
+    on a single object, prefer `get_events_for_object(kind=..., name=...)`
+    — it pushes the `involvedObject` filter to the apiserver and is much
+    faster than fetching all events and grepping client-side.
+
     Note: prefer reusing the most recent result for the same query rather
     than re-calling if the underlying state is unlikely to have changed. New
     calls remain valid when verifying a mutation's effect.

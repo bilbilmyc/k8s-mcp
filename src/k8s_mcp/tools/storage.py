@@ -154,7 +154,10 @@ def _core_v1():
 
 
 def delete_pvc(name: str, namespace: str) -> str:
-    """⚠️ WRITE — delete a PVC (one-step, no two-step HMAC).
+    """⚠️ WRITE / ⚠️ DEPRECATED — delete a PVC (one-step, no two-step HMAC).
+
+    Use `delete_resource(kind='PersistentVolumeClaim', ...)` for the
+    audited two-step flow. This wrapper will be removed in v0.5.0.
 
     Why one-step: PVC deletion is recoverable — re-running `create_pvc`
     with the same name brings it back. Deleting a PVC also does NOT

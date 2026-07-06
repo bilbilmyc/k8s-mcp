@@ -226,7 +226,10 @@ def _networking_v1():
 
 
 def delete_service(name: str, namespace: str = "default") -> str:
-    """⚠️ WRITE — delete a Service (one-step, no two-step HMAC).
+    """⚠️ WRITE / ⚠️ DEPRECATED — delete a Service (one-step, no two-step HMAC).
+
+    Use `delete_resource(kind='Service', ...)` for the audited two-step
+    flow. This wrapper will be removed in v0.5.0.
 
     Why one-step: a Service is a traffic-routing rule, not a workload.
     Deleting it stops inbound traffic to the Pods, but the Pods continue
@@ -259,7 +262,10 @@ def delete_service(name: str, namespace: str = "default") -> str:
 
 
 def delete_ingress(name: str, namespace: str = "default") -> str:
-    """⚠️ WRITE — delete an Ingress (one-step, no two-step HMAC).
+    """⚠️ WRITE / ⚠️ DEPRECATED — delete an Ingress (one-step, no two-step HMAC).
+
+    Use `delete_resource(kind='Ingress', ...)` for the audited two-step
+    flow. This wrapper will be removed in v0.5.0.
 
     Why one-step: an Ingress is an HTTP routing rule, not a workload.
     Deleting it stops external HTTP(S) traffic to the Services; the

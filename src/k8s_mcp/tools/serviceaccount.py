@@ -24,6 +24,11 @@ def create_serviceaccount(
 ) -> str:
     """Create a ServiceAccount.
 
+    Pass `image_pull_secrets=[...]` when Pods in this namespace need to
+    pull from a private registry. To inspect the current caller's
+    identity (NOT this), use `whoami(namespace=...)`; to inspect
+    permissions granted to an existing SA, use `analyze_rbac(subject=...)`.
+
     Args:
         name: ServiceAccount name.
         namespace: target namespace.

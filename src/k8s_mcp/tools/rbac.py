@@ -47,6 +47,13 @@ def create_role(
 ) -> str:
     """Create a namespaced Role.
 
+    Role grants permissions *within one namespace*; for cluster-wide
+    permissions use `create_clusterrole` (not this). The `allow_wildcard`
+    flag is required to permit the `verbs=["*"] ∧ resources=["*"] ∧
+    apiGroups=["*"]` triple (cluster-admin equivalent); the tool
+    refuses it otherwise. To inspect rules an existing subject has,
+    use `analyze_rbac(subject=...)`.
+
     Args:
         name: Role name.
         namespace: target namespace.
@@ -83,6 +90,12 @@ def create_rolebinding(
     subjects: list[dict[str, str]],
 ) -> str:
     """Create a namespaced RoleBinding.
+
+    Binds a Role or ClusterRole to subjects (ServiceAccount / User /
+    Group) within one namespace. For cluster-wide bindings (visible
+    in every namespace) use `create_clusterrolebinding` (not this).
+    `role_kind="ClusterRole"` here means "bind a cluster-scoped role
+    to a namespaced subject", which is fine and common.
 
     Args:
         name: binding name.
@@ -372,6 +385,13 @@ def analyze_rbac(
     namespace: str | None = None,
 ) -> str:
     """🔍 RBAC analyzer — multi-mode read-only RBAC inspector.
+
+    Use this to *inspect* RBAC. To *write* a Role / RoleBinding /
+    ClusterRole / ClusterRoleBinding, use the corresponding
+    `create_*` tools (not this). To check the current caller's own
+    identity + effective permissions, use `whoami(namespace=...)` — that
+    uses the apiserver's SelfSubjectReview and is more authoritative
+    than what this tool can derive from a RoleBinding scan.
 
     Modes (set at least one parameter to get a focused result;
     set none for a cluster-wide summary):

@@ -1,4 +1,11 @@
-# Kubernetes MCP 服务 — 设计规划
+# Kubernetes MCP 服务 — 设计规划（ARCHIVED）
+
+> ⚠️ **历史档案 / 已被 [ROADMAP.md](./ROADMAP.md) 取代**。本文保留
+> 作为 v0.1.0 → v0.4.3 的设计意图记录；实际的当前状态、已完成 Phase
+> 和下一步计划见 [ROADMAP.md](./ROADMAP.md)。`/Users/mayc/.claude/plans/`
+> 下任何更新的 plan 文件仍是权威。
+>
+> **修改时不要改本文**——增量更新写到 ROADMAP.md，旧 drift 留作历史。
 
 > 与 Claude Code 共享的项目级设计文档。修改时请保持与 `~/.claude/plans/` 中最新 plan 文件的一致性。
 

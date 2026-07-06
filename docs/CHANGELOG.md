@@ -6,6 +6,43 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-07-06
+
+### Changed
+- **LLM-tool-selection hygiene pass** — 8 of 79 tool docstrings got a
+  short "USE X NOT Y" / "Pick THIS when …" sentence inserted right
+  after the first line, so that LLM tool-selection (Claude / GPT /
+  Cherry Studio) sees the boundary *in the first paragraph* rather
+  than having to read the full docstring. Pure docstring change, no
+  tool behavior affected, 666 tests still pass. Patched:
+  - `list_events` — prefer `get_events_for_object` for per-object event
+    streams (apiserver-side field selector vs client-side grep)
+  - `create_networkpolicy` — write only; for verifying the policy
+    graph use `analyze_networkpolicy`
+  - `create_serviceaccount` — `image_pull_secrets` is for private
+    registries; for inspecting SA permissions use `analyze_rbac`
+  - `create_role` — namespaced only; cluster-wide = `create_clusterrole`
+  - `create_rolebinding` — namespaced binding; cluster-wide =
+    `create_clusterrolebinding`
+  - `analyze_rbac` — read-only inspection; for current caller's own
+    identity use `whoami`
+  - `analyze_networkpolicy` — read-only inspection; for writing use
+    `create_networkpolicy`
+  - `delete_pod` / `delete_pvc` / `delete_configmap` / `delete_service` /
+    `delete_ingress` (all 5 deprecated since v0.4.1) — first paragraph
+    now leads with `⚠️ DEPRECATED` and the v0.5.0 removal date, so the
+    LLM prefers `delete_resource(kind=...)` in the candidate list
+
+### Not doing (and why)
+- No full 79-tool description rewrite: ~50% were already in the
+  4-section shape (what / when / NOT-when / example) thanks to the
+  v0.4.3 + Phase B/B1 work; a uniform pass would be a large diff with
+  no measurable win
+- No tool-name changes or multi-MCP-server split — these would break
+  existing agent call history for zero observed benefit
+- No description-length lint rule — adds a gate that future docstring
+  edits would have to argue with, for marginal benefit
+
 ## [0.4.3] — 2026-07-06
 
 ### Added

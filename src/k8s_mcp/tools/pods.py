@@ -84,7 +84,10 @@ def list_pods(
 
 
 def delete_pod(name: str, namespace: str, grace_period_seconds: int = 30) -> str:
-    """Delete a single Pod (immediate reschedule).
+    """⚠️ DEPRECATED — Delete a single Pod (immediate reschedule).
+
+    Use `delete_resource(kind='Pod', ...)` for the audited two-step
+    flow. This one-step wrapper will be removed in v0.5.0.
 
     This bypasses the two-step delete confirmation in `delete_resource`
     because deleting a Pod is a low-risk recovery / restart primitive —

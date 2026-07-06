@@ -37,6 +37,11 @@ def create_networkpolicy(
 ) -> str:
     """Create a NetworkPolicy.
 
+    Pick THIS to *write* a policy. To *verify* an existing policy graph
+    (which policies select a pod, what's the effective per-direction
+    posture, where's the exposure surface), use the read-only
+    `analyze_networkpolicy(namespace=..., pod=...)` instead.
+
     Args:
         name: policy name.
         namespace: target namespace.
@@ -181,8 +186,8 @@ def _rule_peers(rule: dict, direction: str) -> tuple[list[str], list[str]]:
 def analyze_networkpolicy(namespace: str, pod: str | None = None) -> str:
     """🔍 NETWORKPOLICY analyzer — read-only connectivity / coverage inspector.
 
-    NetworkPolicy is notoriously hard to reason about; this fills the
-    verification gap after `create_networkpolicy`. Two modes:
+    Use this to *inspect* the NetworkPolicy graph. To *write* a new
+    policy, use `create_networkpolicy` (not this). Two modes:
 
     - **`pod=` view** → which policies select this pod (by podSelector,
       evaluating both matchLabels and matchExpressions), the merged

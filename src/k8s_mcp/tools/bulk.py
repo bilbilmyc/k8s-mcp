@@ -618,7 +618,12 @@ def _execute_patches(
 ) -> str:
     """Apply the patch ONLY to resources that were in the preview's
     matched_names set. Report per-resource results."""
+    settings = get_settings()
     rows = []
+    # Hoist the dynamic-client kind handle out of the loop. In practice
+    # all matched resources for one bulk op share the same kind (the
+    # bulk tool targets a single kind per call), so we resolve once.
+    dc_resource_cache: dict[str, Any] = {}
     for ns, name in sorted(matched_set):
         resource = by_key.get((ns, name))
         if not resource:
@@ -627,24 +632,33 @@ def _execute_patches(
                 "RESULT": "SKIPPED (no longer matches selector at confirm time)",
             })
             continue
+
+        api_version = resource.get("apiVersion")
+        kind = resource.get("kind")
+        if not settings.ns_allowed(ns):
+            rows.append({
+                "NAMESPACE": ns, "NAME": name,
+                "RESULT": f"ERROR: namespace {ns!r} not allowed by K8S_MCP_NAMESPACE_ALLOWLIST",
+            })
+            continue
+
         try:
             new_manifest = patcher(resource)
-            records = generic._apply_yaml_records(yaml.safe_dump(new_manifest))
-            # `_apply_yaml_records` returns `["(empty manifest)"]` for empty
-            # input — shouldn't happen here (we just patched a workload), but
-            # guard against it.
-            if records and isinstance(records[0], dict) and len(records) == 1:
-                rec = records[0]
-                rows.append({
-                    "NAMESPACE": ns, "NAME": name,
-                    "RESULT": f"{rec['action']} ({rec['kind']})",
-                })
-            else:
-                first_line = generic.apply_yaml(yaml.safe_dump(new_manifest))
-                rows.append({
-                    "NAMESPACE": ns, "NAME": name,
-                    "RESULT": first_line.strip().split("\n", 1)[0],
-                })
+            cached = dc_resource_cache.get(kind)
+            if cached is None:
+                from kubernetes import dynamic as _dyn_mod
+                cached = generic._dyn_client().resources.get(
+                    api_version=api_version, kind=kind
+                )
+                dc_resource_cache[kind] = cached
+            patch_kwargs: dict = {"body": new_manifest}
+            if ns:
+                patch_kwargs["namespace"] = ns
+            cached.patch(**patch_kwargs)
+            rows.append({
+                "NAMESPACE": ns, "NAME": name,
+                "RESULT": f"configured (patched) ({kind})",
+            })
         except ApiException as e:
             rows.append({
                 "NAMESPACE": ns, "NAME": name,
@@ -656,7 +670,6 @@ def _execute_patches(
                 "RESULT": f"ERROR: {type(e).__name__}: {e}",
             })
 
-    # Use the structured action rather than fragile lowercase-prefix matching.
     ok = sum(1 for r in rows if r["RESULT"].startswith(("created", "configured", "unchanged")))
     fail = sum(1 for r in rows if r["RESULT"].startswith(("ERROR", "SKIPPED")))
     header = f"{op_label} — applied to {ok}/{len(rows)} resources"

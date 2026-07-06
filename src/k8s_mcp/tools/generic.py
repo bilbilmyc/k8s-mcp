@@ -590,6 +590,28 @@ def _apply_yaml_records(yaml_content: str) -> list[dict] | list[str]:
     return records
 
 
+def _patch_resource_no_check(
+    api_version: str,
+    kind: str,
+    name: str,
+    namespace: str | None,
+    body: dict,
+) -> None:
+    """PATCH a resource directly, skipping the existence read.
+
+    Used by `bulk._execute_patches` after it has already listed the
+    matched set — saves one extra `resource.get()` per workload. Same
+    allowlist / read_only gate as `_apply_yaml_records` (callers must
+    check, since this helper trusts the caller about write-readiness).
+    """
+    dc = _dyn_client()
+    resource = dc.resources.get(api_version=api_version, kind=kind)
+    patch_kwargs: dict = {"body": body}
+    if namespace:
+        patch_kwargs["namespace"] = namespace
+    resource.patch(**patch_kwargs)
+
+
 # ---------- helpers ------------------------------------------------------------
 
 

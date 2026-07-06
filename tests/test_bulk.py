@@ -61,17 +61,42 @@ class _FakeList:
 
 
 class _FakeResource:
-    def __init__(self, items):
+    def __init__(self, items, on_patch=None):
         self._items = items
         self.last_call: dict = {}
+        self.patches: list[dict] = []
+        self._on_patch = on_patch
 
     def get(self, **kwargs):
         self.last_call = kwargs
         return _FakeList(self._items)
 
+    def patch(self, **kwargs):
+        self.patches.append(kwargs)
+        # Notify the test fixture so it can record applied YAML the
+        # way the old `apply_yaml` mock did. Keeps existing assertions
+        # (`_stub_list["get_applied"]()` → list of yaml strings) working.
+        if self._on_patch is not None:
+            self._on_patch(kwargs.get("body") or {})
+        return None
+
 
 class _FakeDC:
-    pass
+    """Fake DynamicClient that hands out _FakeResource handles per kind.
+
+    `bulk._execute_patches` (post-P2) calls
+    `dc.resources.get(api_version, kind).patch(body=...)` — both halves
+    need to be mockable. The fixture `_stub_list` mutates
+    `state["items"]` and constructs a matching `_FakeResource` to be
+    served by `get`.
+    """
+
+    def __init__(self, get_resource=None):
+        self.resources = self
+        self._get_resource = get_resource or (lambda **kw: _FakeResource([]))
+
+    def get(self, **kwargs):
+        return self._get_resource(**kwargs)
 
 
 @pytest.fixture
@@ -115,19 +140,32 @@ def _stub_list(monkeypatch):
                 "action": "configured (patched)", "error": None,
             }]
 
+    def _on_patch(body):
+        """Capture patched manifest as YAML the same way the old
+        `apply_yaml` mock did — `state["applied"]` stays the canonical
+        list of yaml strings passed through the bulk path."""
+        import yaml as _y
+        state["applied"].append(_y.safe_dump(body))
+
     monkeypatch.setattr(bulk.generic, "apply_yaml", fake_apply)
     monkeypatch.setattr(bulk.generic, "_apply_yaml_records", fake_records)
-    monkeypatch.setattr(bulk.generic, "_dyn_client", lambda: _FakeDC())
+    monkeypatch.setattr(
+        bulk.generic,
+        "_dyn_client",
+        lambda: _FakeDC(
+            get_resource=lambda **kw: _FakeResource(state["items"], on_patch=_on_patch)
+        ),
+    )
 
     def install(items):
         state["items"] = list(items)
         state["applied"] = []
-        return _FakeResource(state["items"])
+        return _FakeResource(state["items"], on_patch=_on_patch)
 
     def make_resource(items):
         state["items"] = list(items)
         state["applied"] = []
-        r = _FakeResource(state["items"])
+        r = _FakeResource(state["items"], on_patch=_on_patch)
         monkeypatch.setattr(bulk.generic, "_resource_for_kind", lambda dc, kind: r)
         return r
 

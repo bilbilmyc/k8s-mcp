@@ -31,6 +31,7 @@ from .config import Settings, enforce_write_safety, get_settings
 from .safety import (
     RateLimiter,
     SafeApiError,
+    TokenError,
     ToolTimeoutError,
     safe_apiserver_error,
 )
@@ -178,6 +179,18 @@ class _K8sMCP(FastMCP):
             logger.warning("tool %r hit %ss timeout", name, self._tool_timeout_s)
             raise ToolTimeoutError(name, self._tool_timeout_s) from e
         except SafeApiError:
+            raise
+        except TokenError:
+            # TokenError messages are user-actionable ("name mismatch",
+            # "signature invalid", "expired", "Missing confirmation_token")
+            # and contain no secret material — surface them so the LLM
+            # agent can react (request a fresh preview, etc.) rather than
+            # seeing a useless generic wrapper.
+            raise
+        except PermissionError:
+            # App-layer permission denials (read-only mode / namespace
+            # allowlist). The message names the violated setting so the
+            # agent can fix the call.
             raise
         except Exception as e:
             # FastMCP's `Tool.run` wraps every tool-body exception in

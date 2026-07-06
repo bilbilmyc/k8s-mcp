@@ -171,6 +171,7 @@ def _register_tools(mcp: FastMCP) -> None:
         pods,
         prometheus,
         rbac,
+        resource_usage,
         rollout,
         secret,
         service,
@@ -203,6 +204,7 @@ def _register_tools(mcp: FastMCP) -> None:
     autoscale.register(mcp)
     rbac.register(mcp)
     networkpolicy.register(mcp)
+    resource_usage.register(mcp)
     serviceaccount.register(mcp)
     storage.register(mcp)
     prometheus.register(mcp)

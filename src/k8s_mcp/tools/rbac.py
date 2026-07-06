@@ -18,13 +18,25 @@ import logging
 from typing import Any
 
 import yaml
-from kubernetes import client
+from kubernetes import client, dynamic
 from kubernetes.client.rest import ApiException
+from kubernetes.dynamic.exceptions import ResourceNotFoundError
 
 from ..client import get_api_client
+from ..formatters import short_table
 from . import generic
 
 logger = logging.getLogger(__name__)
+
+
+def _dyn_client() -> dynamic.DynamicClient:
+    return dynamic.DynamicClient(get_api_client())
+
+
+def _rbac_resource(dc: dynamic.DynamicClient, kind: str):
+    """Resolve a RBAC kind to its DynamicClient resource handle."""
+    api_version = "rbac.authorization.k8s.io/v1"
+    return dc.resources.get(api_version=api_version, kind=kind)
 
 
 def create_role(
@@ -296,9 +308,438 @@ def whoami(namespace: str = "default") -> str:
     return "\n".join(lines)
 
 
+# ---------- analyze_rbac ----------------------------------------------------
+
+
+def _subject_matches(subject: dict, needle: str) -> bool:
+    """Match a binding subject against a user-provided needle.
+
+    Match on `name` (exact) OR on the fully-qualified form
+    `kind:name` (e.g. `system:serviceaccount:default:app`). We don't
+    try to match `kind:namespace:name` — that's rare and adds
+    confusion for the common case.
+    """
+    needle = (needle or "").strip()
+    if not needle:
+        return False
+    if subject.get("name") == needle:
+        return True
+    # `User:alice` / `Group:system:masters` / `ServiceAccount:default:app`
+    fq = f"{subject.get('kind', '')}:{subject.get('name', '')}"
+    if fq == needle:
+        return True
+    return False
+
+
+def _rule_matches(
+    rule: dict,
+    verb: str | None,
+    resource: str | None,
+    api_group: str | None,
+) -> bool:
+    """Check if a rule grants the requested (verb, resource, apiGroup).
+
+    Wildcards: if the rule uses `*` for any axis it matches anything on
+    that axis. If the caller doesn't specify an axis we don't filter on
+    it (a `verb=delete` query should match rules that grant delete on
+    pods AND rules that grant delete on deployments — the agent cares
+    about the verb, not the resource, when asking "who can delete?").
+    """
+    verbs = rule.get("verbs") or []
+    resources = rule.get("resources") or []
+    api_groups = rule.get("apiGroups") or [""]  # core group = ""
+
+    if verb and not (verb in verbs or "*" in verbs):
+        return False
+    if resource and not (resource in resources or "*" in resources):
+        return False
+    if api_group is not None:
+        # apiGroup="" means core; a request for "" matches only rules
+        # that explicitly include "" (or "*").
+        if (
+            api_group not in api_groups
+            and "*" not in api_groups
+        ):
+            return False
+    return True
+
+
+def analyze_rbac(
+    subject: str | None = None,
+    verb: str | None = None,
+    resource: str | None = None,
+    api_group: str | None = None,
+    namespace: str | None = None,
+) -> str:
+    """🔍 RBAC analyzer — multi-mode read-only RBAC inspector.
+
+    Modes (set at least one parameter to get a focused result;
+    set none for a cluster-wide summary):
+
+    - **`subject`** (e.g. `"alice"`, `"system:serviceaccount:default:app"`,
+      `"Group:system:masters"`) → list every rule granted to this
+      subject via any RoleBinding / ClusterRoleBinding in scope.
+    - **`verb + resource [+ api_group]`** (e.g. `verb="delete"`,
+      `resource="pods"`) → list every subject that can perform this
+      action, and the bindings / roles through which the access flows.
+    - **`namespace`** only → list all Roles / RoleBindings in that
+      namespace (cluster-scope rules are NOT listed — pass `subject=`
+      or `verb+resource` to see those).
+    - nothing set → cluster-wide summary of all Roles / ClusterRoles /
+      RoleBindings / ClusterRoleBindings with a count + a flag for any
+      wildcard-bearing rule (cluster-admin risk surface).
+
+    Args:
+        subject: user / SA / group name, or `Kind:name` form.
+        verb: action verb (`get` / `list` / `create` / `update` /
+            `delete` / `*`).
+        resource: resource name (`pods` / `deployments` / `*`).
+        api_group: API group. Use `""` for the core group. `None` means
+            "don't filter on api_group" (matches rules in any group).
+        namespace: scope to a single namespace; `None` = cluster-wide.
+
+    Returns a multi-section report. Empty mode returns a summary.
+    Always read-only — no mutations.
+    """
+    dc = _dyn_client()
+    try:
+        role_res = _rbac_resource(dc, "Role")
+        binding_res = _rbac_resource(dc, "RoleBinding")
+        cluster_role_res = _rbac_resource(dc, "ClusterRole")
+        cluster_binding_res = _rbac_resource(dc, "ClusterRoleBinding")
+    except ResourceNotFoundError as e:
+        raise RuntimeError(
+            "rbac.authorization.k8s.io/v1 not available — is the RBAC "
+            "API enabled on this cluster?"
+        ) from e
+
+    # Determine scope and load the relevant objects.
+    cluster_only = namespace is None
+    if cluster_only:
+        roles = list(cluster_role_res.get().items)
+        bindings = list(cluster_binding_res.get().items)
+        if namespace is None:
+            # Also include namespaced roles / bindings, but flag them.
+            roles.extend(list(role_res.get().items))
+            bindings.extend(list(binding_res.get().items))
+    else:
+        roles = list(role_res.get(namespace=namespace).items)
+        bindings = list(binding_res.get(namespace=namespace).items)
+
+    # Mode 1: subject → forward lookup
+    if subject:
+        return _render_subject_report(subject, roles, bindings, namespace)
+
+    # Mode 2: verb + resource → reverse lookup
+    if verb or resource:
+        return _render_rule_report(
+            verb, resource, api_group, roles, bindings, namespace,
+        )
+
+    # Mode 3: namespace only → list RBAC in that ns
+    if namespace is not None:
+        return _render_namespace_report(namespace, roles, bindings)
+
+    # Mode 4: cluster-wide summary
+    return _render_summary_report(roles, bindings)
+
+
+def _role_rules(role_obj: dict) -> list[dict]:
+    return role_obj.get("rules") or []
+
+
+def _binding_role_ref(binding_obj: dict) -> tuple[str, str]:
+    """Return (kind, name) of the role referenced by a binding."""
+    role_ref = binding_obj.get("roleRef") or {}
+    return role_ref.get("kind", "?"), role_ref.get("name", "?")
+
+
+def _find_role(
+    role_kind: str, role_name: str, roles: list[dict],
+) -> dict | None:
+    for r in roles:
+        if r.get("metadata", {}).get("name") == role_name and (
+            (role_kind == "ClusterRole" and r.get("kind") == "ClusterRole")
+            or (role_kind == "Role" and r.get("kind") == "Role")
+        ):
+            return r
+    return None
+
+
+def _render_subject_report(
+    subject: str, roles: list[dict], bindings: list[dict],
+    namespace: str | None,
+) -> str:
+    lines: list[str] = [f"## RBAC analysis: subject = '{subject}'"]
+
+    matched_bindings: list[dict] = []
+    for b in bindings:
+        for s in (b.get("subjects") or []):
+            if _subject_matches(s, subject):
+                matched_bindings.append(b)
+                break
+
+    if not matched_bindings:
+        lines.append(
+            "(no RoleBinding / ClusterRoleBinding references this subject)"
+        )
+        return "\n".join(lines)
+
+    scope_label = namespace or "cluster-wide"
+    lines.append(f"Scope: {scope_label}")
+    lines.append(f"Matched {len(matched_bindings)} binding(s):\n")
+
+    for b in matched_bindings:
+        bmeta = b.get("metadata") or {}
+        bns = bmeta.get("namespace", "")
+        bname = bmeta.get("name", "?")
+        kind = b.get("kind", "?")
+        role_kind, role_name = _binding_role_ref(b)
+        lines.append(
+            f"### {kind}/{bns}/{bname} → {role_kind}/{role_name}"
+        )
+        subjects_block = b.get("subjects") or []
+        for s in subjects_block:
+            marker = " ←" if _subject_matches(s, subject) else ""
+            lines.append(
+                f"  subject: {s.get('kind', '?')}:{s.get('name', '?')}"
+                f"{(' ns=' + s['namespace']) if s.get('namespace') else ''}{marker}"
+            )
+        # Expand the referenced role's rules.
+        role = _find_role(role_kind, role_name, roles)
+        if role is None:
+            lines.append(
+                f"  (⚠️ referenced {role_kind}/{role_name} not found in scope)"
+            )
+            continue
+        rules = _role_rules(role)
+        if not rules:
+            lines.append("  (no rules in role)")
+            continue
+        rule_rows = []
+        for r in rules:
+            for v in r.get("verbs") or []:
+                for res in r.get("resources") or []:
+                    for ag in r.get("apiGroups") or [""]:
+                        rule_rows.append({
+                            "VERB": v,
+                            "RESOURCE": res,
+                            "APIGROUP": ag or "(core)",
+                        })
+        lines.append(short_table(
+            rule_rows,
+            ["VERB", "RESOURCE", "APIGROUP"],
+        ))
+        # Wildcard risk flag — surfaces cluster-admin / overly broad rules.
+        wildcards = [
+            r for r in rules
+            if "*" in (r.get("verbs") or [])
+            or "*" in (r.get("resources") or [])
+            or "*" in (r.get("apiGroups") or [])
+        ]
+        if wildcards:
+            lines.append(
+                f"  ⚠️ {len(wildcards)} rule(s) in this role use `*` wildcards "
+                f"— review for cluster-admin risk"
+            )
+
+    return "\n".join(lines)
+
+
+def _render_rule_report(
+    verb: str | None, resource: str | None, api_group: str | None,
+    roles: list[dict], bindings: list[dict], namespace: str | None,
+) -> str:
+    """Reverse lookup: which subjects can perform (verb, resource, apiGroup)?"""
+    query_parts = []
+    if verb:
+        query_parts.append(f"verb={verb}")
+    if resource:
+        query_parts.append(f"resource={resource}")
+    if api_group is not None:
+        query_parts.append(f"apiGroup={api_group or '(core)'}")
+    if namespace:
+        query_parts.append(f"namespace={namespace}")
+    header = " / ".join(query_parts) if query_parts else "(all rules)"
+    lines: list[str] = [f"## RBAC analysis: who can {header}?"]
+
+    matched_roles: list[tuple[dict, list[dict]]] = []
+    for r in roles:
+        matched_rules = [
+            rule for rule in _role_rules(r)
+            if _rule_matches(rule, verb, resource, api_group)
+        ]
+        if matched_rules:
+            matched_roles.append((r, matched_rules))
+
+    if not matched_roles:
+        lines.append("(no role grants this action in scope)")
+        return "\n".join(lines)
+
+    # For each matched role, find bindings that reference it.
+    rows: list[dict] = []
+    for role, rules in matched_roles:
+        rname = role.get("metadata", {}).get("name", "?")
+        rkind = role.get("kind", "?")
+        rns = role.get("metadata", {}).get("namespace", "")
+        for b in bindings:
+            role_kind, role_name = _binding_role_ref(b)
+            if role_kind != rkind or role_name != rname:
+                continue
+            # If we're scoping to a namespace, the binding must be in it.
+            if namespace is not None:
+                bns = (b.get("metadata") or {}).get("namespace")
+                if bns != namespace:
+                    continue
+            bmeta = b.get("metadata") or {}
+            for s in (b.get("subjects") or []):
+                rows.append({
+                    "SUBJECT": f"{s.get('kind', '?')}:{s.get('name', '?')}",
+                    "VIA_BINDING": f"{b.get('kind', '?')}/"
+                                   f"{bmeta.get('namespace', '')}/"
+                                   f"{bmeta.get('name', '?')}",
+                    "ROLE": f"{rkind}/{rns}/{rname}",
+                    "MATCHED_RULES": str(len(rules)),
+                })
+
+    if not rows:
+        lines.append(
+            f"(no binding references the {len(matched_roles)} matching role(s) "
+            f"in scope — the rule exists but is unused)"
+        )
+        # Still list the matching roles so the agent can investigate.
+        lines.append("\nMatching roles (no binding → unreachable):")
+        for role, rules in matched_roles:
+            rmeta = role.get("metadata") or {}
+            lines.append(
+                f"  - {role.get('kind', '?')}/"
+                f"{rmeta.get('namespace', '')}/{rmeta.get('name', '?')} "
+                f"({len(rules)} matching rule(s))"
+            )
+        return "\n".join(lines)
+
+    lines.append(
+        f"Found {len(matched_roles)} role(s) granting this action, "
+        f"reached via {len(rows)} binding→subject edge(s):\n"
+    )
+    lines.append(short_table(rows, ["SUBJECT", "VIA_BINDING", "ROLE", "MATCHED_RULES"]))
+
+    # Wildcard risk flag.
+    total_wild = sum(
+        1 for _, rules in matched_roles
+        for r in rules
+        if "*" in (r.get("verbs") or [])
+        or "*" in (r.get("resources") or [])
+        or "*" in (r.get("apiGroups") or [])
+    )
+    if total_wild:
+        lines.append(
+            f"\n⚠️ {total_wild} matching rule(s) use `*` wildcards"
+        )
+    return "\n".join(lines)
+
+
+def _render_namespace_report(
+    namespace: str, roles: list[dict], bindings: list[dict],
+) -> str:
+    lines = [f"## RBAC in namespace '{namespace}'"]
+    lines.append(f"Roles: {len(roles)}, RoleBindings: {len(bindings)}")
+
+    if not roles and not bindings:
+        lines.append("(no RBAC objects in this namespace)")
+        return "\n".join(lines)
+
+    if roles:
+        lines.append("\n### Roles")
+        rows = []
+        for r in roles:
+            rmeta = r.get("metadata") or {}
+            wild = any(
+                "*" in (rule.get("verbs") or [])
+                or "*" in (rule.get("resources") or [])
+                for rule in _role_rules(r)
+            )
+            rows.append({
+                "NAME": rmeta.get("name", "?"),
+                "RULES": str(len(_role_rules(r))),
+                "WILDCARD": "⚠️" if wild else "",
+            })
+        lines.append(short_table(rows, ["NAME", "RULES", "WILDCARD"]))
+
+    if bindings:
+        lines.append("\n### RoleBindings")
+        rows = []
+        for b in bindings:
+            bmeta = b.get("metadata") or {}
+            subjects_str = ", ".join(
+                f"{s.get('kind', '?')}:{s.get('name', '?')}"
+                for s in (b.get("subjects") or [])
+            )
+            role_kind, role_name = _binding_role_ref(b)
+            rows.append({
+                "NAME": bmeta.get("name", "?"),
+                "ROLE": f"{role_kind}/{role_name}",
+                "SUBJECTS": subjects_str or "(none)",
+            })
+        lines.append(short_table(rows, ["NAME", "ROLE", "SUBJECTS"]))
+
+    return "\n".join(lines)
+
+
+def _render_summary_report(
+    roles: list[dict], bindings: list[dict],
+) -> str:
+    n_cluster_roles = sum(1 for r in roles if r.get("kind") == "ClusterRole")
+    n_namespaced_roles = sum(1 for r in roles if r.get("kind") == "Role")
+    n_cluster_bindings = sum(1 for b in bindings if b.get("kind") == "ClusterRoleBinding")
+    n_namespaced_bindings = sum(1 for b in bindings if b.get("kind") == "RoleBinding")
+
+    lines = [
+        "## RBAC summary (cluster-wide)",
+        f"ClusterRoles: {n_cluster_roles}",
+        f"ClusterRoleBindings: {n_cluster_bindings}",
+        f"Roles (across all namespaces): {n_namespaced_roles}",
+        f"RoleBindings (across all namespaces): {n_namespaced_bindings}",
+    ]
+
+    # Surface wildcard-bearing rules — that's the cluster-admin risk surface.
+    wild_rules: list[tuple[str, dict]] = []
+    for r in roles:
+        rmeta = r.get("metadata") or {}
+        rname = f"{r.get('kind', '?')}/{rmeta.get('namespace', '')}/{rmeta.get('name', '?')}"
+        for rule in _role_rules(r):
+            if (
+                "*" in (rule.get("verbs") or [])
+                or "*" in (rule.get("resources") or [])
+                or "*" in (rule.get("apiGroups") or [])
+            ):
+                wild_rules.append((rname, rule))
+
+    if wild_rules:
+        lines.append(
+            f"\n⚠️ {len(wild_rules)} rule(s) use `*` wildcards "
+            f"(cluster-admin risk surface):"
+        )
+        for rname, rule in wild_rules[:20]:
+            verbs = ", ".join(rule.get("verbs") or [])
+            resources = ", ".join(rule.get("resources") or [])
+            api_groups = ", ".join(rule.get("apiGroups") or []) or "(core)"
+            lines.append(
+                f"  - {rname}: verbs=[{verbs}] resources=[{resources}] "
+                f"apiGroups=[{api_groups}]"
+            )
+        if len(wild_rules) > 20:
+            lines.append(f"  ... and {len(wild_rules) - 20} more")
+    else:
+        lines.append("\n(no wildcard-bearing rules — clean RBAC surface)")
+
+    return "\n".join(lines)
+
+
 def register(mcp) -> None:
     mcp.tool()(create_role)
     mcp.tool()(create_rolebinding)
     mcp.tool()(create_clusterrole)
     mcp.tool()(create_clusterrolebinding)
     mcp.tool()(whoami)
+    mcp.tool()(analyze_rbac)

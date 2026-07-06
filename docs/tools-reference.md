@@ -1,4 +1,4 @@
-# 工具参考（70 个，按功能分类）
+# 工具参考（75 个，按功能分类）
 
 > 这是**完整目录**——每个工具一行签名，按"读 / 写 / 删"分组。
 > 详细使用说明（陷阱、流程、为什么这么设计）见 [tools.md](./tools.md)。
@@ -34,6 +34,7 @@
 
 - `cluster_info()` — apiserver / GitVersion / 实时资源计数
 - `whoami(namespace="default")` — 当前身份 + 有效 namespace-scoped 权限
+- `analyze_rbac(subject=None, verb=None, resource=None, api_group=None, namespace=None)` — 只读 RBAC 分析器，四种模式：`subject=` 正查（某身份被授予的所有 rule）/ `verb+resource` 反查（谁能做这个动作 + 经由哪条 binding→role）/ `namespace=` 列该 ns 的 Role + RoleBinding / 全空 = 全集群 Role/ClusterRole/Binding 计数汇总；每种模式都把带 `*` 通配的 rule 标成 cluster-admin 风险面；反查会标出「匹配但无 binding 引用」的 unreachable role；跟 `create_role` 的 `allow_wildcard` 守门形成闭环
 
 ### 排障 / 反向查
 

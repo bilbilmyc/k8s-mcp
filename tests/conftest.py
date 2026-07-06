@@ -50,16 +50,25 @@ def _clean_env(monkeypatch):
         lambda: {"username": "test-user", "uid": "test-uid", "groups": ["system:mcp"]},
     )
     # The tools import the symbol directly — patch on the calling side too.
-    for mod in ("k8s_mcp.tools.delete_tool",
-                "k8s_mcp.tools.bulk",
-                "k8s_mcp.tools.storage"):
+    # Iterate every tools module rather than naming them explicitly so a
+    # new tool that imports get_caller_identity picks up the same mock.
+    import importlib
+    import pkgutil
+
+    import k8s_mcp.tools as _tools_pkg
+
+    for mod_info in pkgutil.iter_modules(_tools_pkg.__path__):
+        mod_name = f"k8s_mcp.tools.{mod_info.name}"
         try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if hasattr(mod, "get_caller_identity"):
             monkeypatch.setattr(
-                f"{mod}.get_caller_identity",
+                mod,
+                "get_caller_identity",
                 lambda: {"username": "test-user", "uid": "test-uid", "groups": ["system:mcp"]},
             )
-        except AttributeError:
-            pass  # tool module didn't import it (e.g. test modules)
 
     yield
     reset_settings_cache()

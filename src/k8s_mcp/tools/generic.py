@@ -181,6 +181,47 @@ def list_resources(
     narrowing the query — but most kinds don't expose the total count
     cheaply, so the footer only fires when we know it.
     """
+    rows = _list_resource_rows(
+        kind,
+        namespace=namespace,
+        label_selector=label_selector,
+        field_selector=field_selector,
+        limit=limit,
+        api_version=api_version,
+        wide=wide,
+    )
+
+    wide_cols = _WIDE_COLUMNS.get(kind, ()) if wide else ()
+    columns = ["NAME", "NAMESPACE", "STATUS", "AGE"]
+    columns.extend(c for c, _ in wide_cols)
+    table = short_table(rows, columns)
+    # When a limit was requested and the response came back full, surface
+    # a hint so the agent / operator knows to narrow the query. Without
+    # this, a "kubectl get cm --all-namespaces" that silently returned
+    # 500/500 looks identical to "no more ConfigMaps".
+    if limit is not None and len(rows) >= int(limit):
+        table += (
+            f"\n(showing first {int(limit)} items — raise `limit=` or "
+            f"add `field_selector=` / `label_selector=` to see more)"
+        )
+    return table
+
+
+def _list_resource_rows(
+    kind: str,
+    namespace: str | None = None,
+    label_selector: str | None = None,
+    field_selector: str | None = None,
+    limit: int | None = None,
+    api_version: str | None = None,
+    wide: bool = False,
+) -> list[dict]:
+    """Lower-level helper: fetch a kind and return row dicts.
+
+    Same wire behavior as `list_resources` but returns the rows as
+    plain dicts so callers (e.g. `search_resources`) can aggregate
+    across multiple kinds without re-parsing rendered text.
+    """
     dc = _dyn_client()
     resource = _resource_for_kind(dc, kind, api_version=api_version)
 
@@ -213,19 +254,139 @@ def list_resources(
         for col, fn in wide_cols:
             row[col] = fn(obj)
         rows.append(row)
+    return rows
 
-    columns = ["NAME", "NAMESPACE", "STATUS", "AGE"]
-    columns.extend(c for c, _ in wide_cols)
-    table = short_table(rows, columns)
-    # When a limit was requested and the response came back full, surface
-    # a hint so the agent / operator knows to narrow the query. Without
-    # this, a "kubectl get cm --all-namespaces" that silently returned
-    # 500/500 looks identical to "no more ConfigMaps".
-    if limit is not None and len(rows) >= int(limit):
-        table += (
-            f"\n(showing first {int(limit)} items — raise `limit=` or "
-            f"add `field_selector=` / `label_selector=` to see more)"
+
+# Default kinds searched by `search_resources`. Mirrors the hardcoded
+# dict in `_api_version_for()` — kept as a tuple so callers can iterate
+# without depending on dict-iteration order. CRDs are searchable by
+# passing `kinds=[...]` explicitly (they need an api_version, which is
+# expensive to auto-discover for every call).
+_SEARCHABLE_BUILTIN_KINDS: tuple[str, ...] = (
+    "Pod", "Service", "ConfigMap", "Secret", "Namespace", "Node",
+    "PersistentVolume", "PersistentVolumeClaim", "ServiceAccount",
+    "Endpoints", "Event", "ReplicationController", "ResourceQuota",
+    "LimitRange", "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet",
+    "Ingress", "IngressClass", "NetworkPolicy", "HorizontalPodAutoscaler",
+    "Job", "CronJob", "StorageClass",
+)
+
+
+def search_resources(
+    name_substring: str,
+    namespace: str | None = None,
+    kinds: list[str] | None = None,
+    label_selector: str | None = None,
+    limit_per_kind: int = 50,
+    api_versions: dict[str, str] | None = None,
+) -> str:
+    """Find resources by name substring across multiple kinds / namespaces.
+
+    Solves the "I forgot what kind or namespace X is in" triage problem
+    — calling `list_resources(kind=K)` once per candidate K is wasteful
+    when you don't know which one matches.
+
+    Args:
+        name_substring: case-insensitive substring to match against
+            `metadata.name`. Required and must be non-empty.
+        namespace: namespace to search in; `None` = all namespaces.
+            Cluster-scoped kinds (Node, PersistentVolume, ...) ignore it.
+        kinds: explicit list of Kinds to search. `None` (default) =
+            all built-in kinds (~25: Pod, Deployment, Service, ...).
+            Pass `kinds=["Certificate", "Ingress"]` to include CRDs;
+            pair with `api_versions=` to give each CRD its api_version.
+            Auto-discovering every CRD on every call would be too
+            expensive on clusters with 100+ CRDs.
+        label_selector: e.g. `"app=nginx,tier=frontend"`.
+        limit_per_kind: per-kind server-side cap. Default 50 keeps the
+            total response bounded. Raise it for thorough sweeps.
+        api_versions: optional mapping of `kind → apiVersion` for CRDs
+            in `kinds`. E.g. `{"Certificate": "cert-manager.io/v1"}`.
+            Without this, CRDs in `kinds` will fail to resolve.
+
+    Returns a per-row `KIND / NAME / NAMESPACE / STATUS / AGE` table,
+    sorted by KIND then NAME. Kinds that fail (RBAC forbidden, CRD not
+    installed) are skipped and the count surfaces in the footer.
+    """
+    if not name_substring or not name_substring.strip():
+        raise ValueError("name_substring must be a non-empty string")
+
+    needle = name_substring.strip().lower()
+    if kinds is None:
+        search_kinds = list(_SEARCHABLE_BUILTIN_KINDS)
+    else:
+        search_kinds = list(kinds)
+    if not search_kinds:
+        raise ValueError("kinds must be a non-empty list")
+
+    api_versions = api_versions or {}
+    skipped: list[tuple[str, str]] = []
+
+    def _worker(kind: str) -> list[dict]:
+        try:
+            rows = _list_resource_rows(
+                kind,
+                namespace=namespace,
+                label_selector=label_selector,
+                limit=limit_per_kind,
+                api_version=api_versions.get(kind),
+            )
+        except ApiException as e:
+            skipped.append((kind, f"api error {e.status} {e.reason}"))
+            return []
+        except ValueError as e:
+            # CRD not installed / unknown kind / ambiguous match — skip
+            # but surface the reason in the footer so the caller knows.
+            skipped.append((kind, str(e).split("\n", 1)[0][:80]))
+            return []
+        for r in rows:
+            r["KIND"] = kind
+        return rows
+
+    all_rows: list[dict] = []
+    # Same threshold pattern as get_pod_logs multi-pod fan-out: small
+    # queries stay serial (avoids thread-pool overhead + keeps call
+    # order stable for tests), ≥5 kinds parallelize on a pool of 8.
+    if len(search_kinds) >= 5:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(
+            max_workers=min(8, len(search_kinds)),
+        ) as ex:
+            for rows in ex.map(_worker, search_kinds):
+                all_rows.extend(rows)
+    else:
+        for kind in search_kinds:
+            all_rows.extend(_worker(kind))
+
+    matched = [r for r in all_rows if needle in (r.get("NAME") or "").lower()]
+    matched.sort(key=lambda r: (r["KIND"], r.get("NAME") or ""))
+
+    columns = ["KIND", "NAME", "NAMESPACE", "STATUS", "AGE"]
+    table = short_table(matched, columns)
+
+    footer_lines: list[str] = []
+    if not matched:
+        if skipped:
+            kinds_tried = ", ".join(k for k, _ in skipped[:5])
+            footer_lines.append(
+                f"(no resources named like '{name_substring}' — tried "
+                f"{len(skipped)} kind(s) that errored: {kinds_tried}"
+                f"{', ...' if len(skipped) > 5 else ''})"
+            )
+        else:
+            footer_lines.append(
+                f"(no resources named like '{name_substring}')"
+            )
+    elif skipped:
+        footer_lines.append(
+            f"(searched {len(search_kinds)} kinds; "
+            f"{len(skipped)} skipped: "
+            + ", ".join(f"{k}={reason}" for k, reason in skipped[:3])
+            + ("..." if len(skipped) > 3 else "")
+            + ")"
         )
+    if footer_lines:
+        table += "\n" + "\n".join(footer_lines)
     return table
 
 
@@ -783,6 +944,7 @@ def _status_for(kind: str, status: dict) -> str:
 def register(mcp) -> None:
     """Register all tools in this module with the FastMCP instance."""
     mcp.tool()(list_resources)
+    mcp.tool()(search_resources)
     mcp.tool()(get_resource)
     mcp.tool()(get_resource_yaml)
     mcp.tool()(describe_resource)

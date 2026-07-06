@@ -21,6 +21,7 @@
 ### 通用查询（CRD 感知）
 
 - `list_resources(kind, namespace=None, label_selector=None, field_selector=None, limit=None, api_version=None, wide=False)` — 任意 Kind；CRD 需显式传 `api_version`；`field_selector` / `limit` 推到 apiserver 端过滤；命中 `limit` 时 footer 提示可加 selector 或提高 limit
+- `search_resources(name_substring, namespace=None, kinds=None, label_selector=None, limit_per_kind=50, api_versions=None)` — 跨 kind 按名字子串搜；默认扫 ~25 个内置 kind（Pod / Deployment / Service / ...），CRD 需 `kinds=[...]` + `api_versions={kind: av}`；≥5 kind 时并行 fan-out；输出 `KIND / NAME / NAMESPACE / STATUS / AGE`，按 KIND 排序；RBAC / CRD 缺失的 kind 在 footer 里 skip 计数
 - `get_resource(kind, name, namespace=None, api_version=None)` — 完整 JSON（CRD 感知）
 - `get_resource_yaml(kind, name, namespace=None, reveal_secrets=False, api_version=None, include_managed_fields=False)` — YAML 清单；Secret 默认脱敏
 - `describe_resource(kind, name, namespace=None, api_version=None)` — kubectl-describe 风格摘要

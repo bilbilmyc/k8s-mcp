@@ -480,15 +480,23 @@ class _FakeListResource:
     """A fake Resource whose `.get(name=None)` returns a predetermined list.
 
     Items are plain dicts so `_to_dict`'s `dict(resource)` branch handles them.
+
+    `last_get_kwargs` captures whatever kwargs were passed to `get()`, so
+    tests can assert label_selector / field_selector / limit were forwarded
+    to the apiserver (not silently dropped).
     """
 
     def __init__(self, items):
         self._items = items
+        self.last_get_kwargs: dict = {}
 
     def get(self, name=None, namespace=None, **kwargs):
         if name is not None:
             from kubernetes.dynamic.exceptions import NotFoundError
             raise NotFoundError("list-mode tests should not fetch by name")
+        # Capture the kwargs the production code passes so we can assert
+        # the limit / field_selector plumbing works.
+        self.last_get_kwargs = {"namespace": namespace, **kwargs}
         return _FakeListResult(self._items)
 
 
@@ -644,3 +652,122 @@ def test_list_resources_wide_unknown_kind_does_not_crash(monkeypatch):
     # No wide columns for ConfigMap
     assert "INTERNAL-IP" not in out
     assert "READY" not in out
+
+
+# =============================================================================
+# list_resources — server-side selectors (field_selector, limit) — P3
+# =============================================================================
+
+
+def test_list_resources_forwards_field_selector_to_apiserver(monkeypatch):
+    """`field_selector="status.phase=Running"` must be passed to the
+    underlying `.get()` — that's the whole point of this parameter:
+    push the filter to the apiserver so we don't pay for 50k rows
+    over the wire only to drop 49,500 of them client-side."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [{"metadata": {"name": "web"}}]
+    fake_resource = _FakeListResource(items)
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"Pod": fake_resource})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        generic.list_resources(
+            "Pod",
+            namespace="app",
+            field_selector="status.phase=Running",
+        )
+    assert fake_resource.last_get_kwargs.get("field_selector") == "status.phase=Running"
+    assert fake_resource.last_get_kwargs.get("namespace") == "app"
+
+
+def test_list_resources_forwards_limit_to_apiserver(monkeypatch):
+    """`limit=10` must be passed as int to the underlying `.get()`."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [{"metadata": {"name": "web"}}]
+    fake_resource = _FakeListResource(items)
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"Pod": fake_resource})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        generic.list_resources("Pod", namespace="app", limit=10)
+    assert fake_resource.last_get_kwargs.get("limit") == 10
+    # limit is an int, not a str — apiserver rejects str limits.
+    assert isinstance(fake_resource.last_get_kwargs.get("limit"), int)
+
+
+def test_list_resources_emits_truncation_hint_when_limit_hit(monkeypatch):
+    """When the apiserver returns a full page (rows == limit), surface a
+    footer hint so the operator / agent knows there's more data to
+    narrow against. Without this, "I asked for 1, got 1" looks identical
+    to "I asked for 1, and there's only 1"."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [{"metadata": {"name": "web"}}]
+    fake_resource = _FakeListResource(items)
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"Pod": fake_resource})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        out = generic.list_resources("Pod", namespace="app", limit=1)
+    assert "showing first 1 items" in out
+    assert "field_selector=" in out  # points operator at the narrow knob
+
+
+def test_list_resources_no_truncation_hint_when_under_limit(monkeypatch):
+    """When rows < limit, don't emit the hint — the query was complete."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [{"metadata": {"name": "web"}}]
+    fake_resource = _FakeListResource(items)
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"Pod": fake_resource})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        out = generic.list_resources("Pod", namespace="app", limit=10)
+    assert "showing first" not in out
+
+
+def test_list_resources_combines_label_and_field_selector(monkeypatch):
+    """label_selector and field_selector are independent and both must
+    be forwarded — together they push both filters to the apiserver."""
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    reset_settings_cache()
+
+    items = [{"metadata": {"name": "web"}}]
+    fake_resource = _FakeListResource(items)
+
+    class _Dyn:
+        @property
+        def resources(self):
+            return _FakeResources({"Pod": fake_resource})
+
+    with patch.object(generic, "_dyn_client", return_value=_Dyn()):
+        generic.list_resources(
+            "Pod",
+            namespace="app",
+            label_selector="app=web",
+            field_selector="status.phase=Running",
+            limit=50,
+        )
+    kw = fake_resource.last_get_kwargs
+    assert kw.get("label_selector") == "app=web"
+    assert kw.get("field_selector") == "status.phase=Running"
+    assert kw.get("limit") == 50

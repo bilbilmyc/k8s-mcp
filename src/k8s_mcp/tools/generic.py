@@ -141,6 +141,8 @@ def list_resources(
     kind: str,
     namespace: str | None = None,
     label_selector: str | None = None,
+    field_selector: str | None = None,
+    limit: int | None = None,
     api_version: str | None = None,
     wide: bool = False,
 ) -> str:
@@ -154,6 +156,14 @@ def list_resources(
         namespace: namespace to list in. None = all namespaces.
             Cluster-scoped kinds (Node, Namespace, PersistentVolume) ignore it.
         label_selector: e.g. "app=nginx,tier=frontend".
+        field_selector: server-side field selector, e.g.
+            `"status.phase=Running"` or `"metadata.namespace!=kube-system"`.
+            Pushed to the apiserver, so it bounds the wire size and avoids
+            a client-side filter over a 50k-row response.
+        limit: server-side cap on items returned. None = apiserver default
+            (typically 500 for list, but depends on the resource). Use a
+            smaller number for chatty kinds, or pair with `field_selector`
+            to push filtering to the apiserver.
         api_version: full apiVersion, e.g. `"apps/v1"` for built-ins or
             `"cert-manager.io/v1"` for CRDs. Omit for built-in kinds —
             auto-resolved via the hardcoded dictionary. Required only when
@@ -166,12 +176,21 @@ def list_resources(
             RESTARTS / NODE) prefer `list_pods()`.
 
     Returns a compact NAME / NAMESPACE / STATUS / AGE table; with wide=True,
-    adds columns per `_WIDE_COLUMNS`.
+    adds columns per `_WIDE_COLUMNS`. When the apiserver-side truncation
+    is detectable (response length == limit), a footer hint suggests
+    narrowing the query — but most kinds don't expose the total count
+    cheaply, so the footer only fires when we know it.
     """
     dc = _dyn_client()
     resource = _resource_for_kind(dc, kind, api_version=api_version)
 
-    get_kwargs = {"label_selector": label_selector} if label_selector else {}
+    get_kwargs: dict = {}
+    if label_selector:
+        get_kwargs["label_selector"] = label_selector
+    if field_selector:
+        get_kwargs["field_selector"] = field_selector
+    if limit is not None:
+        get_kwargs["limit"] = int(limit)
     if namespace:
         ret = resource.get(namespace=namespace, **get_kwargs)
     else:
@@ -197,7 +216,17 @@ def list_resources(
 
     columns = ["NAME", "NAMESPACE", "STATUS", "AGE"]
     columns.extend(c for c, _ in wide_cols)
-    return short_table(rows, columns)
+    table = short_table(rows, columns)
+    # When a limit was requested and the response came back full, surface
+    # a hint so the agent / operator knows to narrow the query. Without
+    # this, a "kubectl get cm --all-namespaces" that silently returned
+    # 500/500 looks identical to "no more ConfigMaps".
+    if limit is not None and len(rows) >= int(limit):
+        table += (
+            f"\n(showing first {int(limit)} items — raise `limit=` or "
+            f"add `field_selector=` / `label_selector=` to see more)"
+        )
+    return table
 
 
 def get_resource(

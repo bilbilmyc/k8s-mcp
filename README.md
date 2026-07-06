@@ -122,14 +122,68 @@ claude mcp add-json k8s '{"command": "k8s-mcp", "env": {"K8S_MCP_LOG_LEVEL": "IN
 }
 ```
 
-重启 Agent，应该看到 "k8s" 下挂着 **80 个**工具。
+重启 Agent，应该看到 "k8s" 下挂着 **72 个**工具。
 
 完整环境变量清单见 [docs/env.md](./docs/env.md)。
+
+完整环境变量清单见 [docs/env.md](./docs/env.md)，下面是一次配齐所有 `K8S_MCP_*` 的**完整配置示例**——复制后按需取消注释/改值即可。
+
+## 完整环境配置（生产推荐）
+
+```bash
+# ===== k8s-mcp 完整配置示例 =====
+# 复制本块、按需取消注释/改值。一次配齐全部 K8S_MCP_* 环境变量。
+# 默认值已合理——只在需要时覆盖。
+
+# ---------- 1. 集群认证（kubeconfig 与 apiserver 二选一） ----------
+# 模式 A：kubeconfig（推荐；与 $KUBECONFIG 同义）
+export KUBECONFIG=/path/to/kubeconfig
+# export K8S_MCP_KUBE_CONTEXT=my-cluster                       # 多 cluster 时切换 context
+
+# 模式 B：直连 apiserver（service-account / 远端集群）
+# export K8S_MCP_API_SERVER=https://12.2.40.40:6443
+# export K8S_MCP_API_TOKEN=<bearer-token>
+# export K8S_MCP_API_CA_CERT=/path/to/ca.crt                   # 不写走系统 CA；写 false 跳过 TLS 仅本地测试
+# export K8S_MCP_API_INSECURE=false
+
+# ---------- 2. 调试输出 ----------
+export K8S_MCP_LOG_LEVEL=INFO                                 # DEBUG / INFO / WARNING / ERROR / CRITICAL
+export K8S_MCP_DEFAULT_TAIL_LINES=100                         # get_pod_logs 默认尾行数
+
+# ---------- 3. 写守门（默认全部放行） ----------
+# export K8S_MCP_READ_ONLY=true                               # true = 所有写工具抛 PermissionError
+# export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod         # 仅这些 ns 可写；cluster-scoped 写入也拒
+export K8S_MCP_DELETE_TOKEN_SECRET="$(openssl rand -hex 32)"  # 必填——删除二次确认 token 的 HMAC 密钥
+export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300                   # token TTL 秒数，默认 5 分钟
+
+# ---------- 4. 运行时安全网（默认已合理） ----------
+export K8S_MCP_RATE_LIMIT_RPM=120                             # 单工具 RPM 上限；0 = 关闭
+export K8S_MCP_TOOL_TIMEOUT_S=60                              # 单工具墙钟超时秒数；0 = 关闭
+
+# ---------- 5. Prometheus（可选；不配则自动探测） ----------
+# export K8S_MCP_PROMETHEUS_URL=http://12.2.40.40:9090        # 显式 URL，跳过发现
+# export K8S_MCP_PROMETHEUS_BEARER_TOKEN=<bearer>             # 需要鉴权时配
+# export K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST=monitoring,observability  # 多租户集群限制扫描范围
+
+# ---------- 6. 引导性集群组件 ----------
+# export K8S_MCP_LOCAL_PATH_PROVISIONER_URL=https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
+
+# ---------- 7. 通知 webhook（JSON list） ----------
+# type 可选：feishu（纯文本）/ feishu_post（富文本 post）/ feishu_card（推荐，interactive 卡片）
+#          slack / wecom / generic
+export K8S_MCP_NOTIFIERS='[{"name":"ops","type":"feishu_card","url":"https://open.feishu.cn/open-apis/bot/v2/hook/<your-webhook-id>"}]'
+# export K8S_MCP_NOTIFIER_URL_ALLOW_HTTP=false                # true = 允许 http://（仅本地测试）
+# export K8S_MCP_NOTIFIER_URL_ALLOWLIST=open.feishu.cn,hooks.slack.com  # host 白名单（精确匹配）
+```
+
+上面 7 组覆盖了 `Settings` 模型上的全部字段；默认值已合理，只在你需要偏离默认时才动它。对每条配置字段更细的解释见 [docs/env.md](./docs/env.md)；通知 type 详细对比见下面 "通知 webhook" 段。
 
 ## 安全守门
 
 ```bash
-# 只读模式：所有写工具直接抛 PermissionError
+# 只读模式 — 默认关闭，写权限默认开启。
+# 只有你想锁死成只读时才设为 true，所有写工具（apply / create / patch / delete）会抛 PermissionError。
+# （配置默认 false）
 export K8S_MCP_READ_ONLY=true
 
 # 写操作的 namespace 白名单。读不受限制。

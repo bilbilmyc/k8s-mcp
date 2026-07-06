@@ -125,10 +125,65 @@ Restart the agent. You should see **72 tools** listed under "k8s".
 
 Full environment variable reference: [docs/env.md](./docs/env.md).
 
+Full environment variable reference: [docs/env.md](./docs/env.md), and a single copy-pasteable example below that covers every `K8S_MCP_*` variable in one block.
+
+## Complete config (production-ready one-block)
+
+```bash
+# ===== k8s-mcp complete config (production setup) =====
+# Copy this block, uncomment + edit the lines you need. Covers every
+# K8S_MCP_* variable. Defaults are sensible — only override what you
+# need to override.
+
+# ---------- 1. Cluster auth (pick one of kubeconfig / apiserver) ----------
+# Mode A: kubeconfig (recommended; same semantics as $KUBECONFIG)
+export KUBECONFIG=/path/to/kubeconfig
+# export K8S_MCP_KUBE_CONTEXT=my-cluster                       # switch context in multi-cluster kubeconfigs
+
+# Mode B: talk to apiserver directly (service-account / remote cluster)
+# export K8S_MCP_API_SERVER=https://12.2.40.40:6443
+# export K8S_MCP_API_TOKEN=<bearer-token>
+# export K8S_MCP_API_CA_CERT=/path/to/ca.crt                   # omit → system CA; set false to skip TLS (local test only)
+# export K8S_MCP_API_INSECURE=false
+
+# ---------- 2. Debug output ----------
+export K8S_MCP_LOG_LEVEL=INFO                                 # DEBUG / INFO / WARNING / ERROR / CRITICAL
+export K8S_MCP_DEFAULT_TAIL_LINES=100                         # default --tail for get_pod_logs
+
+# ---------- 3. Write gates (writes enabled by default) ----------
+# export K8S_MCP_READ_ONLY=true                               # true → every write tool raises PermissionError
+# export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod         # only these namespaces writable; cluster-scoped writes also rejected
+export K8S_MCP_DELETE_TOKEN_SECRET="$(openssl rand -hex 32)"  # required — HMAC key for delete two-step tokens
+export K8S_MCP_DELETE_TOKEN_TTL_SECONDS=300                   # token TTL seconds (default 5 min)
+
+# ---------- 4. Runtime safety nets (defaults are sane) ----------
+export K8S_MCP_RATE_LIMIT_RPM=120                             # per-tool RPM cap; 0 disables
+export K8S_MCP_TOOL_TIMEOUT_S=60                              # per-tool wall-clock timeout seconds; 0 disables
+
+# ---------- 5. Prometheus (optional; auto-discovered if unset) ----------
+# export K8S_MCP_PROMETHEUS_URL=http://12.2.40.40:9090        # explicit URL — skip discovery
+# export K8S_MCP_PROMETHEUS_BEARER_TOKEN=<bearer>             # only if your Prometheus needs auth
+# export K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST=monitoring,observability  # limit scan in multi-tenant clusters
+
+# ---------- 6. Bootstrap cluster components ----------
+# export K8S_MCP_LOCAL_PATH_PROVISIONER_URL=https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
+
+# ---------- 7. Notifier webhooks (JSON list) ----------
+# type options: feishu (plain text) / feishu_post (rich text) / feishu_card (recommended, interactive card)
+#               slack / wecom / generic
+export K8S_MCP_NOTIFIERS='[{"name":"ops","type":"feishu_card","url":"https://open.feishu.cn/open-apis/bot/v2/hook/<your-webhook-id>"}]'
+# export K8S_MCP_NOTIFIER_URL_ALLOW_HTTP=false                # true → allow http:// (local test only)
+# export K8S_MCP_NOTIFIER_URL_ALLOWLIST=open.feishu.cn,hooks.slack.com  # host allowlist (exact match)
+```
+
+These 7 groups cover every field on the `Settings` model; defaults are already sensible — only override what you need to deviate from. Field-level reference: [docs/env.md](./docs/env.md); notifier type comparison: the next section.
+
 ## Safety flags
 
 ```bash
-# Read-only mode: all write tools refuse with PermissionError.
+# Read-only mode — OPT-IN, writes are enabled by default out of the box.
+# Set to `true` only when you want every write tool to refuse with PermissionError.
+# (Config default is `false`.)
 export K8S_MCP_READ_ONLY=true
 
 # Namespace allowlist for writes. Reads are unrestricted.

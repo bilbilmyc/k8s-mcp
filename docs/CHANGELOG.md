@@ -8,8 +8,6 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [0.5.2] — 2026-07-07
 
-## [0.5.2] — 2026-07-07
-
 ### Changed — `delete_resource` is now single-step
 
 Removed the two-step `preview → HMAC confirmation_token → execute` flow.

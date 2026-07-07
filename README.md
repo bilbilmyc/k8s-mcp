@@ -2,7 +2,7 @@
 
 [English version](./README.en.md)
 
-面向 LLM Agent 的 Kubernetes MCP server。提供 **72 个**工具，覆盖 Pod /
+面向 LLM Agent 的 Kubernetes MCP server。提供 **73 个**工具，覆盖 Pod /
 Deployment / StatefulSet / DaemonSet / Job / CronJob / Service / Ingress
 / ConfigMap / PVC / RBAC / NetworkPolicy 等资源的增删改查，加上日志 /
 事件 / 节点运维 / top / rollout / wait / 批量 YAML apply / Prometheus
@@ -122,7 +122,7 @@ claude mcp add-json k8s '{"command": "k8s-mcp", "env": {"K8S_MCP_LOG_LEVEL": "IN
 }
 ```
 
-重启 Agent，应该看到 "k8s" 下挂着 **72 个**工具。
+重启 Agent，应该看到 "k8s" 下挂着 **73 个**工具。
 
 完整环境变量清单见 [docs/env.md](./docs/env.md)。
 

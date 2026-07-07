@@ -1,4 +1,4 @@
-# 工具参考（72 个，按功能分类）
+# 工具参考（73 个，按功能分类）
 
 > 这是**完整目录**——每个工具一行签名，按"读 / 写 / 删"分组。
 > 详细使用说明（陷阱、流程、为什么这么设计）见 [tools.md](./tools.md)。
@@ -55,8 +55,9 @@
 
 ### 指标 / 监控
 
-- `top_pods(namespace=None, label_selector=None, sort_by="memory")` — metrics-server
-- `top_nodes(sort_by="memory")` — metrics-server
+- `top_pods(namespace=None, label_selector=None, sort_by="memory", prometheus_url=None)` — ⭐ 三档级联：`metrics-server` → Prometheus（cAdvisor / node-exporter）→ `bootstrap_metrics_server`（仅写权限允许时）。详见 [tools.md → top_pods / top_nodes 级联](./tools.md#top_pods--top_nodes-级联metrics-server--prometheus--bootstrap)
+- `top_nodes(sort_by="memory", prometheus_url=None)` — 同上（Node 维度，node-exporter）
+- `bootstrap_metrics_server(manifest_url=None, kubelet_insecure_tls=True, wait_seconds=30)` — 🛠 [写] 应用 upstream `components.yaml` 到 `kube-system`、patch `--kubelet-insecure-tls`、等 ready。幂等；`top_*` 级联失败时也会自动触发（一次性）
 - `prometheus_query(promql, time=None, prometheus_url=None)` — Prometheus 即时 PromQL
 - `prometheus_query_range(promql, start, end, step="30s", prometheus_url=None)` — 范围查询
 - `pod_metrics(pod_name, namespace, metric="cpu", range="5m", prometheus_url=None)` — cAdvisor 指标（cpu / memory / network_rx / network_tx / fs_reads / fs_writes）

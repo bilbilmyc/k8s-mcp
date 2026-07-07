@@ -4,7 +4,88 @@ All notable changes to k8s-mcp are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) — backwards-incompatible tool
 behavior changes bump the minor (we're pre-1.0).
 
-## [Unreleased]
+## [0.5.3] — 2026-07-07
+
+### Added — `top_pods` / `top_nodes` 3-tier cascade
+
+`top_pods` and `top_nodes` no longer hard-fail when metrics-server isn't
+installed. They walk a 3-tier cascade so `kubectl top` works on any
+cluster that has at least *one* of: metrics-server, Prometheus
+(cAdvisor + node-exporter), or write permission to `kube-system`:
+
+1. **metrics-server** — `/apis/metrics.k8s.io/v1beta1/...` aggregation
+   layer (the canonical `kubectl top` data source, fastest path).
+2. **Prometheus fallback** — when metrics-server 404s, fall through to
+   Prometheus using `container_cpu_usage_seconds_total[5m]` /
+   `container_memory_working_set_bytes` (cAdvisor, Pods) and
+   `node_cpu_seconds_total{mode!="idle"}[5m]` /
+   `node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes`
+   (node-exporter, Nodes). On the Prometheus path, `label_selector=` is
+   translated to a pod-name regex by listing pods once (extra apiserver
+   call) — no matches → namespace-only filter with a footer notice.
+3. **`bootstrap_metrics_server` auto-bootstrap** — when both data sources
+   fail AND `K8S_MCP_READ_ONLY=false` AND `kube-system` is in
+   `K8S_MCP_NAMESPACE_ALLOWLIST`, apply the upstream
+   `components.yaml`, patch `--kubelet-insecure-tls` for self-hosted
+   kubelets, wait for Deployment ready, then retry path 1. One-shot per
+   process: a failed bootstrap does NOT retry on every subsequent
+   `top_pods` call (avoids hammering the apiserver when an agent loops).
+   Restart the MCP server to retry.
+
+When all three paths fail, `top_pods` / `top_nodes` raise a `RuntimeError`
+that **literally lists the next-step tool names** (per the failure-path
+output promotion rule): `bootstrap_metrics_server`,
+`find_prometheus_service()`, and `prometheus_query(<PromQL>,
+prometheus_url=<URL>)` — plus the literal `kubectl apply -f` install
+command for users who'd rather install metrics-server by hand.
+
+### Added — `bootstrap_metrics_server` tool
+
+Public tool (also auto-invoked by the cascade):
+
+```python
+bootstrap_metrics_server(
+    manifest_url: str | None = None,        # default upstream release URL
+    kubelet_insecure_tls: bool = True,      # patch the Deployment after apply
+    wait_seconds: int = 30,
+) -> str
+```
+
+- Idempotent: probes `Deployment/metrics-server` first; if it exists,
+  returns `status=AlreadyInstalled` without re-applying.
+- Patches `--kubelet-insecure-tls` by default (self-hosted single-node
+  clusters and most non-EKS/GKE/AKS distros ship kubelets with
+  self-signed serving certs; without the flag metrics-server can't scrape
+  them and `top` returns empty).
+- Honors `K8S_MCP_NAMESPACE_ALLOWLIST` — refuses with `PermissionError`
+  when `kube-system` isn't allowed (so a misconfigured allowlist
+  refuses cluster-bootstrap rather than silently applying).
+- Manifest override via `K8S_MCP_METRICS_SERVER_MANIFEST_URL` env var
+  (offline / air-gapped installs point at a self-hosted copy).
+- Returns a multi-line summary including `status=Installed |
+  AlreadyInstalled`, the manifest URL, kubelet-insecure-tls flag,
+  wait duration, and `desired/ready/available` replica counts.
+
+### Fixed
+
+- `_fmt_mem(0)` now returns `"0"` (was `"0B"`); the trailing `B` made
+  the sort key round-trip through `_parse_mem` raise `ValueError`. Cost
+  one byte; saved a confusing crash.
+
+### Tests
+
+- New `tests/test_metrics.py` — 15 tests covering all three cascade
+  paths, label_selector translation, both-failed-read-only error
+  message, both-failed-allowlist error, auto-bootstrap when perms
+  allow, one-shot bootstrap gate, and `bootstrap_metrics_server` itself
+  (happy path, idempotent Deployment-exists, READ_ONLY rejected,
+  allowlist rejected, custom manifest URL).
+- `tests/test_tool_inventory.py` — `EXPECTED_TOOL_COUNT = 73` (was 72);
+  added `bootstrap_metrics_server`.
+
+Total: 643 tests passing (was 630; +15 metrics tests, +1 tool inventory
+constant, net minus ~3 obsolete import / helper tests dropped earlier
+this session).
 
 ## [0.5.2] — 2026-07-07
 

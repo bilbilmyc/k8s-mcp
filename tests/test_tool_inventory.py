@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-EXPECTED_TOOL_COUNT = 72
+EXPECTED_TOOL_COUNT = 73
 EXPECTED_TOOLS: frozenset[str] = frozenset({
     "ping",
     # autoscale
@@ -57,6 +57,7 @@ EXPECTED_TOOLS: frozenset[str] = frozenset({
     # logs
     "get_pod_logs",
     # metrics
+    "bootstrap_metrics_server",
     "top_nodes",
     "top_pods",
     # networkpolicy

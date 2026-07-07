@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     local_path_provisioner_url: str = (
         "https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml"
     )
+    # metrics-server manifest URL for `bootstrap_metrics_server` (and the
+    # auto-bootstrap path in top_pods/top_nodes). Default points at the
+    # upstream kubernetes-sigs release; override for air-gapped installs.
+    metrics_server_manifest_url: str | None = None
 
     # 通知 webhook 列表。JSON 字符串，每项是
     # `{"name": "<id>", "type": "feishu|slack|wecom|generic",

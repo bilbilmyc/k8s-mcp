@@ -131,6 +131,7 @@ find_prometheus_service(namespace=None)
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `K8S_MCP_LOCAL_PATH_PROVISIONER_URL` | Rancher 官方 manifest URL | `bootstrap_local_path_provisioner` 离线 / 内网场景下指向自托管镜像的 manifest。 |
+| `K8S_MCP_METRICS_SERVER_MANIFEST_URL` | `https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml` | `bootstrap_metrics_server` 离线 / 内网场景下指向自托管镜像的 manifest。覆盖默认上游 release URL。 |
 
 ## 完整示例（`~/.zshrc` 或 `.env`）
 

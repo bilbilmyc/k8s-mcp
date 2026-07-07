@@ -196,8 +196,9 @@ HMAC token 校验不构成任何额外防护（agent 自己就能伪造），徒
 
 跟 `top_pods` 是**两套独立体系**：
 
-- `top_pods` 走 Kubernetes 聚合层 API `/apis/metrics.k8s.io/...`，**只能
-  从 metrics-server 拉数据**。
+- `top_pods` 优先走 Kubernetes 聚合层 API `/apis/metrics.k8s.io/...`
+  （metrics-server），失败时**自动 fallback 到 Prometheus**（cAdvisor +
+  node-exporter）—— 见下面 [top_pods / top_nodes 级联](#top_pods--top_nodes-级联metrics-server--prometheus--bootstrap)。
 - Prometheus 工具走 Prometheus 自己的 HTTP API（默认 `:9090`），能查
   Prometheus 已抓取的所有指标（cAdvisor、node-exporter、各应用的
   exporter / ServiceMonitor 都行）。
@@ -255,6 +256,108 @@ k8s-mcp 走"三层发现 + 两套桥接"：
 **`expose_prometheus_as_nodeport` 在 read-only 模式下不可用**——它创建
 新 Service，read-only 整个写流程都被拒。仍然要尊重
 `K8S_MCP_NAMESPACE_ALLOWLIST`：Service 创建校验目标 namespace。
+
+---
+
+## `top_pods` / `top_nodes` —— 级联（metrics-server → Prometheus → bootstrap）
+
+签名：
+
+```python
+top_pods(
+    namespace: str | None = None,
+    label_selector: str | None = None,
+    sort_by: str = "memory",            # "cpu" or "memory"
+    prometheus_url: str | None = None,
+) -> str
+
+top_nodes(
+    sort_by: str = "memory",
+    prometheus_url: str | None = None,
+) -> str
+```
+
+`top_pods` / `top_nodes` 是 `kubectl top` 的等价工具，但在 metrics-server
+缺失时**不会傻乎乎地 404**——它走三档级联，让 `top` 几乎在所有集群上
+都能直接用：
+
+1. **metrics-server（最快路径）** —— 走 K8s 聚合层
+   `/apis/metrics.k8s.io/v1beta1/...`。绝大多数装 Prometheus 的集群也
+   装了这个，所以 path 1 经常一次就通。
+2. **Prometheus fallback（绝大多数集群都能命中）** —— metrics-server
+   404 时自动改走 Prometheus（通过上面
+   [端点发现 + 桥接协议](#端点发现--桥接协议) 拿到的 URL），
+   用 cAdvisor 抓的 `container_cpu_usage_seconds_total[5m]` /
+   `container_memory_working_set_bytes`（Pod）和
+   node-exporter 抓的 `node_cpu_seconds_total{mode!="idle"}[5m]` /
+   `node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes`（Node）
+   现算。`label_selector` 在 Prometheus 路径上会被翻译成 pod-name 正则
+   （多一次 apiserver list，但只一次）；找不到匹配的 pod 时退回到
+   namespace-only filter 并标注。
+3. **`bootstrap_metrics_server`（仅当 1+2 都失败且有写权限时自动跑）** ——
+   当 path 1 404 且 path 2 也连不上 Prometheus 时，**如果**
+   `READ_ONLY=false` **且** `kube-system` 在 `NAMESPACE_ALLOWLIST` 里，
+   自动 apply 上游 `components.yaml` 到 `kube-system`、patch 上
+   `--kubelet-insecure-tls`（自建集群的 kubelet 自签证书场景）、等
+   Deployment ready，然后回到 path 1 重试。**整个过程 agent 看不见**：
+   agent 只看到一个 `top_pods()` 调用，最终返回一张表（或者一条
+   "bootstrap 失败，请检查 kube-system 权限" 的提示）。
+
+**错误传播**：三档全失败时 `top_pods` / `top_nodes` 抛
+`RuntimeError`，**字面**列出下一步可以做什么：
+
+```
+top_pods: neither metrics-server nor Prometheus is reachable.
+  - metrics-server: not installed (apiserver 404 on /apis/metrics.k8s.io)
+  - prometheus: Prometheus is not auto-discoverable
+  - bootstrap_metrics_server: SKIPPED (kube-system is not in
+    K8S_MCP_NAMESPACE_ALLOWLIST).
+    Next steps (pick one):
+      a) Allow `kube-system` in K8S_MCP_NAMESPACE_ALLOWLIST and re-call
+      b) Manually install metrics-server:
+         kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+      c) Install Prometheus (kube-prometheus-stack) and let the agent
+         discover it via `find_prometheus_service()`.
+  - OR call prometheus_query(<PromQL>, prometheus_url=<URL>) directly
+    once a Prometheus URL is known.
+```
+
+这样 agent 不会卡在 "metrics-server 没装我该怎么办" 的循环里——`c)` 和
+最后那条 `prometheus_query(...)` 提示它直接绕过 `top_*` 拿数据。
+
+### `bootstrap_metrics_server` —— 显式触发
+
+签名：
+
+```python
+bootstrap_metrics_server(
+    manifest_url: str | None = None,        # 默认 upstream release URL
+    kubelet_insecure_tls: bool = True,      # 自建集群 patch `--kubelet-insecure-tls`
+    wait_seconds: int = 30,
+) -> str
+```
+
+Agent 想在执行 `top_pods` 之前预先把 metrics-server 装好时显式调用；
+或者 `top_pods` 自动 bootstrap 失败后手动重试。**幂等**：检测到
+`Deployment/metrics-server` 已存在直接返回 `status=AlreadyInstalled`
+不再 apply。
+
+离线 / 私有镜像：覆盖 `K8S_MCP_METRICS_SERVER_MANIFEST_URL` 指向自托管
+manifest（env 段 [dev / 离线](./env.md#dev--离线)）。
+
+**One-shot gate**：级联内的自动 bootstrap 是**单次**的——同一个进程内
+首次失败后再调用 `top_pods` 不会再次 retry，避免 agent 在循环里反复
+apply + probe 把 apiserver 打满。重启 MCP server 后重置。
+
+### 何时不该用 `top_pods` / `top_nodes`
+
+- 想看**网络 rx/tx、磁盘 r/w、单 container 拆分** —— `top_pods` 只
+  输出 Pod 维度的 CPU / memory 聚合。要更细直接 `prometheus_query(...)`
+  查 `container_network_*` / `container_fs_*` / `*_bytes_total`。
+- 想看**某个 Pod 在过去一小时**的曲线 —— `top_*` 是 instant；用
+  `prometheus_query_range()`。
+- 想按自定义指标排序（比如 GPU 利用率）—— 同样走 `prometheus_query`
+  + 客户端排序。
 
 ---
 

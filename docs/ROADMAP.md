@@ -202,3 +202,52 @@ HITL），不再让工具层背锅。
 - 2026-07-06 v0.4.3 完成: Phase E 4+ 个分析器/diagnose/explain 工具 + search/add_label/remove_label/exec_pod，666 tests passing
 - 2026-07-06 v0.5.0 完成: A1+A2 收尾 + B1+B2 收尾（删 9 个 deprecated）+ C2 OpenAPI cap + docs 刷新，655 tests passing
 - 2026-07-07 v0.5.2 完成: 单步删除（删 HMAC token subsystem）+ Prometheus NodePort/LoadBalancer URL 修正，630 tests passing
+- 2026-07-07 v0.5.3 完成: `top_pods` / `top_nodes` 三档级联 + `bootstrap_metrics_server` 显式工具，643 tests passing
+
+---
+
+## v0.5.3 — `top_pods` / `top_nodes` 三档级联 + 自动 bootstrap（2026-07-07）
+
+**主题**：用户在 v0.5.2 发版验证里提了一个观察——"既然 Prometheus 已经在抓 cAdvisor + node-exporter，metrics-server 那条路径基本上是多余的。"把这观察落地为级联策略：让 `top_pods` / `top_nodes` 在 metrics-server 缺失时透明地落到 Prometheus，**仅在两条路径都断且有写权限时才尝试自动装 metrics-server**，避免 LLM 死磕 `bootstrap_metrics_server`。
+
+- [x] **G1 · `top_pods` / `top_nodes` 三档级联**
+  - Path 1: `/apis/metrics.k8s.io/v1beta1/...`（metrics-server，最快）
+  - Path 2: Prometheus fallback（`container_cpu_usage_seconds_total[5m]` / `container_memory_working_set_bytes` for Pods；`node_cpu_seconds_total{mode!="idle"}[5m]` / `node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes` for Nodes）
+  - Path 3: `bootstrap_metrics_server` 自动触发——仅当 1 + 2 都失败 **且** `K8S_MCP_READ_ONLY=false` **且** `kube-system` 在 `K8S_MCP_NAMESPACE_ALLOWLIST` 里
+  - 三档全失败时 `RuntimeError` 字面列出 `bootstrap_metrics_server` / `find_prometheus_service()` / `prometheus_query(<PromQL>, prometheus_url=<URL>)` 三个备选——遵循「failure-path output must promote too」规则
+- [x] **G2 · `bootstrap_metrics_server` 显式工具**
+  - apply upstream `components.yaml` 到 `kube-system`
+  - 默认 patch `--kubelet-insecure-tls`（自建集群 kubelet 自签证书场景）
+  - 幂等：`Deployment/metrics-server` 已存在直接返回 `status=AlreadyInstalled` 不重 apply
+  - 可覆盖 manifest URL：`K8S_MCP_METRICS_SERVER_MANIFEST_URL` 环境变量（离线 / 内网）
+  - `K8S_MCP_NAMESPACE_ALLOWLIST` 不含 `kube-system` 时抛 `PermissionError`，避免误配置下静默写集群
+- [x] **G3 · One-shot bootstrap gate**
+  - `_BOOTSTRAP_ATTEMPTED` 模块级 flag：同一进程内 bootstrap 失败后**不再 retry**，避免 LLM 循环调用 `top_pods` 时反复 apply + probe 把 apiserver 打满
+  - 重启 MCP server 自动重置（让运维改了 allowlist 后下一次进程能 retry）
+- [x] **G4 · `label_selector` Prometheus 路径翻译**
+  - cAdvisor 的 `pod` label 是 pod 名（不是 selector 驱动的），所以 Prometheus 路径需要先列一次 pod 拿名字再拼正则
+  - `^...$` 锚定避免前缀误匹配
+  - 找不到匹配 pod 时退回到 namespace-only filter + footer 提示，不抛异常
+- [x] **G5 · 测试 + 文档**
+  - `tests/test_metrics.py` 全量重写，15 测试覆盖三条路径 + label_selector 翻译 + bootstrap 一次性闸门 + bootstrap 工具本身的 5 个场景
+  - `tests/test_tool_inventory.py`：`EXPECTED_TOOL_COUNT = 73`（含 `bootstrap_metrics_server`）
+  - `docs/tools.md` 新增 `## top_pods / top_nodes 级联（metrics-server → Prometheus → bootstrap）` 段；Prometheus 段对 `top_pods` 的描述同步刷新
+  - `docs/tools-reference.md` 工具总数更新；指标 / 监控段加 `bootstrap_metrics_server` 条目
+  - `docs/env.md` 加 `K8S_MCP_METRICS_SERVER_MANIFEST_URL` 行（dev / 离线段）
+  - `docs/CHANGELOG.md` 加 `[0.5.3]` 段（详尽列出 cascade + bootstrap 设计）
+
+**威胁模型笔记**：自动 bootstrap 默认开启，**但**
+`K8S_MCP_READ_ONLY=true` 或 `kube-system` 不在 allowlist 时**拒绝**——
+运维默认不放开写权限时行为退回到"显式 `kubectl apply` 由人触发"。
+One-shot gate 防止失控循环；agent 看到的最终错误就是直白的"请手动装
+metrics-server / Prometheus"，不需要理解内部状态机。
+
+---
+
+**变更记录**
+- 2026-07-05 初稿：从 plan 转成 checkbox 列表
+- 2026-07-05 B2 完成：bulk_* → list variant，修复 2 处重复检查 bug，所有 23 个 bulk 测试通过
+- 2026-07-06 v0.4.3 完成: Phase E 4+ 个分析器/diagnose/explain 工具 + search/add_label/remove_label/exec_pod，666 tests passing
+- 2026-07-06 v0.5.0 完成: A1+A2 收尾 + B1+B2 收尾（删 9 个 deprecated）+ C2 OpenAPI cap + docs 刷新，655 tests passing
+- 2026-07-07 v0.5.2 完成: 单步删除（删 HMAC token subsystem）+ Prometheus NodePort/LoadBalancer URL 修正，630 tests passing
+- 2026-07-07 v0.5.3 完成: `top_pods` / `top_nodes` 三档级联 + `bootstrap_metrics_server` 显式工具，643 tests passing

@@ -1,6 +1,6 @@
 # k8s-mcp
 
-Kubernetes MCP server for LLM agents. Exposes **72 tools** covering CRUD on
+Kubernetes MCP server for LLM agents. Exposes **73 tools** covering CRUD on
 Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services,
 Ingresses, ConfigMaps, PVCs, RBAC, NetworkPolicies, plus logs/events, node
 ops, top, rollout, wait, bulk YAML apply, Prometheus queries, health
@@ -121,7 +121,7 @@ the pod's SA token automatically.
 }
 ```
 
-Restart the agent. You should see **72 tools** listed under "k8s".
+Restart the agent. You should see **73 tools** listed under "k8s".
 
 Full environment variable reference: [docs/env.md](./docs/env.md).
 

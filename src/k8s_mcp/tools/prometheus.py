@@ -648,6 +648,37 @@ def _prom_get(path: str, params: dict[str, str], base_url: str,
 _CADVISOR_METRIC_PREFIXES: tuple[str, ...] = ("container_", "pod_", "kube_pod_")
 
 
+def _query_instant(promql: str, base_url: str | None = None) -> list[dict]:
+    """Execute an instant PromQL query and return the raw `result` list.
+
+    Each list element is `{"metric": {...labels...}, "value": [<ts>, "<val_str>"]}`.
+    Empty list when the query matched no series. Raises:
+      - `LookupError` when Prometheus can't be resolved (no override, no env
+        var, auto-discovery failed).
+      - `ValueError` on HTTP / Prometheus error responses.
+
+    Used by sibling tools (`top_pods` / `top_nodes` in `metrics.py`,
+    `pod_metrics` here) that want structured data instead of the
+    human-readable table `prometheus_query()` returns. Re-parsing that
+    table string to get at the underlying values is fragile (the closing
+    brace of the label set can land in the value column).
+    """
+    settings = get_settings()
+    base = _resolve_base(base_url, settings)
+    payload = _prom_get(
+        "/api/v1/query",
+        {"query": promql},
+        base,
+        settings.prometheus_bearer_token,
+    )
+    if payload.get("status") != "success":
+        raise ValueError(
+            f"Prometheus query failed ({payload.get('errorType', '')}): "
+            f"{payload.get('error') or 'unknown error'}"
+        )
+    return (payload.get("data") or {}).get("result") or []
+
+
 def _extract_promql_metric_name(promql: str) -> str:
     """Return the bare metric name, anchoring on `name{` or `name[`."""
     m = re.search(r"([a-zA-Z_:][a-zA-Z0-9_:]*)(?=[\{\[])", promql)

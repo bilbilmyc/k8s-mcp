@@ -76,6 +76,19 @@ export KUBECONFIG=/path/to/kubeconfig         # 可选
 export K8S_MCP_KUBE_CONTEXT=my-cluster        # 可选，覆盖 current-context
 ```
 
+> ⚠️ **MCP 客户端 ≠ shell**：MCP server 跑在 MCP 客户端拉起的**子进程**里，
+> shell 里 `export KUBECONFIG=...` 不一定能透传（GUI 类客户端 / 容器化运行
+> 尤其明显）。**最稳的写法** 是在 `mcpServers` 的 `env` 块里直接写：
+>
+> ```json
+> "env": {
+>   "K8S_MCP_KUBECONFIG": "/absolute/path/to/config"
+> }
+> ```
+>
+> 推荐用**绝对路径**——MCP 客户端的进程工作目录跟你登录 shell 的目录
+> 不一定一致，相对路径会踩坑。
+
 ### 模式 C — in-cluster
 
 检测到 `/var/run/secrets/kubernetes.io/serviceaccount/token` 时自动启用。

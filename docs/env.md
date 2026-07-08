@@ -38,8 +38,8 @@ k8s-mcp 通过 pydantic-settings 读取环境变量，所有变量以 `K8S_MCP_`
 
 | 变量 | 说明 |
 | --- | --- |
-| `K8S_MCP_KUBECONFIG` | kubeconfig 文件绝对路径；不传则读 `KUBECONFIG` 环境变量，再读 `~/.kube/config` |
-| `K8S_MCP_KUBE_CONTEXT` | 覆盖 kubeconfig 里的 `current-context` |
+| `K8S_MCP_KUBECONFIG` | kubeconfig 文件**绝对路径**。**推荐在 MCP 客户端 `mcpServers` 的 `env` 块里显式设置**——shell 里 `export KUBECONFIG` 不一定能透传到 MCP 子进程（GUI 客户端尤其明显）。留空时按序 fallback：`$KUBECONFIG` → `~/.kube/config`。 |
+| `K8S_MCP_KUBE_CONTEXT` | 覆盖 kubeconfig 里的 `current-context`。同样建议在 MCP 客户端 env 块里显式设。 |
 
 ### 认证 — 模式 C：in-cluster
 

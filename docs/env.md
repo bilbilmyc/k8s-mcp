@@ -172,3 +172,23 @@ export K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST=monitoring,observability
   }
 }
 ```
+
+## Client compatibility — env 透传矩阵
+
+实测 stdin MCP 子进程的 env 透传程度，每个客户端差异很大。**最长
+fallback 是 `auth.py:67-87` 的 `~/.kube/config`**——至少所有 GUI 客户端
+都能靠这一档兜底。
+
+| 客户端 | `mcpServers.env` 块透传 | shell env（`KUBECONFIG` 等） | 推荐配置 |
+| --- | --- | --- | --- |
+| **Claude Code / Cursor / Cline** | ✓ | ✓ | 标准 `env` 块，最简 |
+| **Cherry Studio** | 部分（视字段） | ✓（macOS launchd 透 PATH 等） | env 块 + shell `export KUBECONFIG` 双重写 |
+| **Claude Desktop** | ✓ | 取决于 launch shell | 标准 `env` 块 |
+| **opencode 1.17.x** | ❌ **整块丢弃** | ❌（仅 `HOME` + `HOMEBREW_*`） | symlink `~/.kube/config` **或** bash wrapper；详见 [README → opencode 段](../README.md#mcp-客户端配置) |
+
+**诊断法**：opencode 的 MCP 是 lazy spawn——`opencode mcp list` 不主动
+拉起子进程，需要真触发一次 tool 调用才会 spawn。如果要快速 dump 当前
+子进程 env，最便宜的方式是临时把 `command` 换成
+`["bash","-c","env > /tmp/dump; exec k8s-mcp"]`，再 `opencode serve` 起
+后台 + `curl POST /mcp/<name>/connect` 触发 spawn，dump 完即恢复 wrapper
+或还原 `command`。

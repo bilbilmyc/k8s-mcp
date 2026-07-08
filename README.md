@@ -118,6 +118,46 @@ MCP server 作为 sidecar 跑在 pod 内时用。
 claude mcp add-json k8s '{"command": "k8s-mcp", "env": {"K8S_MCP_LOG_LEVEL": "INFO"}}'
 ```
 
+**opencode**（1.17.x 实测）有个**已知坑**：stdin MCP 场景下 `mcp.<name>.env`
+块**整个丢弃**——你写的 `K8S_MCP_KUBECONFIG` / `K8S_MCP_LOG_LEVEL`
+等 0 个到子进程。`opencode mcp list` 显示 `✓ connected` 只是 MCP 协议
+握手成功，不代表 env 透传 / 认证链路 OK（详见
+[docs/env.md → Client compatibility](./docs/env.md#client-compatibility--env-透传矩阵)）。
+
+两条 workaround，按优先级：
+
+1. **symlink 默认 kubeconfig 路径**（推荐；零配置污染）：
+
+   ```bash
+   mkdir -p ~/.kube
+   ln -sfn /path/to/your/kubeconfig ~/.kube/config
+   ```
+
+   多环境切换：`ln -sfn <新路径> ~/.kube/config` 秒切。k8s-mcp
+   的 `auth.py:67-87` fallback 第 3 档会接住。
+
+2. **bash wrapper 自带 env**（env 嵌进 `command`，不依赖 mcp.env 块）：
+
+   ```json
+   {
+     "mcp": {
+       "k8s": {
+         "type": "local",
+         "command": ["bash", "-c",
+           "export K8S_MCP_KUBECONFIG=\"$HOME/work/your/kubeconfig\" \
+                   K8S_MCP_LOG_LEVEL=INFO \
+                   K8S_MCP_READ_ONLY=false; \
+            exec k8s-mcp"],
+         "args": []
+       }
+     }
+   }
+   ```
+
+   注意 `args: []`——`bash -c` 已经吃掉整条命令。opencode 后续版本若修复
+   mcp.env 透传，这段 wrapper 要回滚成 `command: ["k8s-mcp"]` + 正常
+   env 块。直接靠 `ps eww -p <pid>` 看 opencode 真透传了什么。
+
 **想用模式 A** 就把 `K8S_MCP_API_SERVER` 和 `K8S_MCP_API_TOKEN` 加到 `env`
 块里。模式 C 不需要任何 env——它读 pod 自己的 SA token。
 

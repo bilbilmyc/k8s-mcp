@@ -4,7 +4,9 @@ All notable changes to k8s-mcp are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) — backwards-incompatible tool
 behavior changes bump the minor (we're pre-1.0).
 
-## [Unreleased] — v0.6.0 (next-iteration)
+## [Unreleased]
+
+## [0.6.0] — 2026-07-11
 
 ### Added — 9 new tools (73 → 82)
 
@@ -498,3 +500,4 @@ Net result: a safer production posture without changing any of the
 [0.5.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.0...v0.5.1
 [0.5.2]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.1...v0.5.2
 [0.5.3]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.2...v0.5.3
+[0.6.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.3...v0.6.0

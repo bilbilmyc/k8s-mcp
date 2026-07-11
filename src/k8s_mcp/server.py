@@ -314,6 +314,7 @@ def _register_tools(mcp: FastMCP) -> None:
         health,
         logs,
         metrics,
+        namespace,
         networkpolicy,
         node_ops,
         notifier,
@@ -360,6 +361,7 @@ def _register_tools(mcp: FastMCP) -> None:
     certs.register(mcp)
     health.register(mcp)
     notifier.register(mcp)
+    namespace.register(mcp)
     cluster_info.register(mcp)
 
 

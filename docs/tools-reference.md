@@ -1,4 +1,4 @@
-# 工具参考（73 个，按功能分类）
+# 工具参考（82 个，按功能分类）
 
 > 这是**完整目录**——每个工具一行签名，按"读 / 写 / 删"分组。
 > 详细使用说明（陷阱、流程、为什么这么设计）见 [tools.md](./tools.md)。
@@ -109,6 +109,8 @@
 
 - `create_service(name, namespace, ports, selector, type=None, ...)`
 - `create_ingress(name, namespace, rules, ...)`
+- `expose_workload(workload_kind, workload_name, namespace, port, ...)` — Workload → Service 暴露
+- `get_endpoints(service_name, namespace="default")` — 🔍 Service → Pod 映射诊断（EndpointSlice 优先；Endpoints 兜底）
 - `expose_prometheus_as_nodeport(namespace, service_name, name_suffix="-np")` —（见上"指标"）
 
 ### 存储
@@ -130,8 +132,17 @@
 
 ### 节点运维
 
+- `list_nodes(label_selector=None, include_unschedulable=True)` — 节点专属列视图（ROLE / STATUS / INTERNAL_IP / TAINT_SUMMARY / AGE）
+- `label_node(name, key, value=None)` / `unlabel_node(name, key)` — JSON Patch 原子标签增删（RFC 6901 转义）
+- `taint_node(name, taint)` / `untaint_node(name, taint=None)` — 单条污点增删；`untaint_node(taint=None)` 清空所有污点
 - `cordon_node(name)` / `uncordon_node(name)` — 节点调度开关
 - `drain_node(name, ignore_daemonsets=False, delete_emptydir_data=False, force=False, grace_period_seconds=-1, timeout_seconds=60)`
+
+### 命名空间 / 配置 / 密钥
+
+- `create_namespace(name, labels=None, annotations=None)` — cluster-scoped；`K8S_MCP_NAMESPACE_ALLOWLIST` 设了时拒
+- `create_configmap(name, namespace, data=None, yaml_content=None, labels=None)` — `data` 或 `yaml_content` 二选一
+- `create_secret(name, namespace, data=None, string_data=None, secret_type="Opaque", labels=None)` — `string_data` 自动 base64；空值拒绝
 
 ---
 

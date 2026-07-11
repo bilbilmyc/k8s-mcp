@@ -4,6 +4,63 @@ All notable changes to k8s-mcp are documented here. Versions follow
 [Semantic Versioning](https://semver.org/) — backwards-incompatible tool
 behavior changes bump the minor (we're pre-1.0).
 
+## [Unreleased] — v0.6.0 (next-iteration)
+
+### Added — 9 new tools (73 → 82)
+
+Closure of the ROADMAP "high-priority items missing" list:
+
+- **`list_nodes`** — node-specific columns (ROLE / STATUS / INTERNAL_IP /
+  TAINT_SUMMARY / AGE). Mirrors `kubectl get nodes` but trims to the
+  scheduling-relevant fields; pass `include_unschedulable=False` to hide
+  cordoned nodes.
+- **`get_endpoints`** — diagnose Service → Pod mapping. Auto-detects
+  EndpointSlice (K8s 1.21+) and falls back to legacy Endpoints on older
+  clusters; returns a TARGET / POD / IP / NODE / READY / PORT table with
+  actionable "no endpoints" hints.
+- **`label_node` / `unlabel_node`** — atomic single-label add / remove
+  via JSON Patch (RFC 6901 escaping for `/` and `~`). Idempotent on
+  missing label.
+- **`taint_node` / `untaint_node`** — atomic single-taint add / remove
+  (`key=value:effect` or `key:effect`); `untaint_node(taint=None)` wipes
+  every taint. Effect validation client-side (NoSchedule /
+  PreferNoSchedule / NoExecute).
+- **`create_namespace`** — cluster-scoped Namespace shortcut with
+  RFC 1123 name validation + optional labels / annotations. Refused
+  when `K8S_MCP_NAMESPACE_ALLOWLIST` is set (cluster-scoped writes are
+  not allowed under an allowlist).
+- **`create_configmap`** — ConfigMap shortcut, two input modes:
+  `data: dict[str, str]` (most common) or `yaml_content: str` (for
+  `binaryData` / complex cases).
+- **`create_secret`** — Secret shortcut, two input modes:
+  `string_data: dict[str, str]` (plaintext, auto-base64 by tool) or
+  `data: dict[str, str]` (already-base64). Empty values are refused to
+  prevent accidentally shipping a Secret with empty bytes.
+
+### Changed
+
+- **`pyproject.toml` description** — `80 tools` → `73 tools` (was wrong
+  since v0.5.0; deleted deprecated tools brought it to 72, then
+  `bootstrap_metrics_server` to 73, now 82).
+- **`pyproject.toml` Changelog URL** — `PLAN.md` → `CHANGELOG.md`
+  (PLAN.md is archived).
+- **`tests/test_tool_inventory.py`** — docstring updated from 72 to 82;
+  `EXPECTED_TOOL_COUNT` and `EXPECTED_TOOLS` set refreshed.
+
+### Tests
+
+- `tests/test_node_ops_extended.py` — 21 tests covering list_nodes /
+  label / unlabel / taint / untaint + RFC 1123 / effect / JSON Patch
+  escaping edge cases.
+- `tests/test_endpoints.py` — 6 tests covering EndpointSlice + legacy
+  Endpoints paths + `_render_endpoint_slices` / `_fmt_ports`.
+- `tests/test_namespace_configmap_secret.py` — 19 tests covering
+  create_namespace / create_configmap / create_secret + all validation
+  paths (read-only, namespace allowlist, empty values, base64
+  round-trip).
+
+Total: 689 tests passing (was 643; +46 new tests, 0 regressions).
+
 ## [0.5.3] — 2026-07-07
 
 ### Added — `top_pods` / `top_nodes` 3-tier cascade

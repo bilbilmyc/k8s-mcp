@@ -1,18 +1,19 @@
-"""Pin the tool inventory at 72 entries.
+"""Pin the tool inventory at 82 entries.
 
 This is a guard against accidental additions/removals that change the
 tool surface LLM agents see. If you intentionally add or remove a tool,
 update BOTH the expected count AND the expected set in one shot.
 
-`expected_tools` is the canonical list of tools registered on the
-FastMCP instance after v0.5.0 cleanup. Adding a new tool requires
-updating this list in the same PR.
+`EXPECTED_TOOLS` is the canonical list of tools registered on the
+FastMCP instance after v0.6.0 (next-iteration: 9 new tools — see
+`docs/CHANGELOG.md` [Unreleased] for details).
+Adding a new tool requires updating this list in the same PR.
 """
 from __future__ import annotations
 
 import pytest
 
-EXPECTED_TOOL_COUNT = 73
+EXPECTED_TOOL_COUNT = 82
 EXPECTED_TOOLS: frozenset[str] = frozenset({
     "ping",
     # autoscale
@@ -23,6 +24,7 @@ EXPECTED_TOOLS: frozenset[str] = frozenset({
     # cluster_info
     "cluster_info",
     # configmap
+    "create_configmap",
     "get_configmap",
     "update_configmap",
     # delete_tool
@@ -60,13 +62,20 @@ EXPECTED_TOOLS: frozenset[str] = frozenset({
     "bootstrap_metrics_server",
     "top_nodes",
     "top_pods",
+    # namespace (new in v0.6.0)
+    "create_namespace",
     # networkpolicy
     "analyze_networkpolicy",
     "create_networkpolicy",
-    # node_ops
+    # node_ops (extended in v0.6.0)
     "cordon_node",
     "drain_node",
+    "label_node",
+    "list_nodes",
+    "taint_node",
+    "unlabel_node",
     "uncordon_node",
+    "untaint_node",
     # notifier
     "notify",
     # pods
@@ -91,13 +100,15 @@ EXPECTED_TOOLS: frozenset[str] = frozenset({
     "rollout_history",
     "rollout_status",
     "rollout_undo",
-    # secret
+    # secret (extended in v0.6.0)
+    "create_secret",
     "get_secret_value",
     "list_secrets",
-    # service
+    # service (extended in v0.6.0)
     "create_ingress",
     "create_service",
     "expose_workload",
+    "get_endpoints",
     # serviceaccount
     "create_serviceaccount",
     # storage

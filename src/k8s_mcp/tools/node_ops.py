@@ -1,21 +1,27 @@
-"""Node operations: cordon / uncordon / drain.
+"""Node operations: list_nodes, label_node / unlabel_node, taint_node /
+untaint_node, cordon / uncordon / drain.
 
-These mirror `kubectl cordon | kubectl uncordon | kubectl drain` and share the
-underlying primitives:
+These mirror their `kubectl` counterparts and share the underlying primitives:
 
-  - `cordon` patches spec.unschedulable=true on a Node.
-  - `uncordon` patches spec.unschedulable=false.
-  - `drain` cordons the node, then evicts (or deletes) all pods that aren't
+  - `list_nodes` — node-specific columns (ROLE / STATUS / AGE / INTERNAL_IP /
+    TAINT_SUMMARY); richer than `list_resources(kind="Node")`.
+  - `cordon_node` patches spec.unschedulable=true on a Node.
+  - `uncordon_node` patches spec.unschedulable=false.
+  - `taint_node` / `untaint_node` add or remove a single taint
+    (key=value:effect or key:effect); atomic JSON Patch.
+  - `label_node` / `unlabel_node` add or remove a single label; RFC 6901
+    token escaping for keys containing `/` or `~`.
+  - `drain_node` cordons the node, then evicts (or deletes) all pods that aren't
     part of a DaemonSet and don't have emptyDir volumes — those require
     --ignore-daemonsets / --delete-emptydir-data to evict.
 
 中文说明：
-节点运维操作（重启 / 升级 / 维护）三件套：
-
-  - `cordon_node`：标记 unschedulable=true，新 Pod 不会再调度上来。
-  - `uncordon_node`：恢复调度。
+节点运维操作（重启 / 升级 / 维护 / 调度）：
+  - `list_nodes`：节点专属列视图（ROLE / STATUS / TAINT 等）。
+  - `cordon_node` / `uncordon_node`：调度开关。
+  - `taint_node` / `untaint_node`：单条污点增删（专用节点池 / GPU 隔离）。
+  - `label_node` / `unlabel_node`：单条 label 增删（helm / operator 前置条件）。
   - `drain_node`：先 cordon，再用 Eviction API 驱逐 Pod（尊重 PDB）。
-    DaemonSet / emptyDir Pod 默认跳过；`force=True` 绕过 PDB 用 raw delete。
 
 执行排障 reboot / 内核升级 / kubelet 重启等场景的标准动作：
 cordon → drain → 维护 → uncordon。
@@ -28,6 +34,7 @@ disruptive but unblocks stuck drains).
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from kubernetes import client
@@ -35,6 +42,7 @@ from kubernetes.client.rest import ApiException
 
 from ..client import get_api_client
 from ..config import get_settings
+from ..formatters import format_age, short_table
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +225,365 @@ def _has_emptydir(pod) -> bool:
     return False
 
 
+# ---------- listing & label/taint ops -----------------------------------------
+
+
+_NODE_NAME_RE = re.compile(
+    r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$"
+)
+
+# RFC 1123 label value — empty OK, alphanumeric + dash/underscore/dot.
+_LABEL_KEY_RE = re.compile(
+    r"^([a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?/?)*$"
+)
+_LABEL_VAL_RE = re.compile(r"^([a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?)?$")
+
+# Taint effects as defined by K8s. Unknown effects are refused so the
+# apiserver's own validator isn't relied on for client-side gating.
+_VALID_TAINT_EFFECTS = ("NoSchedule", "PreferNoSchedule", "NoExecute")
+
+
+def _validate_node_name(name: str) -> None:
+    if not name or not _NODE_NAME_RE.match(name):
+        raise ValueError(f"invalid node name: {name!r} (RFC 1123)")
+
+
+def _validate_label_key(key: str) -> None:
+    if not key or not _LABEL_KEY_RE.match(key):
+        raise ValueError(f"invalid label key: {key!r}")
+
+
+def _validate_label_value(value: str) -> None:
+    if value is None:
+        return
+    if not _LABEL_VAL_RE.match(value):
+        raise ValueError(f"invalid label value: {value!r}")
+
+
+def _parse_taint_spec(spec: str) -> tuple[str, str, str]:
+    """Parse a taint spec of the form `key=value:effect` or `key:effect`.
+
+    Returns (key, value, effect). `value` defaults to '' when omitted.
+    Raises ValueError on malformed input or unknown effect.
+    """
+    if not spec or ":" not in spec:
+        raise ValueError(
+            f"invalid taint spec: {spec!r}; expected 'key=value:effect' "
+            f"or 'key:effect'"
+        )
+    key_part, _, effect = spec.rpartition(":")
+    effect = effect.strip()
+    if effect not in _VALID_TAINT_EFFECTS:
+        raise ValueError(
+            f"invalid taint effect: {effect!r}; must be one of {_VALID_TAINT_EFFECTS}"
+        )
+    if "=" in key_part:
+        key, _, value = key_part.partition("=")
+        key, value = key.strip(), value.strip()
+    else:
+        key, value = key_part.strip(), ""
+    if not key or not _NODE_NAME_RE.match(key):
+        raise ValueError(f"invalid taint key: {key!r}")
+    return key, value, effect
+
+
+def _jsonpatch_escape(token: str) -> str:
+    """RFC 6901 §4 token escaping for JSON Patch paths."""
+    return token.replace("~", "~0").replace("/", "~1")
+
+
+def _node_status_summary(node) -> tuple[str, str]:
+    """Return (status, roles) for a Node — concise columns for `list_nodes`."""
+    conditions = node.status.conditions or []
+    ready = next((c for c in conditions if c.type == "Ready"), None)
+    if ready is None:
+        status = "Unknown"
+    elif str(ready.status) == "True":
+        status = "Ready"
+    else:
+        status = "NotReady"
+
+    labels = node.metadata.labels or {}
+    roles = ",".join(
+        label.split("/")[-1]
+        for label in labels
+        if label.startswith("node-role.kubernetes.io/") and not label.endswith("/")
+    )
+    # `node-role.kubernetes.io/master` (legacy) and `node-role.kubernetes.io/control-plane`
+    # both surface as role; the split handles them the same way.
+    if not roles:
+        roles = "<none>"
+    return status, roles
+
+
+def _node_internal_ip(node) -> str:
+    """First InternalIP from a Node's status.addresses, or ''."""
+    for addr in (node.status.addresses or []):
+        if addr.type == "InternalIP" and addr.address:
+            return addr.address
+    return ""
+
+
+def _node_taint_summary(node) -> str:
+    """Comma-separated `key=value:effect` for every non-duplicate taint."""
+    taints = node.spec.taints or []
+    if not taints:
+        return ""
+    parts: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for t in taints:
+        key = getattr(t, "key", "") or ""
+        value = getattr(t, "value", "") or ""
+        effect = getattr(t, "effect", "") or ""
+        triple = (key, value, effect)
+        if triple in seen:
+            continue
+        seen.add(triple)
+        parts.append(f"{key}={value}:{effect}" if value else f"{key}:{effect}")
+    return ",".join(parts)
+
+
+def list_nodes(
+    label_selector: str | None = None,
+    include_unschedulable: bool = True,
+) -> str:
+    """ℹ️ READ — list cluster Nodes with node-specific columns.
+
+    Pick THIS when you want to see scheduling-relevant fields at a glance:
+    ROLE / STATUS / INTERNAL_IP / TAINT_SUMMARY / AGE. For the raw object use
+    `list_resources(kind="Node", wide=True)` instead — that one returns
+    NAME / STATUS / ROLES / AGE / VERSION / INTERNAL_IP / EXTERNAL_IP /
+    OS-IMAGE / KERNEL-VERSION / CONTAINER-RUNTIME and is best for capacity
+    audits.
+
+    Args:
+        label_selector: server-side label filter, e.g. "node-role.kubernetes.io/worker=".
+            Applied client-side to keep the apiserver query simple; cheap.
+        include_unschedulable: when False, drops `spec.unschedulable=true`
+            Nodes (i.e. cordoned). Default True so cordon/drain status is
+            visible in the same view.
+
+    Returns a NAME / STATUS / ROLES / INTERNAL_IP / TAINT_SUMMARY / AGE table.
+    Empty result returns a helpful notice ("no Nodes matched selector").
+    """
+    api = _core_v1()
+    items = api.list_node(label_selector=label_selector).items
+
+    if not include_unschedulable:
+        items = [n for n in items if not (n.spec and n.spec.unschedulable)]
+
+    if not items:
+        return (
+            "(no Nodes matched the selector)" if label_selector else "(no Nodes found)"
+        )
+
+    rows: list[dict[str, str]] = []
+    for n in items:
+        status, roles = _node_status_summary(n)
+        rows.append({
+            "NAME": n.metadata.name,
+            "STATUS": status,
+            "ROLES": roles,
+            "INTERNAL_IP": _node_internal_ip(n),
+            "TAINT_SUMMARY": _node_taint_summary(n),
+            "AGE": format_age(n.metadata.creation_timestamp),
+        })
+    return short_table(rows, ["NAME", "STATUS", "ROLES", "INTERNAL_IP",
+                              "TAINT_SUMMARY", "AGE"])
+
+
+def label_node(name: str, key: str, value: str | None = None) -> str:
+    """⚠️ WRITE — atomic single-label add / update on a Node.
+
+    Equivalent to `kubectl label node <name> <key>=<value>` but touches
+    ONLY the targeted label — every other field (status, other labels,
+    annotations, taints) is preserved. Mirrors `add_label(kind="Node", ...)`
+    for non-Node kinds; this is a Node-specific shortcut so the agent
+    doesn't need to remember `api_version="v1"`.
+
+    Args:
+        name: node name.
+        key: label key (e.g. "workload", "gpu.present"). Keys containing
+            `/` or `~` are escaped per RFC 6901 (so
+            `node-role.kubernetes.io/worker=` works).
+        value: label value. Empty string `""` removes the value but keeps
+            the key (rarely useful; prefer `unlabel_node` for removal).
+            Omit only when you genuinely want to set a key with no value.
+
+    Raises:
+        PermissionError: read-only mode or namespace allowlist doesn't
+            include cluster-scoped writes (Node is cluster-scoped; set
+            `K8S_MCP_NAMESPACE_ALLOWLIST` to enable cluster-scoped writes
+            alongside namespaced ones, otherwise this fails).
+    """
+    _read_only_guard("label_node")
+    settings = get_settings()
+    if settings.namespace_allowlist is not None:
+        raise PermissionError(
+            "Node writes are cluster-scoped and are refused when "
+            "K8S_MCP_NAMESPACE_ALLOWLIST is set (use K8S_MCP_READ_ONLY=false "
+            "with an unset allowlist for cluster-scoped writes)."
+        )
+    _validate_node_name(name)
+    _validate_label_key(key)
+    _validate_label_value(value)
+    path = f"/metadata/labels/{_jsonpatch_escape(key)}"
+    body = [{"op": "add", "path": path, "value": value if value is not None else ""}]
+    try:
+        _core_v1().patch_node(name, body, content_type="application/json-patch+json")
+    except ApiException as e:
+        if e.status == 404:
+            raise LookupError(f"Node '{name}' not found") from e
+        raise
+    rendered = f"{key}={value}" if value is not None else f"{key}="
+    return f"Node/{name} label '{rendered}' applied"
+
+
+def unlabel_node(name: str, key: str) -> str:
+    """⚠️ WRITE — atomic single-label remove on a Node.
+
+    Equivalent to `kubectl label node <name> <key>-`. Idempotent: missing
+    label = no-op (matches `kubectl label ... <key>-` behavior).
+
+    Args:
+        name: node name.
+        key: label key to remove. RFC 6901 escaping for `/` and `~`.
+    """
+    _read_only_guard("unlabel_node")
+    settings = get_settings()
+    if settings.namespace_allowlist is not None:
+        raise PermissionError(
+            "Node writes are cluster-scoped and are refused when "
+            "K8S_MCP_NAMESPACE_ALLOWLIST is set."
+        )
+    _validate_node_name(name)
+    _validate_label_key(key)
+    path = f"/metadata/labels/{_jsonpatch_escape(key)}"
+    body = [{"op": "remove", "path": path}]
+    try:
+        _core_v1().patch_node(name, body, content_type="application/json-patch+json")
+    except ApiException as e:
+        if e.status == 404:
+            raise LookupError(f"Node '{name}' not found") from e
+        # JSON Patch `remove` on a missing path returns 422 in some
+        # apiserver versions. Treat as idempotent no-op.
+        if e.status in (404, 422):
+            return f"Node/{name} label '{key}' was not present; no-op"
+        raise
+    return f"Node/{name} label '{key}' removed"
+
+
+def taint_node(name: str, taint: str) -> str:
+    """⚠️ WRITE — atomic single-taint add on a Node.
+
+    Equivalent to `kubectl taint node <name> <taint-spec>` for a single
+    taint. `taint` format: `key=value:effect` (or `key:effect` to set
+    an empty value).
+
+    Effects: NoSchedule / PreferNoSchedule / NoExecute. Unknown effects
+    are refused client-side before the apiserver round-trip.
+
+    Args:
+        name: node name.
+        taint: the taint spec, e.g. "dedicated=ml:NoSchedule" or
+            "node.kubernetes.io/unreachable:NoExecute".
+    """
+    _read_only_guard("taint_node")
+    settings = get_settings()
+    if settings.namespace_allowlist is not None:
+        raise PermissionError(
+            "Node writes are cluster-scoped and are refused when "
+            "K8S_MCP_NAMESPACE_ALLOWLIST is set."
+        )
+    _validate_node_name(name)
+    key, value, effect = _parse_taint_spec(taint)
+    body = [
+        {
+            "op": "add",
+            "path": "/spec/taints/-",
+            "value": {"key": key, "value": value, "effect": effect},
+        }
+    ]
+    try:
+        _core_v1().patch_node(name, body, content_type="application/json-patch+json")
+    except ApiException as e:
+        if e.status == 404:
+            raise LookupError(f"Node '{name}' not found") from e
+        raise
+    rendered = f"{key}={value}:{effect}" if value else f"{key}:{effect}"
+    return f"Node/{name} taint '{rendered}' added"
+
+
+def untaint_node(name: str, taint: str | None = None) -> str:
+    """⚠️ WRITE — remove a single taint (or all taints) from a Node.
+
+    Equivalent to `kubectl taint node <name> <taint-spec>-` for the
+    specific-spec path; pass `taint=None` to wipe every taint on the
+    node (destructive — use with care).
+
+    Args:
+        name: node name.
+        taint: the taint spec to remove (same format as `taint_node`). If
+            omitted, every taint is removed.
+    """
+    _read_only_guard("untaint_node")
+    settings = get_settings()
+    if settings.namespace_allowlist is not None:
+        raise PermissionError(
+            "Node writes are cluster-scoped and are refused when "
+            "K8S_MCP_NAMESPACE_ALLOWLIST is set."
+        )
+    _validate_node_name(name)
+
+    if taint is None:
+        # Wipe every taint — atomic replace with []. The k8s Python
+        # client has no `delete_collection` for taints; using JSON Merge
+        # Patch with `spec.taints: []` keeps the other spec fields intact.
+        try:
+            _core_v1().patch_node(name, {"spec": {"taints": []}},
+                                  content_type="application/merge-patch+json")
+        except ApiException as e:
+            if e.status == 404:
+                raise LookupError(f"Node '{name}' not found") from e
+            raise
+        return f"Node/{name} all taints removed"
+
+    key, value, effect = _parse_taint_spec(taint)
+
+    # Read current taints; locate the matching index. JSON Patch `remove`
+    # is index-based, so we need the position, not the spec text.
+    try:
+        node = _core_v1().read_node(name)
+    except ApiException as e:
+        if e.status == 404:
+            raise LookupError(f"Node '{name}' not found") from e
+        raise
+
+    current = node.spec.taints or []
+    target_idx: int | None = None
+    for idx, t in enumerate(current):
+        if (t.key == key
+                and (t.value or "") == value
+                and t.effect == effect):
+            target_idx = idx
+            break
+    if target_idx is None:
+        return (
+            f"Node/{name} taint '{key}={value}:{effect}' was not present; no-op"
+        )
+
+    body = [{"op": "remove", "path": f"/spec/taints/{target_idx}"}]
+    _core_v1().patch_node(name, body, content_type="application/json-patch+json")
+    rendered = f"{key}={value}:{effect}" if value else f"{key}:{effect}"
+    return f"Node/{name} taint '{rendered}' removed"
+
+
 def register(mcp) -> None:
+    mcp.tool()(list_nodes)
+    mcp.tool()(label_node)
+    mcp.tool()(unlabel_node)
+    mcp.tool()(taint_node)
+    mcp.tool()(untaint_node)
     mcp.tool()(cordon_node)
     mcp.tool()(uncordon_node)
     mcp.tool()(drain_node)

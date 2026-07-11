@@ -1,26 +1,31 @@
-"""Service and Ingress creation, plus expose_workload.
+"""Service and Ingress creation, plus expose_workload, plus get_endpoints.
 
 中文说明：
-提供三个常用入口：
-
+提供四个常用入口：
   - `create_service`：手动指定 selector / ports / type
   - `create_ingress`：基于已有的 Service 建 Ingress，支持 hosts / tls
   - `expose_workload`：给定 Deployment / StatefulSet，自动生成 ClusterIP
     Service（kubectl expose 的等价物）
+  - `get_endpoints`：诊断 Service → Pod 映射（双路：Endpoints + EndpointSlice）
 
 所有创建类工具都委托给 generic.apply_yaml，自动套上 read-only 和
 namespace allowlist 检查。
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import yaml
-from kubernetes import client
+from kubernetes import client, dynamic
+from kubernetes.client.rest import ApiException
 
 from ..client import get_api_client
 from ..config import get_settings
+from ..formatters import short_table
 from . import generic
+
+logger = logging.getLogger(__name__)
 
 
 def _read_only_guard(action: str) -> None:
@@ -224,7 +229,152 @@ def _networking_v1():
     return client.NetworkingV1Api(get_api_client())
 
 
+# ---------- get_endpoints ------------------------------------------------------
+
+
+def get_endpoints(service_name: str, namespace: str = "default") -> str:
+    """🔍 ENDPOINTS — show which Pods back a Service — pick THIS when traffic
+    isn't reaching your Service ("connection refused" / "no endpoints
+    available") and you want to know whether kube-proxy / EndpointSlice
+    controller has caught up with your Pods.
+
+    Auto-detects EndpointSlice (K8s 1.21+) and falls back to the legacy
+    Endpoints object on older clusters. When EndpointSlice is present, it
+    is preferred because that's what kube-proxy / modern ingress controllers
+    actually consume.
+
+    Args:
+        service_name: the Service name.
+        namespace: the Service namespace. Default "default".
+
+    Returns a TARGET / POD / IP / NODE / READY / PORT table. Empty result
+    returns "(no endpoints)" with a footer hint suggesting next steps
+    (check selector / check Pod readiness / check Pod labels).
+    """
+    core = _core_v1()
+
+    # EndpointSlice path (preferred when available). EndpointSlice is
+    # GA since 1.21 and is the data source kube-proxy consumes on every
+    # modern cluster.
+    slices: list = []
+    try:
+        dc = dynamic.DynamicClient(get_api_client())
+        slice_res = dc.resources.get(
+            api_version="discovery.k8s.io/v1", kind="EndpointSlice",
+        )
+        label_selector = f"kubernetes.io/service-name={service_name}"
+        slices = list(slice_res.get(namespace=namespace,
+                                    label_selector=label_selector).items)
+    except Exception as e:  # noqa: BLE001 — discovery may fail
+        logger.debug("get_endpoints: EndpointSlice discovery failed: %s", e)
+    if slices:
+        return _render_endpoint_slices(slices)
+
+    # Legacy Endpoints fallback — works on every K8s version.
+    try:
+        ep = core.read_namespaced_endpoints(name=service_name, namespace=namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return (
+                f"(no endpoints for Service {namespace}/{service_name}; "
+                "the Service may not exist or has no Endpoints object — "
+                "check `get_resource(Service, ...)` for the selector and "
+                "`list_pods(label_selector=...)` for matching Pods)"
+            )
+        raise
+
+    subsets = ep.subsets or []
+    rows: list[dict[str, str]] = []
+    for subset in subsets:
+        not_ready_addrs = list(subset.not_ready_addresses or [])
+        ready_addrs = list(subset.addresses or [])
+        ports = list(subset.ports or [])
+        for a in ready_addrs:
+            rows.append({
+                "TARGET": a.target_ref.name if a.target_ref else "<unattached>",
+                "POD": (a.target_ref.name if a.target_ref else ""),
+                "IP": a.ip or "",
+                "NODE": a.node_name or "",
+                "READY": "yes",
+                "PORT": _fmt_ports(ports),
+            })
+        for a in not_ready_addrs:
+            rows.append({
+                "TARGET": a.target_ref.name if a.target_ref else "<unattached>",
+                "POD": (a.target_ref.name if a.target_ref else ""),
+                "IP": a.ip or "",
+                "NODE": a.node_name or "",
+                "READY": "no",
+                "PORT": _fmt_ports(ports),
+            })
+
+    if not rows:
+        return (
+            f"(no endpoints for Service {namespace}/{service_name}; "
+            "the Endpoints object exists but every address is empty — "
+            "check the Service selector and confirm matching Pods are Ready)"
+        )
+
+    return short_table(rows, ["TARGET", "POD", "IP", "NODE", "READY", "PORT"])
+
+
+def _render_endpoint_slices(slices: list[Any]) -> str:
+    """Render EndpointSlice objects into the same TARGET/POD/IP/NODE/READY/PORT
+    table as the legacy Endpoints path."""
+    rows: list[dict[str, str]] = []
+    for slice_obj in slices:
+        ports = list(slice_obj.ports or [])
+        for ep in list(slice_obj.endpoints or []):
+            ready = "yes" if (ep.conditions and ep.conditions.ready) else "no"
+            target_ref = getattr(ep, "target_ref", None)
+            target_name = target_ref.name if target_ref else "<unattached>"
+            rows.append({
+                "TARGET": target_name,
+                "POD": target_name,
+                "IP": ",".join(ep.addresses or []),
+                "NODE": ep.node_name or "",
+                "READY": ready,
+                "PORT": _fmt_slice_ports(ports),
+            })
+
+    if not rows:
+        return (
+            "(no endpoints) — EndpointSlice objects exist but carry zero "
+            "addresses. Check the Service selector and confirm matching "
+            "Pods are Ready."
+        )
+
+    return short_table(rows, ["TARGET", "POD", "IP", "NODE", "READY", "PORT"])
+
+
+def _fmt_ports(ports: list[Any]) -> str:
+    parts: list[str] = []
+    for p in ports:
+        name = getattr(p, "name", None) or ""
+        port = getattr(p, "port", None)
+        proto = getattr(p, "protocol", None) or "TCP"
+        if port is None:
+            continue
+        parts.append(f"{name}/{port}/{proto}" if name else f"{port}/{proto}")
+    return ",".join(parts)
+
+
+def _fmt_slice_ports(ports: list[Any]) -> str:
+    # EndpointSlice port shape differs from Endpoints: has `port` (int) +
+    # optional `name` + `protocol` + optional `appProtocol`.
+    parts: list[str] = []
+    for p in ports:
+        name = getattr(p, "name", None) or ""
+        port = getattr(p, "port", None)
+        proto = getattr(p, "protocol", None) or "TCP"
+        if port is None:
+            continue
+        parts.append(f"{name}/{port}/{proto}" if name else f"{port}/{proto}")
+    return ",".join(parts)
+
+
 def register(mcp) -> None:
     mcp.tool()(create_service)
     mcp.tool()(create_ingress)
     mcp.tool()(expose_workload)
+    mcp.tool()(get_endpoints)

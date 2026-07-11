@@ -1,4 +1,4 @@
-"""Secret tools: list secrets, decode a single value.
+"""Secret tools: list secrets, decode a single value, create from data.
 
 Why a narrow single-key tool instead of reusing get_resource_yaml with
 reveal_secrets=True? Two reasons:
@@ -9,30 +9,33 @@ reveal_secrets=True? Two reasons:
      see actual bytes.
 
 Reads are always allowed (no read-only / allowlist gate). Writes use
-`update_secret` or `apply_yaml` for full replacement.
+`create_secret` (auto-base64) or `apply_yaml` (full replacement).
 
 中文说明：
 Secret 是 k8s-mcp 中最敏感的资源，专门做了三道防线：
-
   - `list_secrets`：只返回 metadata + data 的 key 个数，**绝不返回 value**。
   - `get_secret_value(reveal=False)`：返回 `*** MASKED (N bytes)`，
     Agent 看不到原文。
   - `get_secret_value(reveal=True)`：必须显式传 True 才会解码 value；
     非 UTF-8（二进制证书/密钥）会用 `<binary, N bytes, base64=...>`
     表示，便于重建。
-
-改 Secret 仍然走通用 `apply_yaml`，read_only 检查会自动套上。
+  - `create_secret`：⚠️ 写入；自动 base64 编码，普通 dict 即可，
+    避免手算 base64 的痛点。Secret 一经 apply 即对所有 mount 该
+    Secret 的 Pod 立即生效——小心使用。
 """
 from __future__ import annotations
 
 import base64
 import logging
 
+import yaml
 from kubernetes import dynamic
 from kubernetes.client.rest import ApiException
 
 from ..client import get_api_client
+from ..config import get_settings
 from ..formatters import format_age, short_table
+from . import generic
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,22 @@ SECRET_API_VERSION = "v1"
 
 def _dyn():
     return dynamic.DynamicClient(get_api_client())
+
+
+def _read_only_guard(action: str) -> None:
+    if get_settings().read_only:
+        raise PermissionError(
+            f"Server is in read-only mode (K8S_MCP_READ_ONLY=true). "
+            f"{action} is disabled."
+        )
+
+
+def _ensure_ns(namespace: str) -> None:
+    if not get_settings().ns_allowed(namespace):
+        raise PermissionError(
+            f"Write to namespace '{namespace}' is not allowed by "
+            "K8S_MCP_NAMESPACE_ALLOWLIST"
+        )
 
 
 def list_secrets(
@@ -215,6 +234,93 @@ def _format_decoded(key: str, raw: bytes) -> str:
     return f"<binary, {len(raw)} bytes, base64={base64.b64encode(raw).decode('ascii')}>"
 
 
+def create_secret(
+    name: str,
+    namespace: str,
+    data: dict[str, str] | None = None,
+    string_data: dict[str, str] | None = None,
+    secret_type: str = "Opaque",
+    labels: dict[str, str] | None = None,
+) -> str:
+    """⚠️ WRITE / ⚠️ EXPOSES SECRETS — create a Secret — pick THIS when you
+    need a fresh Secret and want the tool to handle base64 encoding for
+    you. Avoids the `kubectl create secret --from-literal=...` shell-escape
+    dance or the manual base64 step on `apply_yaml`.
+
+    Two input modes:
+
+      - **`string_data=`** — plaintext values the apiserver will encode
+        itself (recommended; clearer in audit logs, doesn't leak the base64
+        representation in the manifest). Use for UTF-8 strings.
+      - **`data=`** — already-base64 values; you must base64-encode before
+        passing (or use `string_data`). Use when ingesting values from
+        another base64 source or when the value isn't valid UTF-8.
+
+    Pick exactly one of `data` / `string_data`. Empty values are rejected
+    so a typo (e.g. `password="")` doesn't ship a Secret with empty bytes.
+
+    Args:
+        name: Secret name.
+        namespace: target namespace.
+        data: optional `{key: base64_value}` mapping.
+        string_data: optional `{key: plaintext_value}` mapping.
+        secret_type: defaults to "Opaque". Use `kubernetes.io/tls`,
+            `kubernetes.io/dockerconfigjson`, `kubernetes.io/basic-auth`,
+            etc. as needed.
+        labels: optional labels applied to the Secret.
+
+    Returns the apply result (kind/name: action).
+
+    Raises:
+        ValueError: neither / both of data / string_data set, or a value
+            is empty.
+        PermissionError: read-only mode or namespace allowlist denies write.
+    """
+    _read_only_guard("create_secret")
+    _ensure_ns(namespace)
+
+    if (data is None) == (string_data is None):
+        raise ValueError(
+            "Provide exactly one of `data` (base64 dict) or "
+            "`string_data` (plaintext dict)"
+        )
+
+    if data is not None:
+        if not data:
+            raise ValueError("`data` must be a non-empty dict")
+        encoded: dict[str, str] = {}
+        for k, v in data.items():
+            if v is None or v == "":
+                raise ValueError(
+                    f"empty value for key '{k}' — pass non-empty base64"
+                )
+            encoded[k] = v
+    else:
+        if not string_data:
+            raise ValueError("`string_data` must be a non-empty dict")
+        encoded = {}
+        for k, v in string_data.items():
+            if v is None or v == "":
+                raise ValueError(
+                    f"empty value for key '{k}' — refuse empty secrets"
+                )
+            encoded[k] = base64.b64encode(v.encode("utf-8")).decode("ascii")
+
+    md: dict = {"name": name, "namespace": namespace}
+    if labels:
+        md["labels"] = labels
+
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": md,
+        "type": secret_type,
+        "data": encoded,
+    }
+    return generic.apply_yaml(yaml.safe_dump(manifest))
+
+
 def register(mcp) -> None:
     mcp.tool()(list_secrets)
     mcp.tool()(get_secret_value)
+    mcp.tool()(create_secret)

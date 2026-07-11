@@ -1,0 +1,53 @@
+# Normalize line endings for cross-platform development.
+#
+# Background: this repo is developed and tested on both Linux (CI on
+# `ubuntu-latest`) and Windows (developer workstations + occasional local
+# builds). With `core.autocrlf=true` and no `.gitattributes`, every
+# checkout on Windows rewrites LF → CRLF on disk, which then trips
+# `git diff --quiet HEAD` in scripts like `scripts/bump_and_release.sh`
+# ("Working tree has unstaged changes") even when nothing actually
+# changed. Pinning `eol=lf` here stops that rewrite for source files
+# while still letting git attribute-match other file types correctly.
+#
+# Shell scripts in particular MUST be LF-only — bash on Linux refuses to
+# run a CRLF script (`$'\r': command not found`, `set: pipefail :
+# invalid option name`). The release.yml on ubuntu-latest is what
+# publishes to PyPI, so a CRLF `bump_and_release.sh` would break
+# releases for any contributor running it locally too.
+#
+# After this file is committed, anyone with `core.autocrlf=true` should
+# run once:
+#   git add --renormalize .
+# to rewrite the on-disk CRLF copies back to LF without changing the
+# committed content.
+
+# Default: let git decide, but force LF on the source-tree files we know
+# about. The explicit `eol=lf` overrides `core.autocrlf` for these paths.
+*               text=auto
+
+# Source code (always LF)
+*.py            text eol=lf
+*.sh            text eol=lf
+*.toml          text eol=lf
+*.cfg           text eol=lf
+*.ini           text eol=lf
+
+# Docs
+*.md            text eol=lf
+*.rst           text eol=lf
+*.txt           text eol=lf
+
+# CI / workflows / config
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.json          text eol=lf
+
+# Project root files (no glob — explicit)
+LICENSE         text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
+# Binary artifacts — dist/ is committed (see comment in .gitignore) so
+# tag this as binary so future re-checkouts don't mangle them.
+dist/*.whl      binary
+dist/*.tar.gz   binary

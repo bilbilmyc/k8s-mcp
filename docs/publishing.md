@@ -48,6 +48,30 @@ PyPI 会发一封确认邮件到 PyPI 账号绑定的邮箱。**点邮件里的 
 3. 可选：加一个 "Required reviewers" 的 approval gate——只有指定
    reviewer approve 后 workflow 才能跑。生产建议加。
 
+### 1.3 Windows 协作者：行尾归一化（clone 后跑一次）
+
+仓库自带 `.gitattributes`（所有源文件强制 `eol=lf`）。但**已经存在的 Windows clone** 在装这个文件之前，磁盘上的工作区文件全是 CRLF（因为 `core.autocrlf=true`）。这种情况下：
+
+- bash 子进程里的 `git diff --quiet HEAD` 会把整个工作区都判为"已修改"；
+- `scripts/bump_and_release.sh` 用 CRLF 直接运行也会报
+  `$'\r': command not found`。
+
+一次性的 fix：
+
+```bash
+git rm --cached -r .                # unstage everything (keep worktree)
+git reset --hard                    # re-checkout from index, now .gitattributes kicks in
+```
+
+或者更保守的做法（**只**改行尾，不动 index 内容）：
+
+```bash
+git add --renormalize .
+git commit -m "chore: renormalize line endings after .gitattributes"
+```
+
+之后 `bash scripts/bump_and_release.sh X.Y.Z --dry-run` 就能正常 dry-run 了。
+
 ---
 
 ## 2. 正常发版流程

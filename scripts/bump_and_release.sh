@@ -43,7 +43,21 @@ if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 # Working tree must be clean so the version bump commit is atomic.
-if ! git diff --quiet HEAD 2>/dev/null; then
+#
+# We use `git status --porcelain` instead of `git diff --quiet HEAD`
+# because the latter compares worktree bytes against the index bytes —
+# on Windows with `core.autocrlf=true` and no `.gitattributes`, every
+# checkout rewrites LF → CRLF on disk, so `git diff --quiet HEAD`
+# always reports "dirty" even when the operator hasn't changed a
+# thing. `--porcelain` walks the index entries (no byte diff), so
+# untracked / staged / modified-tracked all show up but CRLF drift
+# does not. See `.gitattributes` for the line-ending normalization
+# that closes the gap for *future* checkouts too.
+#
+# We do not redirect stderr here — a genuine git error (e.g. not in
+# a repo, missing .git) should surface to the operator instead of
+# being silently swallowed.
+if [ -n "$(git status --porcelain)" ]; then
     die "Working tree has unstaged changes. Commit or stash them first."
 fi
 

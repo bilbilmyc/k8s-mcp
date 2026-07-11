@@ -8,12 +8,18 @@ key，未提及的 key 保持原值。Secret 没有类似工具——改 Secret 
 """
 from __future__ import annotations
 
+import logging
+
+import yaml
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
 from ..client import get_api_client
 from ..config import get_settings
 from ..formatters import to_yaml
+from . import generic
+
+logger = logging.getLogger(__name__)
 
 
 def _core_v1():
@@ -97,6 +103,71 @@ def update_configmap(
     return f"ConfigMap/{namespace}/{name} updated ({len(final_data)} keys)"
 
 
+def create_configmap(
+    name: str,
+    namespace: str,
+    data: dict[str, str] | None = None,
+    yaml_content: str | None = None,
+    labels: dict[str, str] | None = None,
+) -> str:
+    """⚠️ WRITE — create a ConfigMap — pick THIS for the common case
+    "give me a ConfigMap with these key/value pairs" without having to
+    hand-write the YAML manifest.
+
+    Two input modes:
+
+      1. **`data=`** — flat dict of string key/value pairs (most common).
+         Stored as `ConfigMap.data` (UTF-8 strings only). For binary content
+         (cert / key files), use the raw YAML mode below and put the bytes
+         under `binaryData`.
+      2. **`yaml_content=`** — a complete multi-document YAML manifest.
+         Useful when the source already lives in a `*.yaml` file the agent
+         read, or when `binaryData` / `immutable` / complex annotations are
+         needed. Forwarded to `apply_yaml` so existing safety nets apply.
+
+    Args:
+        name: ConfigMap name.
+        namespace: target namespace.
+        data: optional `data: dict[str, str]` of string key/value pairs.
+        yaml_content: optional raw YAML (single or multi-doc); if set,
+            `data` / `labels` are ignored.
+        labels: optional labels applied to the ConfigMap.
+
+    Returns the apply result (kind/name: action).
+
+    Raises:
+        ValueError: neither data nor yaml_content is set, both are set, or
+            `name` / `labels` are invalid.
+        PermissionError: read-only mode or namespace allowlist denies write.
+    """
+    _read_only_guard("create_configmap")
+    _ensure_ns(namespace)
+
+    if (data is None) == (yaml_content is None):
+        raise ValueError(
+            "Provide exactly one of `data` (dict) or `yaml_content` (raw YAML)"
+        )
+
+    if yaml_content is not None:
+        return generic.apply_yaml(yaml_content)
+
+    if not isinstance(data, dict) or not data:
+        raise ValueError("`data` must be a non-empty dict[str, str]")
+
+    md: dict = {"name": name, "namespace": namespace}
+    if labels:
+        md["labels"] = labels
+
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": md,
+        "data": {k: str(v) for k, v in data.items()},
+    }
+    return generic.apply_yaml(yaml.safe_dump(manifest))
+
+
 def register(mcp) -> None:
     mcp.tool()(get_configmap)
     mcp.tool()(update_configmap)
+    mcp.tool()(create_configmap)

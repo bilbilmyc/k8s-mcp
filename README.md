@@ -2,11 +2,11 @@
 
 [English version](./README.en.md)
 
-面向 LLM Agent 的 Kubernetes MCP server。提供 **73 个**工具，覆盖 Pod /
+面向 LLM Agent 的 Kubernetes MCP server。提供 **82 个**工具，覆盖 Pod /
 Deployment / StatefulSet / DaemonSet / Job / CronJob / Service / Ingress
-/ ConfigMap / PVC / RBAC / NetworkPolicy 等资源的增删改查，加上日志 /
-事件 / 节点运维 / top / rollout / wait / 批量 YAML apply / Prometheus
-查询 / 健康巡检 / 主动推送。
+/ ConfigMap / PVC / RBAC / NetworkPolicy / Namespace 等资源的增删改查，
+加上日志 / 事件 / 节点运维（list/label/taint/cordon/drain）/ top /
+rollout / wait / 批量 YAML apply / Prometheus 查询 / 健康巡检 / 主动推送。
 
 设计目标：让日常 K8s 运维通过自然语言驱动（Claude Desktop、Cursor、
 Cline、Cherry Studio…），用结构化 tool 调用替代 `kubectl` 文本解析。
@@ -175,7 +175,7 @@ claude mcp add-json k8s '{"command": "k8s-mcp", "env": {"K8S_MCP_LOG_LEVEL": "IN
 }
 ```
 
-重启 Agent，应该看到 "k8s" 下挂着 **73 个**工具。
+重启 Agent，应该看到 "k8s" 下挂着 **82 个**工具。
 
 完整环境变量清单见 [docs/env.md](./docs/env.md)。
 
@@ -310,7 +310,7 @@ export K8S_MCP_NOTIFIERS='[
 
 ```bash
 uv sync
-uv run pytest              # 655 个测试
+uv run pytest              # 689 个测试
 uv run ruff check .        # lint
 uv run k8s-mcp             # stdio 启动
 uv build                   # 生成 dist/*.whl + .tar.gz

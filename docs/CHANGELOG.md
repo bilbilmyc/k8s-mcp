@@ -6,6 +6,33 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-07-11
+
+### Fixed — Windows release script
+
+`scripts/bump_and_release.sh` was unusable on Windows machines with the
+default `core.autocrlf=true` setting — its clean-tree check
+(`git diff --quiet HEAD`) compared worktree bytes against the index
+and always reported "unstaged changes" because Windows git rewrote
+LF → CRLF on every checkout. This forced the v0.6.0 release to be
+done by hand-stepping the script's 5 actions.
+
+- **`.gitattributes`** (new) — pins `eol=lf` for every source file
+  (`*.py`, `*.sh`, `*.md`, `*.toml`, `*.yml`, …) and explicit paths
+  (`LICENSE`, `.gitignore`, `.gitattributes`). New checkouts stop
+  rewriting LF → CRLF on Windows.
+- **`scripts/bump_and_release.sh`** — clean check rewritten to
+  `git status --porcelain`. Now driven by *actual* changes the
+  operator made, not by CRLF drift on disk. As a side benefit, it
+  now correctly detects untracked files (which the old `git diff`
+  form silently missed — a latent "why is this in my release
+  commit?" class of bug).
+- **`docs/publishing.md` §1.3** — documents the one-time renormalize
+  step for existing Windows clones (`git add --renormalize .`).
+- **`dist/*.whl` / `dist/*.tar.gz` marked `binary`** in
+  `.gitattributes` so re-checkouts don't mangle the committed release
+  artifacts.
+
 ## [0.6.0] — 2026-07-11
 
 ### Added — 9 new tools (73 → 82)
@@ -501,3 +528,4 @@ Net result: a safer production posture without changing any of the
 [0.5.2]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.1...v0.5.2
 [0.5.3]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.2...v0.5.3
 [0.6.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.3...v0.6.0
+[0.6.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.6.0...v0.6.1

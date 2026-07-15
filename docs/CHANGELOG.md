@@ -6,6 +6,21 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+### Added — NVIDIA GPU read-only diagnostics (82 → 87 tools)
+
+- **`gpu_cluster_overview`** — dynamically discovers NVIDIA Node capacity / allocatable `nvidia.com/*` resources, active GPU Pod limits, and optional GPU Operator ClusterPolicy state.
+- **`gpu_node_inspect`** — inspects one Node's NVIDIA labels, GPU/MIG resources, taints, scheduling state, and placed GPU Pods.
+- **`gpu_workload_inspect`** — explains live Pod placement or Deployment/Job Pod-template GPU limits and matching GPU Pods.
+- **`gpu_pending_workloads`** — filters Pending Pods with NVIDIA GPU limits and preserves the scheduler's verdict.
+- **`gpu_diagnose`** — one-shot read-only diagnosis of GPU Nodes, optional ClusterPolicy, GPU Operator Pods, and Pending GPU workloads.
+- **`deploy/rbac/nvidia-gpu-read-only.yaml`** — least-privilege read-only RBAC template; no writes, deletes, Pod exec, or Secret access.
+- **`docs/gpu.md` / `docs/gpu.en.md`** — synchronized setup, RBAC, workflow, troubleshooting, and scope documentation.
+
+### Safety
+
+All five `gpu_*` tools remain read-only even when normal server mode has read/write/delete enabled. High-impact GPU administration (MIG, time-slicing, GPU Operator lifecycle, and DRA writes) is intentionally deferred behind a separate future safety gate.
+
+
 ## [0.6.1] — 2026-07-11
 
 ### Fixed — Windows release script

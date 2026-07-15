@@ -4,7 +4,7 @@
 
 **面向 LLM Agent 的、可控 Kubernetes MCP Server**
 
-[English](./README.en.md) · [快速开始](./docs/quickstart.md) · [安全模型](./docs/security.md) · [完整文档](./docs/README.md) · [贡献](./CONTRIBUTING.md)
+[English](./README.en.md) · [快速开始](./docs/quickstart.md) · [安全模型](./docs/security.md) · [GPU 运维](./docs/gpu.md) · [完整文档](./docs/README.md) · [贡献](./CONTRIBUTING.md)
 
 [![CI](https://github.com/bilbilmyc/k8s-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/bilbilmyc/k8s-mcp/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -13,7 +13,7 @@
 
 </div>
 
-`k8s-mcp` 将 Kubernetes 运维能力以 MCP 工具暴露给 Claude、Cursor、Cline、Cherry Studio 等 Agent。当前提供 **82 个**工具，覆盖资源检索、日志与事件、工作负载交付、RBAC/NetworkPolicy 分析、Prometheus、告警通知与集群诊断。
+`k8s-mcp` 将 Kubernetes 运维能力以 MCP 工具暴露给 Claude、Cursor、Cline、Cherry Studio 等 Agent。当前提供 **87 个**工具，覆盖资源检索、日志与事件、工作负载交付、RBAC/NetworkPolicy 分析、Prometheus、告警通知、集群诊断与 NVIDIA GPU 运维。
 
 > [!IMPORTANT]
 > **默认允许读写与删除。** 需要审计、演练或诊断时，显式设置 `K8S_MCP_READ_ONLY=true` 进入只读模式。生产写入仍建议配置 `K8S_MCP_NAMESPACE_ALLOWLIST` 与最小 RBAC。
@@ -83,6 +83,7 @@ k8s-mcp doctor
 | 通用资源操作 | `list_resources`、`get_resource`、`apply_yaml`、`diff_resource`、`delete_resource` |
 | 安全与网络 | `whoami`、`analyze_rbac`、`analyze_networkpolicy`、`audit_secrets` |
 | 可观测性 | `top_pods`、`top_nodes`、`prometheus_query`、`find_prometheus_service` |
+| NVIDIA GPU / AI 运维 | `gpu_cluster_overview`、`gpu_diagnose`、`gpu_node_inspect`、`gpu_workload_inspect`、`gpu_pending_workloads` |
 | 通知与基础能力 | `notify`、`bootstrap_metrics_server`、`bootstrap_local_path_provisioner` |
 
 完整签名和按功能分类的目录见[工具参考](./docs/tools-reference.md)。
@@ -112,6 +113,7 @@ flowchart LR
 | 安装、认证、客户端配置 | [快速开始](./docs/quickstart.md) | [Quick start](./docs/quickstart.en.md) |
 | 权限、安全、运行策略 | [安全模型](./docs/security.md) | [Security](./docs/security.en.md) |
 | Kubernetes RBAC 部署 | [部署指南](./docs/deployment.md) | [Deployment](./docs/deployment.en.md) |
+| NVIDIA GPU / AI 工作负载 | [GPU 运维](./docs/gpu.md) | [GPU operations](./docs/gpu.en.md) |
 | 全部环境变量 | [环境变量](./docs/env.md) | [Environment](./docs/env.en.md) |
 | 维护者文档索引 | [文档首页](./docs/README.md) | [Documentation](./docs/README.en.md) |
 | 完整工具目录 | [工具参考](./docs/tools-reference.md) | [Tool catalog](./docs/tools-reference.md) |

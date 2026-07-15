@@ -7,7 +7,7 @@ __pycache__/
 
 # uv
 .venv/
-.uv-cache/
+.uv-cache*/
 
 # Tooling caches
 .pytest_cache/

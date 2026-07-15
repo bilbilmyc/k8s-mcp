@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8s-mcp-nvidia-gpu-reader
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-mcp-nvidia-gpu-read-only
+rules:
+  # GPU Nodes and NVIDIA extended resources are cluster-scoped.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Workload placement, GPU limits, and scheduler conditions.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Deployment and Job templates for gpu_workload_inspect.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+  # Optional: NVIDIA GPU Operator ClusterPolicy. The CRD can be absent;
+  # this permission is harmless in that case.
+  - apiGroups: ["nvidia.com"]
+    resources: ["clusterpolicies"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8s-mcp-nvidia-gpu-read-only
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8s-mcp-nvidia-gpu-read-only
+subjects:
+  - kind: ServiceAccount
+    name: k8s-mcp-nvidia-gpu-reader
+    namespace: default

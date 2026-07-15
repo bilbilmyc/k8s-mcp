@@ -4,7 +4,7 @@
 
 **A controllable Kubernetes MCP server for LLM agents**
 
-[中文](./README.md) · [Quick start](./docs/quickstart.en.md) · [Security](./docs/security.en.md) · [Documentation](./docs/README.en.md) · [Contributing](./CONTRIBUTING.md)
+[中文](./README.md) · [Quick start](./docs/quickstart.en.md) · [Security](./docs/security.en.md) · [GPU operations](./docs/gpu.en.md) · [Documentation](./docs/README.en.md) · [Contributing](./CONTRIBUTING.md)
 
 [![CI](https://github.com/bilbilmyc/k8s-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/bilbilmyc/k8s-mcp/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -13,7 +13,7 @@
 
 </div>
 
-`k8s-mcp` exposes Kubernetes operations to Claude, Cursor, Cline, Cherry Studio, and other MCP clients. It currently provides **82 tools** for resource inspection, logs and events, workload delivery, RBAC/NetworkPolicy analysis, Prometheus, notifications, and cluster diagnostics.
+`k8s-mcp` exposes Kubernetes operations to Claude, Cursor, Cline, Cherry Studio, and other MCP clients. It currently provides **87 tools** for resource inspection, logs and events, workload delivery, RBAC/NetworkPolicy analysis, Prometheus, notifications, cluster diagnostics, and NVIDIA GPU operations.
 
 > [!IMPORTANT]
 > **Read, write, and delete are enabled by default.** Set `K8S_MCP_READ_ONLY=true` explicitly for audit, rehearsal, or diagnostic sessions. Production writes should still use `K8S_MCP_NAMESPACE_ALLOWLIST` and least-privilege RBAC.
@@ -83,6 +83,7 @@ For ordinary write access, still scope it with `K8S_MCP_NAMESPACE_ALLOWLIST=stag
 | Generic resources | `list_resources`, `get_resource`, `apply_yaml`, `diff_resource`, `delete_resource` |
 | Security and networking | `whoami`, `analyze_rbac`, `analyze_networkpolicy`, `audit_secrets` |
 | Observability | `top_pods`, `top_nodes`, `prometheus_query`, `find_prometheus_service` |
+| NVIDIA GPU / AI operations | `gpu_cluster_overview`, `gpu_diagnose`, `gpu_node_inspect`, `gpu_workload_inspect`, `gpu_pending_workloads` |
 | Notifications and bootstrap | `notify`, `bootstrap_metrics_server`, `bootstrap_local_path_provisioner` |
 
 See the [tool catalog](./docs/tools-reference.md) for complete signatures and grouping.
@@ -112,6 +113,7 @@ Read the full [security model](./docs/security.en.md) for the threat model, envi
 | Installation, auth, and clients | [快速开始](./docs/quickstart.md) | [Quick start](./docs/quickstart.en.md) |
 | Permissions and runtime policy | [安全模型](./docs/security.md) | [Security](./docs/security.en.md) |
 | Kubernetes RBAC deployment | [部署指南](./docs/deployment.md) | [Deployment](./docs/deployment.en.md) |
+| NVIDIA GPU / AI workloads | [GPU 运维](./docs/gpu.md) | [GPU operations](./docs/gpu.en.md) |
 | All environment variables | [环境变量](./docs/env.md) | [Environment](./docs/env.en.md) |
 | Maintainer docs index | [文档首页](./docs/README.md) | [Documentation](./docs/README.en.md) |
 | Full tool catalog | [工具参考](./docs/tools-reference.md) | [Tool catalog](./docs/tools-reference.md) |

@@ -25,6 +25,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+# Source registrations intentionally exclude server.py's built-in `ping` tool.
+EXPECTED_SOURCE_TOOL_COUNT = 81
+EXPECTED_MCP_TOOL_COUNT = 82
+DOC_TOOL_COUNT_MARKERS = {
+    "README.md": "**82 个**工具",
+    "README.en.md": "**82 tools**",
+    "docs/README.md": "**82 个工具**",
+    "docs/README.en.md": "**82 tools**",
+    "docs/tools-reference.md": "# 工具参考（82 个，按功能分类）",
+}
+
 
 def count_registered_tools() -> int:
     """Count `mcp.tool()` registrations in src/k8s_mcp/tools/*.py."""
@@ -35,6 +46,15 @@ def count_registered_tools() -> int:
         total += sum(1 for line in path.read_text(encoding="utf-8").splitlines()
                      if "mcp.tool(" in line)
     return total
+
+
+def count_mcp_tools() -> int:
+    """Count the final server inventory, including server.py's `ping` tool."""
+    from k8s_mcp.config import Settings
+    from k8s_mcp.server import create_server
+
+    server = create_server(Settings(read_only=True))
+    return len(server._tool_manager._tools)
 
 
 def count_tests() -> int:
@@ -67,11 +87,24 @@ def main() -> int:
 
     # Tool count
     tool_count = count_registered_tools()
-    if tool_count != 80:
+    if tool_count != EXPECTED_SOURCE_TOOL_COUNT:
         failures.append(
-            f"Tool count drift: code has {tool_count} tools, pre_release_check.py expects 80. "
-            "Update pyproject.toml description + docs/tools-reference.md + this script."
+            f"Source tool count drift: code has {tool_count}, expected {EXPECTED_SOURCE_TOOL_COUNT}. "
+            "Update the release constants, package description, and generated documentation together."
         )
+
+    mcp_tool_count = count_mcp_tools()
+    if mcp_tool_count != EXPECTED_MCP_TOOL_COUNT:
+        failures.append(
+            f"MCP tool count drift: server exposes {mcp_tool_count}, expected {EXPECTED_MCP_TOOL_COUNT}."
+        )
+
+    for relative_path, marker in DOC_TOOL_COUNT_MARKERS.items():
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        if marker not in text:
+            failures.append(
+                f"Documentation drift: {relative_path} must contain {marker!r}."
+            )
 
     # Test count (skip in CI-only environment if pytest unavailable — but here we have it)
     test_count = count_tests()
@@ -97,7 +130,11 @@ def main() -> int:
             print(f"  - {f}")
         return 1
 
-    print(f"OK: Pre-release sanity OK -- {tool_count} tools, {test_count} tests, version {pv}.")
+    print(
+        "OK: Pre-release sanity OK -- "
+        f"{mcp_tool_count} MCP tools ({tool_count} source registrations), "
+        f"{test_count} tests, version {pv}."
+    )
     return 0
 
 

@@ -7,7 +7,7 @@
   2. 注册所有 tools/*.py 下的 `register(mcp)` 函数
   3. 通过 stdio 与 LLM Agent（Claude Desktop / Cursor / Cherry Studio 等）通信
 
-整个 server 是单进程的，所有 tool 调用串行执行；状态都保存在
+整个 server 是单进程的；同步 tool 在有界 worker pool 中执行，状态都保存在
 进程内（client 缓存、OpenAPI schema 缓存）。
 
 Operational safety nets applied at the `call_tool` boundary (see
@@ -17,10 +17,14 @@ timeout, and apiserver-error sanitization. Each is opt-out via
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
 import logging
 import signal
+import threading
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -31,6 +35,7 @@ from .config import Settings, get_settings
 from .safety import (
     RateLimiter,
     SafeApiError,
+    ToolBusyError,
     ToolTimeoutError,
     safe_apiserver_error,
 )
@@ -79,10 +84,20 @@ class _K8sMCP(FastMCP):
         # RateLimiter is a no-op when rpm=0; check() is the gate.
         self._rate_limiter = RateLimiter(rpm=s.rate_limit_rpm)
         self._tool_timeout_s = float(s.tool_timeout_s)
+        self._max_concurrent_tools = int(s.max_concurrent_tools)
+        self._tool_executor = ThreadPoolExecutor(
+            max_workers=self._max_concurrent_tools,
+            thread_name_prefix="k8s-mcp-tool",
+        )
+        # Keep slots held until the synchronous body really exits. A timeout
+        # only ends the MCP response; Python cannot safely cancel an in-flight
+        # kubernetes-client thread.
+        self._execution_slots = threading.BoundedSemaphore(self._max_concurrent_tools)
         logger.info(
-            "safety nets: rate_limit_rpm=%d tool_timeout_s=%s",
+            "safety nets: rate_limit_rpm=%d tool_timeout_s=%s max_concurrent_tools=%d",
             s.rate_limit_rpm,
             f"{self._tool_timeout_s:g}s" if self._tool_timeout_s > 0 else "off",
+            self._max_concurrent_tools,
         )
 
     def add_tool(
@@ -127,7 +142,7 @@ class _K8sMCP(FastMCP):
         # runs to completion no matter what the timeout is set to.
         #
         # Workaround: bypass FastMCP's async wrapper and dispatch the
-        # sync tool body on the default executor. Then `wait_for` on
+        # sync tool body on a dedicated bounded executor. Then `wait_for` on
         # the returned future will actually fire at the timeout. The
         # orphan executor task isn't cancelled (Python can't kill a
         # sync thread), but the MCP request returns immediately with a
@@ -145,7 +160,7 @@ class _K8sMCP(FastMCP):
         # not safe to construct from a worker thread.
         ctx = self.get_context() if tool.context_kwarg else None
         meta = tool.fn_metadata
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _invoke() -> Any:
             # Replicate what `Tool.run` does for a sync tool, but
@@ -166,14 +181,38 @@ class _K8sMCP(FastMCP):
                 kwargs[tool.context_kwarg] = ctx
             return tool.fn(**kwargs)
 
+        # Apply backpressure immediately before submitting work. Timed-out
+        # synchronous calls retain their worker slot until they actually
+        # return, so an agent cannot build an unbounded queue of orphaned
+        # executor jobs.
+        if not self._execution_slots.acquire(blocking=False):
+            raise ToolBusyError(self._max_concurrent_tools)
+
+        in_flight_inc()
+        try:
+            future = loop.run_in_executor(self._tool_executor, _invoke)
+        except Exception:
+            # Keep the semaphore and diagnostic counter balanced if executor
+            # submission itself fails (for example during shutdown).
+            in_flight_dec()
+            self._execution_slots.release()
+            raise
+
+        def _release_slot(_future: asyncio.Future[Any]) -> None:
+            self._execution_slots.release()
+            in_flight_dec()
+
+        future.add_done_callback(_release_slot)
         try:
             if self._tool_timeout_s > 0:
+                # Shield keeps wait_for from cancelling the asyncio wrapper on
+                # timeout. The worker continues to own its slot until done.
                 raw = await asyncio.wait_for(
-                    loop.run_in_executor(None, _invoke),
+                    asyncio.shield(future),
                     timeout=self._tool_timeout_s,
                 )
             else:
-                raw = await loop.run_in_executor(None, _invoke)
+                raw = await future
         except TimeoutError as e:
             logger.warning("tool %r hit %ss timeout", name, self._tool_timeout_s)
             raise ToolTimeoutError(name, self._tool_timeout_s) from e
@@ -187,11 +226,10 @@ class _K8sMCP(FastMCP):
         except Exception as e:
             # FastMCP's `Tool.run` wraps every tool-body exception in
             # `ToolError(f"Error executing tool {name}: {e}")` from e.
-            # We DO go through `Tool.run` (via the executor path), so
-            # the raw `ApiException` / `ValueError` is at
-            # `e.__cause__`, not `e` itself. Recover it for
-            # sanitization; the operator still sees the full chain
-            # in the log warning.
+            # This fast path invokes the synchronous function directly rather
+            # than `Tool.run`, although other wrappers may still preserve an
+            # exception chain. Inspect it when sanitizing API failures; the
+            # operator still sees the full chain in the log warning.
             from kubernetes.client.rest import ApiException
             cause = e.__cause__ or e.__context__ or e
             if isinstance(cause, ApiException):
@@ -253,6 +291,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
 
 
 _in_flight = 0
+_in_flight_lock = threading.Lock()
 
 
 def _install_signal_handlers() -> None:
@@ -284,13 +323,15 @@ def _install_signal_handlers() -> None:
 
 def in_flight_inc() -> None:
     global _in_flight
-    _in_flight += 1
+    with _in_flight_lock:
+        _in_flight += 1
 
 
 def in_flight_dec() -> None:
     global _in_flight
-    if _in_flight > 0:
-        _in_flight -= 1
+    with _in_flight_lock:
+        if _in_flight > 0:
+            _in_flight -= 1
 
 
 def _register_tools(mcp: FastMCP) -> None:
@@ -365,10 +406,46 @@ def _register_tools(mcp: FastMCP) -> None:
     cluster_info.register(mcp)
 
 
-def main() -> None:
-    """脚本入口：构建 server 并以 stdio 方式跑起来。"""
-    mcp = create_server()
-    mcp.run()
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the small operator-facing CLI without changing stdio defaults."""
+    parser = argparse.ArgumentParser(
+        prog="k8s-mcp",
+        description="A controllable Kubernetes MCP server for LLM agents.",
+    )
+    parser.add_argument("--version", action="version", version=f"k8s-mcp {__version__}")
+    subcommands = parser.add_subparsers(dest="command")
+    subcommands.add_parser("serve", help="Run the stdio MCP server (default).")
+    subcommands.add_parser("doctor", help="Print a redacted runtime configuration summary.")
+    return parser
+
+
+def _doctor_payload(settings: Settings) -> dict[str, Any]:
+    """Return operator-safe diagnostics without exposing credentials."""
+    return {
+        "version": __version__,
+        "read_only": settings.read_only,
+        "namespace_allowlist": settings.namespace_allowlist,
+        "rate_limit_rpm": settings.rate_limit_rpm,
+        "tool_timeout_s": settings.tool_timeout_s,
+        "max_concurrent_tools": settings.max_concurrent_tools,
+        "auth_mode": (
+            "api_server_token" if settings.api_server and settings.api_token
+            else "kubeconfig" if settings.kubeconfig
+            else "auto_detect"
+        ),
+        "webhook_allowlist_configured": bool(settings.notifier_url_allowlist),
+        "webhook_private_hosts_allowed": settings.notifier_allow_private_hosts,
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """CLI entry point; no subcommand preserves the historical stdio server."""
+    args = _build_parser().parse_args(argv)
+    settings = get_settings()
+    if args.command == "doctor":
+        print(json.dumps(_doctor_payload(settings), ensure_ascii=False, indent=2))
+        return
+    create_server(settings).run()
 
 
 if __name__ == "__main__":

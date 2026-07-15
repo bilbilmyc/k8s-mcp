@@ -315,7 +315,7 @@ top_pods: neither metrics-server nor Prometheus is reachable.
     Next steps (pick one):
       a) Allow `kube-system` in K8S_MCP_NAMESPACE_ALLOWLIST and re-call
       b) Manually install metrics-server:
-         kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+         kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
       c) Install Prometheus (kube-prometheus-stack) and let the agent
          discover it via `find_prometheus_service()`.
   - OR call prometheus_query(<PromQL>, prometheus_url=<URL>) directly

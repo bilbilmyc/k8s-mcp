@@ -8,14 +8,14 @@ All environment variables are prefixed with K8S_MCP_.
 
   - 日志/输出（log_level、default_tail_lines）
   - 三档认证：apiserver+token / kubeconfig / in-cluster
-  - 安全守门：read-only 模式、namespace allowlist、删除二次确认的 HMAC 密钥与 TTL
+  - 安全守门：read-only 模式、namespace allowlist、并发与 webhook 边界
 """
 from __future__ import annotations
 
 from functools import lru_cache
 from typing import Any
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     kube_context: str | None = None
 
     # 安全守门 / Safety
+    # Read/write is the normal interactive mode. Set
+    # K8S_MCP_READ_ONLY=true for an explicitly read-only audit or diagnostic
+    # session; combine write access with a namespace allowlist where needed.
     read_only: bool = False
     namespace_allowlist: list[str] | None = None
 
@@ -64,8 +67,12 @@ class Settings(BaseSettings):
     #     enough for list/describe/apply; raise it if you depend on
     #     long-running `rollout_status(watch=True)` or Prometheus range
     #     queries that legitimately need minutes.
-    rate_limit_rpm: int = 120
-    tool_timeout_s: float = 60.0
+    rate_limit_rpm: int = Field(default=120, ge=0)
+    tool_timeout_s: float = Field(default=60.0, ge=0)
+    # Bound synchronous Kubernetes calls, including calls that timed out at
+    # the MCP boundary but continue in a worker thread until their own client
+    # timeout. This prevents a runaway agent from growing the executor queue.
+    max_concurrent_tools: int = Field(default=8, ge=1, le=64)
 
     # Prometheus（可选，监控查询）
     # 显式 URL 优先；未设置则按候选 (namespace, service) 自动探测。
@@ -82,12 +89,16 @@ class Settings(BaseSettings):
     # 集群基础设施。默认指向公开 manifest，私有/离线集群可以通过
     # 环境变量指向自家镜像。
     local_path_provisioner_url: str = (
-        "https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml"
+        "https://raw.githubusercontent.com/rancher/local-path-provisioner/"
+        "v0.0.32/deploy/local-path-storage.yaml"
     )
-    # metrics-server manifest URL for `bootstrap_metrics_server` (and the
-    # auto-bootstrap path in top_pods/top_nodes). Default points at the
-    # upstream kubernetes-sigs release; override for air-gapped installs.
-    metrics_server_manifest_url: str | None = None
+    # Keep bootstrap inputs reproducible: never apply a moving `master` / `latest`
+    # manifest by default. Air-gapped and enterprise installations can override
+    # either URL with a reviewed internal mirror.
+    metrics_server_manifest_url: str = (
+        "https://github.com/kubernetes-sigs/metrics-server/releases/download/"
+        "v0.7.2/components.yaml"
+    )
 
     # 通知 webhook 列表。JSON 字符串，每项是
     # `{"name": "<id>", "type": "feishu|slack|wecom|generic",
@@ -104,6 +115,10 @@ class Settings(BaseSettings):
     # are refused too. Default behavior is "any https host".
     notifier_url_allow_http: bool = False
     notifier_url_allowlist: list[str] | None = None
+    # Literal loopback/private/link-local webhook targets are refused by
+    # default, even when HTTP is enabled for local development. Enable only
+    # when the MCP process is deliberately allowed to reach an internal hook.
+    notifier_allow_private_hosts: bool = False
 
     @field_validator("namespace_allowlist", mode="before")
     @classmethod

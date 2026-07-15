@@ -69,8 +69,8 @@ _PROMQL_NODE_MEM = (
 
 # Manifest URLs
 _METRICS_SERVER_DEFAULT_MANIFEST_URL = (
-    "https://github.com/kubernetes-sigs/metrics-server/"
-    "releases/latest/download/components.yaml"
+    "https://github.com/kubernetes-sigs/metrics-server/releases/download/"
+    "v0.7.2/components.yaml"
 )
 _METRICS_SERVER_DEPLOYMENT_NAME = "metrics-server"
 _METRICS_SERVER_NAMESPACE = "kube-system"
@@ -510,7 +510,7 @@ def _maybe_bootstrap_metrics_server(*, trigger_reason: str) -> str:
             "re-call, or\n"
             "      b) Manually install metrics-server:\n"
             "         kubectl apply -f "
-            "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml\n"
+            "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml\n"
             "      c) Install Prometheus (kube-prometheus-stack) and let the "
             "agent discover it via `find_prometheus_service()`.\n"
         )
@@ -562,7 +562,7 @@ def bootstrap_metrics_server(
 
     Args:
         manifest_url: defaults to the official
-            `https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`.
+            `https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml`.
             Override via `K8S_MCP_METRICS_SERVER_MANIFEST_URL` env var
             (offline / air-gapped installs — point at a self-hosted copy).
         kubelet_insecure_tls: when True (default), patch the Deployment

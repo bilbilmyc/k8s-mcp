@@ -309,7 +309,7 @@ def _section_resource_usage(namespaces: list[str] | None, top_n: int = 5) -> str
             out.append(
                 "(metrics-server not installed — install with:\n"
                 "  kubectl apply -f https://github.com/kubernetes-sigs/"
-                "metrics-server/releases/latest/download/components.yaml)"
+                "metrics-server/releases/download/v0.7.2/components.yaml)"
             )
             return "\n".join(out)
         raise

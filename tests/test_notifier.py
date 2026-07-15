@@ -70,12 +70,14 @@ class _Recorder:
 
     def __init__(self, responses):
         self.calls: list[tuple[str, bytes, dict]] = []
+        self.last_kwargs: dict | None = None
         self._responses = list(responses)
 
     def __call__(self, url, **kwargs):
         # requests.Session.post(url, **kwargs)
         data = kwargs.get("data", b"")
         headers = kwargs.get("headers", {})
+        self.last_kwargs = dict(kwargs)
         self.calls.append((url, data, dict(headers)))
         if self._responses:
             return self._responses.pop(0)
@@ -436,6 +438,7 @@ def test_retry_on_5xx_succeeds_on_second_try(monkeypatch, _retry_server):
     # The local _retry_server binds on http://localhost; permit cleartext
     # only for this test (the production gate rejects http by default).
     monkeypatch.setenv("K8S_MCP_NOTIFIER_URL_ALLOW_HTTP", "true")
+    monkeypatch.setenv("K8S_MCP_NOTIFIER_ALLOW_PRIVATE_HOSTS", "true")
     monkeypatch.setenv("K8S_MCP_NOTIFIERS", json.dumps([
         {"name": "ops", "type": "feishu", "url": srv.url()},
     ]))
@@ -464,6 +467,7 @@ def test_retry_exhausted_returns_failure(monkeypatch, _retry_server):
         (503, b'{"msg":"down"}'),
     ])
     monkeypatch.setenv("K8S_MCP_NOTIFIER_URL_ALLOW_HTTP", "true")
+    monkeypatch.setenv("K8S_MCP_NOTIFIER_ALLOW_PRIVATE_HOSTS", "true")
     monkeypatch.setenv("K8S_MCP_NOTIFIERS", json.dumps([
         {"name": "ops", "type": "feishu", "url": srv.url()},
     ]))
@@ -802,3 +806,11 @@ def test_mixed_text_and_card_notifiers_each_render_correctly(monkeypatch, _patch
     # Slack payload: text contains the title in mrkdwn bold
     slack_payload = next(p for p in payloads if "text" in p and "msg_type" not in p)
     assert "**Header**" in slack_payload["text"]
+
+
+def test_webhook_redirects_are_disabled(monkeypatch, _patch_session):
+    _set_notifiers(monkeypatch, json.dumps([_feishu_notifier()]))
+    rec = _patch_session["install"]([_FakeResp(200)])
+    notifier.notify("hello")
+    assert rec.last_kwargs is not None
+    assert rec.last_kwargs["allow_redirects"] is False

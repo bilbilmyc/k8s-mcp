@@ -45,8 +45,8 @@ out = workload.create_deployment(
 print(out)
 
 # 5) 删除 —— v0.5.2 起单步（受 READ_ONLY + NAMESPACE_ALLOWLIST 守门）
-from k8s_mcp.tools import generic as gen
-out = gen.delete_resource(kind="Deployment", name="web", namespace="default")
+from k8s_mcp.tools.delete_tool import delete_resource
+out = delete_resource(kind="Deployment", name="web", namespace="default")
 print(out)
 # {"deleted": True, "kind": "Deployment", "name": "web",
 #  "namespace": "default", "grace_period_seconds": 30}

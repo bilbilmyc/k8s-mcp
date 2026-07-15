@@ -23,7 +23,7 @@ bootstrap_local_path_provisioner()      # 应用 Rancher local-path-storage
   `storage_class` 也行。
 - `apply_immediately=False` —— 只返回 manifest YAML，先看一眼再装（适合审计）。
 - `K8S_MCP_LOCAL_PATH_PROVISIONER_URL` —— 离线 / 内网集群，指向你自家的镜像；
-  默认指向 [Rancher 官方 manifest](https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml)。
+  默认指向 [Rancher 官方 manifest](https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.32/deploy/local-path-storage.yaml)。
 
 Manifest 在 session 内 fetch + cache 一次（每次 MCP 重连会重拉）。
 

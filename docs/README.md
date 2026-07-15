@@ -1,25 +1,29 @@
-# Documentation index
+# 文档中心
 
-所有维护者文档都在 `docs/` 下，按用途分文件。
+[English](./README.en.md) · [项目首页](../README.md)
 
-| 文件 | 内容 |
-| --- | --- |
-| [tools-reference.md](./tools-reference.md) | **73 个工具完整目录**，每条带签名，按读 / 写 / 删分组 |
-| [tools.md](./tools.md) | **重点工具 deep-dive** + 流程（新会话协议 / 删除二次确认 / 批量三步 / Prometheus 桥接） |
-| [env.md](./env.md) | 全部 `K8S_MCP_*` 环境变量参考 + Prometheus URL 解析优先级 |
-| [architecture.md](./architecture.md) | 源码目录结构 + 设计要点（注册机制 / 守门分层 / 进程内状态 / 测试策略） |
-| [usage.md](./usage.md) | Python 程序化调用（不开 MCP server，CI / notebook 场景） |
-| [examples.md](./examples.md) | 13 个端到端 Claude / Cherry Studio 对话片段 |
-| [troubleshooting.md](./troubleshooting.md) | dev / test 集群踩坑合集（无 SC、hostPath、Forbidden、Prometheus 找不到） |
-| [publishing.md](./publishing.md) | PyPI 发版流程（**走 GitHub Actions + OIDC**，`uv publish` 留作应急） |
-| [CHANGELOG.md](./CHANGELOG.md) | 全部版本变更记录（SemVer pre-1.0） |
-| [ROADMAP.md](./ROADMAP.md) | 当前 Phase 计划 + 完成历史 |
-| [PLAN.md](./PLAN.md) | 设计档案（archived，2026-07-05 起的 drift log） |
+这里按“先安全、再连接、最后授权”的顺序组织文档。当前项目公开 **82 个工具**；工具总数、首页和发版检查由 CI 同步校验。
 
-## 推荐阅读顺序
+## 新用户路径
 
-1. 顶层 [README.md](../README.md) — 安装、认证、MCP 客户端配置、安全守门。
-2. 本文件 — 知道遇到问题该翻哪一份。
-3. [tools-reference.md](./tools-reference.md) — 看完整的 73 工具签名。
-4. [tools.md](./tools.md) — 真用上某工具时翻 deep-dive。
-5. [env.md](./env.md) — 调环境变量时翻。
+1. [快速开始](./quickstart.md)：安装、认证、客户端配置与 `doctor`。
+2. [安全模型](./security.md)：按需只读、写入边界、并发限制与 webhook 边界。
+3. [部署与 RBAC](./deployment.md)：从只读身份到命名空间受限写入。
+4. [工具参考](./tools-reference.md)：完整签名目录。
+
+## 文档地图
+
+| 主题 | 中文 | English |
+| --- | --- | --- |
+| 上手、认证、MCP 客户端 | [quickstart.md](./quickstart.md) | [quickstart.en.md](./quickstart.en.md) |
+| 安全、迁移、运行时守门 | [security.md](./security.md) | [security.en.md](./security.en.md) |
+| ServiceAccount 与最小 RBAC | [deployment.md](./deployment.md) | [deployment.en.md](./deployment.en.md) |
+| 全部 `K8S_MCP_*` 变量 | [env.md](./env.md) | [env.en.md](./env.en.md) |
+| **82 个工具**完整签名 | [tools-reference.md](./tools-reference.md) | [tools-reference.md](./tools-reference.md) |
+| 重点工具与工作流 | [tools.md](./tools.md) | — |
+| Python 直接调用 | [usage.md](./usage.md) | — |
+| 示例与排障 | [examples.md](./examples.md) / [troubleshooting.md](./troubleshooting.md) | — |
+| 架构、发布、变更 | [architecture.md](./architecture.md) / [publishing.md](./publishing.md) | — |
+
+> [!NOTE]
+> [PLAN.md](./PLAN.md) 是 archived material，可能描述已移除的两阶段删除流程；请以当前 README、安全文档和工具 docstring 为准。

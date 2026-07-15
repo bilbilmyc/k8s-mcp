@@ -51,6 +51,13 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Validate quality gates
+        run: |
+          uv sync --all-extras --dev --python 3.12
+          uv run --python 3.12 ruff check .
+          uv run --python 3.12 pytest -q
+          uv run --python 3.12 python scripts/pre_release_check.py
+
       - name: Build distributions
         run: uv build
 

@@ -41,3 +41,7 @@ jobs:
 
       - name: Run tests
         run: uv run --python ${{ matrix.python-version }} pytest -q --cov=src/k8s_mcp --cov-report=term-missing
+
+      - name: Verify release metadata and documentation inventory
+        if: matrix.python-version == '3.12'
+        run: uv run --python ${{ matrix.python-version }} python scripts/pre_release_check.py

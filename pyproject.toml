@@ -1,7 +1,7 @@
 [project]
 name = "k8s-mcp-bilbilmyc"
 version = "0.6.1"
-description = "Kubernetes MCP server for LLM agents — 73 tools covering CRUD on workloads/services/storage/RBAC, logs/events, Prometheus queries, plus pod & deployment diagnosis / RBAC & NetworkPolicy & resource-usage analyzers / owner-chain explain."
+description = "Kubernetes MCP server for LLM agents — 82 tools covering CRUD on workloads/services/storage/RBAC, logs/events, Prometheus queries, plus pod & deployment diagnosis / RBAC & NetworkPolicy & resource-usage analyzers / owner-chain explain."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
@@ -24,10 +24,11 @@ classifiers = [
     "Topic :: System :: Monitoring",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.0",
+    "mcp[cli]>=1.28.1,<1.29.0",
     "kubernetes>=29.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -40,7 +41,7 @@ dependencies = [
 Homepage = "https://github.com/bilbilmyc/k8s-mcp"
 Repository = "https://github.com/bilbilmyc/k8s-mcp"
 Issues = "https://github.com/bilbilmyc/k8s-mcp/issues"
-Changelog = "https://github.com/bilbilmyc/k8s-mcp/blob/main/docs/PLAN.md"
+Changelog = "https://github.com/bilbilmyc/k8s-mcp/blob/main/docs/CHANGELOG.md"
 
 [project.scripts]
 k8s-mcp = "k8s_mcp.server:main"

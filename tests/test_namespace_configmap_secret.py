@@ -22,6 +22,8 @@ from k8s_mcp.tools import configmap, namespace, secret
 
 @pytest.fixture(autouse=True)
 def _clean_settings(monkeypatch):
+    # Keep this module isolated from caller-provided runtime policy.
+    # The project default permits writes; dedicated tests cover read-only mode.
     monkeypatch.delenv("K8S_MCP_READ_ONLY", raising=False)
     monkeypatch.delenv("K8S_MCP_NAMESPACE_ALLOWLIST", raising=False)
     from k8s_mcp.config import reset_settings_cache

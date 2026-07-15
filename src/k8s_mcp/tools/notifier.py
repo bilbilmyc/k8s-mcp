@@ -58,6 +58,7 @@ type 即可，payload 拼装工具内部处理。`feishu_card` 是推荐的
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -222,11 +223,26 @@ def _validate_notifier_url(url: str) -> str | None:
     host = (parsed.hostname or "").lower()
     if not host:
         return "url has no host"
-    allow = get_settings().notifier_url_allowlist
+    settings = get_settings()
+    allow = settings.notifier_url_allowlist
     if allow and host not in {h.lower() for h in allow}:
         return (
             f"url host {host!r} not in K8S_MCP_NOTIFIER_URL_ALLOWLIST "
             f"({sorted(allow)})"
+        )
+    # Do not let a configured webhook become an accidental route to a local
+    # service or cloud metadata endpoint. Hostname DNS is intentionally not
+    # resolved here (that would make validation itself network-dependent);
+    # literal IP addresses are enough to block the common bypass.
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global and not settings.notifier_allow_private_hosts:
+        return (
+            f"url host {host!r} is not globally routable; set "
+            "K8S_MCP_NOTIFIER_ALLOW_PRIVATE_HOSTS=true only for a deliberately "
+            "trusted internal webhook"
         )
     return None
 
@@ -482,6 +498,9 @@ def _post(
                 "User-Agent": "k8s-mcp/1.0",
             },
             timeout=(5, timeout),
+            # Redirects can cross the hostname allowlist after the initial
+            # validation. Refuse them rather than validating a hidden hop.
+            allow_redirects=False,
         )
     except requests.exceptions.RetryError as e:
         return False, f"RetryError: exhausted retries — {type(e.__cause__).__name__}: {e.__cause__}"

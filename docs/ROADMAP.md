@@ -1,3 +1,6 @@
+> [!NOTE]
+> 本文包含按版本记录的历史完成项；工具总数与当前安全默认值请以 [README](../README.md) 和 [文档中心](./README.md) 为准。
+
 # Roadmap
 
 发版流程（PyPI OIDC + GitHub Actions + 6 个 Release）就位后，下一步是项目本身的健壮性、性能和 LLM 友好度。

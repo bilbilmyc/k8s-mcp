@@ -1,262 +1,132 @@
+<div align="center">
+
 # k8s-mcp
 
-Kubernetes MCP server for LLM agents. Exposes **73 tools** covering CRUD on
-Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services,
-Ingresses, ConfigMaps, PVCs, RBAC, NetworkPolicies, plus logs/events, node
-ops, top, rollout, wait, bulk YAML apply, Prometheus queries, health
-snapshots, and proactive webhooks.
+**A controllable Kubernetes MCP server for LLM agents**
 
-The goal is to drive day-to-day K8s operations from natural language
-(Claude Desktop, Cursor, Cline, Cherry Studio, …) with structured tool
-calls instead of `kubectl` shell scraping.
+[中文](./README.md) · [Quick start](./docs/quickstart.en.md) · [Security](./docs/security.en.md) · [Documentation](./docs/README.en.md) · [Contributing](./CONTRIBUTING.md)
 
-> **Package name note**: the PyPI name is `k8s-mcp-bilbilmyc` (a different
-> 27-tool MCP already owns [`k8s-mcp`](https://pypi.org/project/k8s-mcp/)).
-> The `import` name is still `k8s_mcp` and the CLI is still `k8s-mcp`.
-> See [docs/publishing.md](./docs/publishing.md).
+[![CI](https://github.com/bilbilmyc/k8s-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/bilbilmyc/k8s-mcp/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-0b9?logo=opensourceinitiative&logoColor=white)](./LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-stdio-6f42c1)](https://modelcontextprotocol.io/)
 
-## Table of contents
+</div>
 
-- [Install](#install)
-- [Authentication — three modes](#authentication-three-modes)
-- [MCP client setup](#mcp-client-setup)
-- [Safety flags](#safety-flags)
-- [Notifier webhooks](#notifier-webhooks)
-- [Documentation index](#documentation-index)
-- [Development](#development)
+`k8s-mcp` exposes Kubernetes operations to Claude, Cursor, Cline, Cherry Studio, and other MCP clients. It currently provides **82 tools** for resource inspection, logs and events, workload delivery, RBAC/NetworkPolicy analysis, Prometheus, notifications, and cluster diagnostics.
 
-## Install
+> [!IMPORTANT]
+> **Read, write, and delete are enabled by default.** Set `K8S_MCP_READ_ONLY=true` explicitly for audit, rehearsal, or diagnostic sessions. Production writes should still use `K8S_MCP_NAMESPACE_ALLOWLIST` and least-privilege RBAC.
+
+## Why k8s-mcp
+
+- **Controllable safety:** an on-demand read-only mode, namespace write boundaries, per-tool rate limiting, call timeouts, a bounded worker pool, and sanitized Kubernetes errors.
+- **Designed for agents:** constrained tool inputs and diagnostic/explanation tools reduce trial-and-error calls.
+- **Operable:** a `doctor` command, reproducible bootstrap manifests, and CI checks for tool, documentation, and version drift.
+- **Incremental authorization:** begin with a read-only `view` identity and grant narrow namespace Roles only when writes are required.
+
+## Five-minute quick start
+
+### 1. Install and inspect
 
 ```bash
-# 1) Install the CLI (once)
-uv tool install k8s-mcp-bilbilmyc
-
-# 2) Verify
+pip install k8s-mcp-bilbilmyc
 k8s-mcp --help
+k8s-mcp doctor
 ```
 
-**Or run it ephemerally (no install)**:
+`doctor` neither connects to the cluster nor prints credentials. It only reports redacted runtime policy; `read_only` is `false` by default.
+
+### 2. Provide Kubernetes credentials
 
 ```bash
-uvx --from k8s-mcp-bilbilmyc k8s-mcp
+export KUBECONFIG="$HOME/.kube/config"   # optional when using the default path
+export K8S_MCP_READ_ONLY=false             # default; optional to set
 ```
 
-**From source (dev mode)**:
+See [Quick start](./docs/quickstart.en.md) for kubeconfig, API-server token, and in-cluster authentication.
 
-```bash
-git clone https://github.com/bilbilmyc/k8s-mcp
-cd k8s-mcp
-uv sync
-uv run k8s-mcp
-```
-
-By default the server reads `~/.kube/config`. Override via env vars (see
-[docs/env.md](./docs/env.md)).
-
-## Authentication — three modes
-
-Auto-detected, in this priority:
-
-### Mode A — apiserver URL + token
-For remote / CI / CD scenarios where you can't use a kubeconfig.
-
-```bash
-export K8S_MCP_API_SERVER=https://api.example.com:6443
-export K8S_MCP_API_TOKEN=eyJhbGciOiJSUzI1NiIs...
-export K8S_MCP_API_CA_CERT=/path/to/ca.crt   # optional
-export K8S_MCP_API_INSECURE=false            # optional, skip TLS verify (testing only)
-```
-
-### Mode B — kubeconfig
-Default. Reads `KUBECONFIG` env or `~/.kube/config`.
-
-```bash
-export KUBECONFIG=/path/to/kubeconfig         # optional
-export K8S_MCP_KUBE_CONTEXT=my-cluster        # optional, override current-context
-```
-
-### Mode C — in-cluster
-Auto-detected when `/var/run/secrets/kubernetes.io/serviceaccount/token`
-exists. Useful when running the MCP server as a sidecar inside a pod.
-
-## MCP client setup
-
-> Recommended: install once via `uv tool install`, then every agent uses
-> the same `command: k8s-mcp` entry. Upgrades don't touch agent config.
+### 3. Configure an MCP client
 
 ```json
 {
   "mcpServers": {
     "k8s": {
       "command": "k8s-mcp",
+      "args": ["serve"],
       "env": {
-        "K8S_MCP_LOG_LEVEL": "INFO"
+        "K8S_MCP_READ_ONLY": "false",
+        "KUBECONFIG": "/absolute/path/to/kubeconfig"
       }
     }
   }
 }
 ```
 
-**For Claude Code**:
+The historical no-argument launch remains compatible: `k8s-mcp` starts the stdio server by default. See [Quick start](./docs/quickstart.en.md) for client configuration, Windows paths, and troubleshooting.
+
+### 4. Switch to read-only mode when needed
 
 ```bash
-claude mcp add-json k8s '{"command": "k8s-mcp", "env": {"K8S_MCP_LOG_LEVEL": "INFO"}}'
-```
-
-**To use Mode A instead**, add `"K8S_MCP_API_SERVER"` and `"K8S_MCP_API_TOKEN"`
-to the `env` block. **Mode C** (in-cluster) needs no env at all — it reads
-the pod's SA token automatically.
-
-**Not installed yet?** Use `uvx` to run it without an install step:
-
-```json
-{
-  "mcpServers": {
-    "k8s": {
-      "command": "uvx",
-      "args": ["--from", "k8s-mcp-bilbilmyc", "k8s-mcp"],
-      "env": { "K8S_MCP_LOG_LEVEL": "INFO" }
-    }
-  }
-}
-```
-
-Restart the agent. You should see **73 tools** listed under "k8s".
-
-Full environment variable reference: [docs/env.md](./docs/env.md).
-
-Full environment variable reference: [docs/env.md](./docs/env.md), and a single copy-pasteable example below that covers every `K8S_MCP_*` variable in one block.
-
-## Complete config (production-ready one-block)
-
-```bash
-# ===== k8s-mcp complete config (production setup) =====
-# Copy this block, uncomment + edit the lines you need. Covers every
-# K8S_MCP_* variable. Defaults are sensible — only override what you
-# need to override.
-
-# ---------- 1. Cluster auth (pick one of kubeconfig / apiserver) ----------
-# Mode A: kubeconfig (recommended; same semantics as $KUBECONFIG)
-export KUBECONFIG=/path/to/kubeconfig
-# export K8S_MCP_KUBE_CONTEXT=my-cluster                       # switch context in multi-cluster kubeconfigs
-
-# Mode B: talk to apiserver directly (service-account / remote cluster)
-# export K8S_MCP_API_SERVER=https://12.2.40.40:6443
-# export K8S_MCP_API_TOKEN=<bearer-token>
-# export K8S_MCP_API_CA_CERT=/path/to/ca.crt                   # omit → system CA; set false to skip TLS (local test only)
-# export K8S_MCP_API_INSECURE=false
-
-# ---------- 2. Debug output ----------
-export K8S_MCP_LOG_LEVEL=INFO                                 # DEBUG / INFO / WARNING / ERROR / CRITICAL
-export K8S_MCP_DEFAULT_TAIL_LINES=100                         # default --tail for get_pod_logs
-
-# ---------- 3. Write gates (writes enabled by default) ----------
-# export K8S_MCP_READ_ONLY=true                               # true → every write tool raises PermissionError
-# export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod         # only these namespaces writable; cluster-scoped writes also rejected
-# v0.5.2: deletes are single-step — no token confirmation needed
-
-# ---------- 4. Runtime safety nets (defaults are sane) ----------
-export K8S_MCP_RATE_LIMIT_RPM=120                             # per-tool RPM cap; 0 disables
-export K8S_MCP_TOOL_TIMEOUT_S=60                              # per-tool wall-clock timeout seconds; 0 disables
-
-# ---------- 5. Prometheus (optional; auto-discovered if unset) ----------
-# export K8S_MCP_PROMETHEUS_URL=http://12.2.40.40:9090        # explicit URL — skip discovery
-# export K8S_MCP_PROMETHEUS_BEARER_TOKEN=<bearer>             # only if your Prometheus needs auth
-# export K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST=monitoring,observability  # limit scan in multi-tenant clusters
-
-# ---------- 6. Bootstrap cluster components ----------
-# export K8S_MCP_LOCAL_PATH_PROVISIONER_URL=https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
-
-# ---------- 7. Notifier webhooks (JSON list) ----------
-# type options: feishu (plain text) / feishu_post (rich text) / feishu_card (recommended, interactive card)
-#               slack / wecom / generic
-export K8S_MCP_NOTIFIERS='[{"name":"ops","type":"feishu_card","url":"https://open.feishu.cn/open-apis/bot/v2/hook/<your-webhook-id>"}]'
-# export K8S_MCP_NOTIFIER_URL_ALLOW_HTTP=false                # true → allow http:// (local test only)
-# export K8S_MCP_NOTIFIER_URL_ALLOWLIST=open.feishu.cn,hooks.slack.com  # host allowlist (exact match)
-```
-
-These 7 groups cover every field on the `Settings` model; defaults are already sensible — only override what you need to deviate from. Field-level reference: [docs/env.md](./docs/env.md); notifier type comparison: the next section.
-
-## Safety flags
-
-```bash
-# Read-only mode — OPT-IN, writes are enabled by default out of the box.
-# Set to `true` only when you want every write tool to refuse with PermissionError.
-# (Config default is `false`.)
 export K8S_MCP_READ_ONLY=true
-
-# Namespace allowlist for writes. Reads are unrestricted.
-# Cluster-scoped writes (no namespace) are rejected when this is set.
-export K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod
+k8s-mcp doctor
 ```
 
-## Notifier webhooks
+For ordinary write access, still scope it with `K8S_MCP_NAMESPACE_ALLOWLIST=staging,preview` and avoid an unrestricted namespace policy with a cluster-admin kubeconfig. Use the [deployment and RBAC templates](./docs/deployment.en.md).
 
-Push the output of read-only tools (typically `cluster_health_snapshot` /
-`get_certificate_expiry`) to IM channels:
+## Capability overview
+
+| Use case | Representative tools |
+| --- | --- |
+| Observe and diagnose | `cluster_health_snapshot`, `get_pod_logs`, `list_events`, `diagnose_pod`, `explain_pod` |
+| Deliver workloads | `create_deployment`, `scale_workload`, `set_image`, `rollout_status`, `wait_for_resource` |
+| Generic resources | `list_resources`, `get_resource`, `apply_yaml`, `diff_resource`, `delete_resource` |
+| Security and networking | `whoami`, `analyze_rbac`, `analyze_networkpolicy`, `audit_secrets` |
+| Observability | `top_pods`, `top_nodes`, `prometheus_query`, `find_prometheus_service` |
+| Notifications and bootstrap | `notify`, `bootstrap_metrics_server`, `bootstrap_local_path_provisioner` |
+
+See the [tool catalog](./docs/tools-reference.md) for complete signatures and grouping.
+
+## Safety model
+
+```mermaid
+flowchart LR
+    A["LLM Agent"] --> B["MCP boundary"]
+    B --> C["Rate limit / timeout / bounded concurrency / error sanitization"]
+    C --> D["read_only gate"]
+    D --> E["namespace allowlist"]
+    E --> F["Kubernetes API"]
+```
+
+- **Read-only is opt-in:** when `K8S_MCP_READ_ONLY=true`, every write, patch, apply, and delete operation is rejected at the `read_only` gate.
+- **A timeout does not kill a thread:** synchronous Kubernetes SDK calls cannot be safely killed. A timed-out call retains its worker slot until it returns, preventing runaway agents from accumulating background work.
+- **Webhook protection:** HTTPS is required by default, literal private/loopback hosts are refused, and redirects are disabled. Internal hooks require an explicit opt-in.
+- **Reproducible bootstrap:** defaults use version-pinned manifests instead of moving `master` or `latest` URLs.
+
+Read the full [security model](./docs/security.en.md) for the threat model, environment variables, and migration guidance.
+
+## Documentation
+
+| Goal | 中文 | English |
+| --- | --- | --- |
+| Installation, auth, and clients | [快速开始](./docs/quickstart.md) | [Quick start](./docs/quickstart.en.md) |
+| Permissions and runtime policy | [安全模型](./docs/security.md) | [Security](./docs/security.en.md) |
+| Kubernetes RBAC deployment | [部署指南](./docs/deployment.md) | [Deployment](./docs/deployment.en.md) |
+| All environment variables | [环境变量](./docs/env.md) | [Environment](./docs/env.en.md) |
+| Maintainer docs index | [文档首页](./docs/README.md) | [Documentation](./docs/README.en.md) |
+| Full tool catalog | [工具参考](./docs/tools-reference.md) | [Tool catalog](./docs/tools-reference.md) |
+
+## Development and release
 
 ```bash
-export K8S_MCP_NOTIFIERS='[
-  {"name": "ops-feishu", "type": "feishu_card",
-   "url": "https://open.feishu.cn/open-apis/bot/v2/hook/...",
-   "cluster_label": "prod"},
-  {"name": "oncall", "type": "slack",
-   "url": "https://hooks.slack.com/services/...",
-   "cluster_label": "prod"}
-]'
+uv sync --all-extras --dev
+uv run ruff check .
+uv run pytest -q
+uv run python scripts/pre_release_check.py
 ```
 
-Each entry: `{name, type, url, cluster_label?}`. `type` is `feishu`
-(plain text) / `feishu_post` (Feishu rich text) / **`feishu_card`**
-(Feishu interactive card — recommended for production: header color
-follows `level`, each `## section` block renders as its own `lark_md`
-card element) / `slack` / `wecom` / `generic`; the `notify` tool
-assembles the per-type JSON payload so the agent doesn't have to.
-`cluster_label` is prefixed on the card header / message so a single
-webhook can multiplex multiple clusters.
+CI checks tests, lint, the tool inventory, core bilingual documentation counts, and version alignment. See [CONTRIBUTING.md](./CONTRIBUTING.md) and [the publishing guide](./docs/publishing.md).
 
-## Documentation index
+## License
 
-**Tools:**
-
-- [docs/tools-reference.md](./docs/tools-reference.md) — **Full 72-tool catalog** (one line per tool, full signature)
-- [docs/tools.md](./docs/tools.md) — Deep dives + flows (new-session protocol, delete confirmation, bulk 3-step, Prometheus bridge)
-
-**Config / architecture:**
-
-- [docs/env.md](./docs/env.md) — All `K8S_MCP_*` env vars
-- [docs/architecture.md](./docs/architecture.md) — Source tree + design notes
-
-**Usage / examples:**
-
-- [docs/usage.md](./docs/usage.md) — Programmatic usage (no MCP server)
-- [docs/examples.md](./docs/examples.md) — 13 end-to-end dialogs
-
-**Ops:**
-
-- [docs/troubleshooting.md](./docs/troubleshooting.md) — Dev-cluster gotchas
-- [docs/publishing.md](./docs/publishing.md) — PyPI / TestPyPI release workflow
-
-**Full index**: [docs/README.md](./docs/README.md).
-
-## Development
-
-```bash
-uv sync
-uv run pytest              # 655 tests
-uv run ruff check .        # lint
-uv run k8s-mcp             # run over stdio
-uv build                   # produce dist/*.whl + .tar.gz
-```
-
-Release workflow: [docs/publishing.md](./docs/publishing.md) (**GitHub Actions + OIDC**, no local `uv publish`).
-Roadmap: [docs/ROADMAP.md](./docs/ROADMAP.md). Archived design doc: [docs/PLAN.md](./docs/PLAN.md).
-
-## Out of scope (v2+)
-
-- log streaming (same)
-- Helm / Kustomize integration
-- Multi-cluster routing
-- MCP HTTP / SSE transport (v1 is stdio-only)
-- Docker image / Helm chart publishing
-- CI + PyPI Trusted Publishing (v1 ships by hand)
+Released under the [MIT License](./LICENSE).

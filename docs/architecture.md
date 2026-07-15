@@ -55,7 +55,7 @@ src/k8s_mcp/
 
 每个 `tools/*.py` 模块暴露一个 `register(mcp)` 函数。新增工具模块只要在
 `server.py` 的 `_register_tools` 里 import + 调用一次，**不需要**改其他模块。
-73 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
+82 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
 
 ### 配置 + 守门分层
 

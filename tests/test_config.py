@@ -12,6 +12,8 @@ def test_defaults():
     assert s.namespace_allowlist is None
     assert s.api_server is None
     assert s.api_token is None
+    assert s.max_concurrent_tools == 8
+    assert s.notifier_allow_private_hosts is False
 
 
 def test_env_prefix(monkeypatch):
@@ -25,19 +27,19 @@ def test_env_prefix(monkeypatch):
 
 
 def test_ns_allowed_when_no_allowlist():
-    s = Settings()
+    s = Settings(read_only=False)
     assert s.ns_allowed("default") is True
     assert s.ns_allowed(None) is True
 
 
 def test_ns_allowed_with_allowlist():
-    s = Settings(namespace_allowlist=["default", "app"])
+    s = Settings(read_only=False, namespace_allowlist=["default", "app"])
     assert s.ns_allowed("default") is True
     assert s.ns_allowed("kube-system") is False
 
 
 def test_ns_allowed_blocks_cluster_scoped_when_allowlist_set():
-    s = Settings(namespace_allowlist=["default"])
+    s = Settings(read_only=False, namespace_allowlist=["default"])
     assert s.ns_allowed(None) is False
 
 
@@ -81,6 +83,7 @@ def test_prometheus_namespace_allowlist_independent_of_namespace_allowlist():
     scope, and vice versa. (Critical to keep tests from accidentally
     coupling them.)"""
     s = Settings(
+        read_only=False,
         namespace_allowlist=["app"],
         prometheus_namespace_allowlist=["monitoring"],
     )
@@ -89,3 +92,17 @@ def test_prometheus_namespace_allowlist_independent_of_namespace_allowlist():
     # ns_allowed still gated by namespace_allowlist, not prom one
     assert s.ns_allowed("monitoring") is False
     assert s.ns_allowed("app") is True
+
+
+def test_safe_write_opt_in_from_environment(monkeypatch):
+    monkeypatch.setenv("K8S_MCP_READ_ONLY", "false")
+    monkeypatch.setenv("K8S_MCP_NAMESPACE_ALLOWLIST", "app,prod")
+    s = Settings()
+    assert s.read_only is False
+    assert s.ns_allowed("app") is True
+    assert s.ns_allowed("default") is False
+
+
+def test_max_concurrent_tools_from_environment(monkeypatch):
+    monkeypatch.setenv("K8S_MCP_MAX_CONCURRENT_TOOLS", "3")
+    assert Settings().max_concurrent_tools == 3

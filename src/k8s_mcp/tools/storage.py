@@ -202,8 +202,9 @@ def bootstrap_local_path_provisioner(
             raw YAML for the user to inspect before applying.
 
     Manifest URL:
-        Override via `K8S_MCP_LOCAL_PATH_PROVISIONER_URL` for air-gapped
-        clusters with an internal mirror.
+        Defaults to the reviewed Rancher v0.0.32 manifest. Override via
+        `K8S_MCP_LOCAL_PATH_PROVISIONER_URL` for air-gapped clusters with an
+        internally reviewed mirror.
     """
     _read_only_guard("bootstrap_local_path_provisioner")
     yaml_text = _fetch_local_path_manifest()

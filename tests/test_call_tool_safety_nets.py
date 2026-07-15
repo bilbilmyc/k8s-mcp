@@ -11,19 +11,22 @@ instance and call `await mcp.call_tool(name, {})` directly.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 import pytest
 from kubernetes.client.rest import ApiException
 
 from k8s_mcp.config import Settings
-from k8s_mcp.safety import RateLimitedError, SafeApiError, ToolTimeoutError
+from k8s_mcp.safety import RateLimitedError, SafeApiError, ToolBusyError, ToolTimeoutError
 from k8s_mcp.server import _K8sMCP
 
 # ---------- test fixtures --------------------------------------------------
 
 
-def _build_server(*, rate_limit_rpm: int = 120, tool_timeout_s: float = 5.0) -> _K8sMCP:
+def _build_server(
+    *, rate_limit_rpm: int = 120, tool_timeout_s: float = 5.0, max_concurrent_tools: int = 8
+) -> _K8sMCP:
     """Build a _K8sMCP with explicit safety-net settings."""
     # Bypass the env / lru_cache by passing a Settings directly. The
     # `Settings` model is the only kwarg the server cares about.
@@ -31,6 +34,7 @@ def _build_server(*, rate_limit_rpm: int = 120, tool_timeout_s: float = 5.0) -> 
         read_only=True,
         rate_limit_rpm=rate_limit_rpm,
         tool_timeout_s=tool_timeout_s,
+        max_concurrent_tools=max_concurrent_tools,
     )
     return _K8sMCP("k8s-mcp-test", settings=settings)
 
@@ -229,3 +233,32 @@ def test_tool_with_arguments_passes_through():
     _add_simple_tool(server, "greet", lambda name: f"hi {name}")
     result = asyncio.run(server.call_tool("greet", {"name": "alice"}))
     assert result[0].text == "hi alice"
+
+
+def test_busy_server_rejects_work_without_queuing():
+    """A timed-out/slow sync call keeps its worker slot until it actually exits."""
+    server = _build_server(tool_timeout_s=0, max_concurrent_tools=1)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_tool() -> str:
+        entered.set()
+        release.wait(timeout=2)
+        return "done"
+
+    _add_simple_tool(server, "slow_tool", slow_tool)
+
+    async def _runner():
+        first = asyncio.create_task(server.call_tool("slow_tool", {}))
+        for _ in range(100):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set()
+        with pytest.raises(ToolBusyError):
+            await server.call_tool("slow_tool", {})
+        release.set()
+        return await first
+
+    result = asyncio.run(_runner())
+    assert result[0].text == "done"

@@ -307,6 +307,24 @@ class RateLimiter:
 # with `watch=True` and the Prometheus range queries, both of which
 # have their own per-tool timeout config the operator can override.
 
+class ToolBusyError(Exception):
+    """Raised when every synchronous tool worker is already occupied.
+
+    A timed-out synchronous Kubernetes request cannot be safely killed by
+    Python. Keeping its slot occupied until it really finishes is deliberate:
+    it applies backpressure instead of allowing an unbounded backlog of
+    orphaned requests.
+    """
+
+    def __init__(self, max_concurrent_tools: int):
+        self.max_concurrent_tools = int(max_concurrent_tools)
+        super().__init__(
+            "server is busy: all "
+            f"{max_concurrent_tools} tool execution slot(s) are in use; "
+            "retry after an in-flight call completes"
+        )
+
+
 class ToolTimeoutError(Exception):
     """Raised when a tool call exceeds the configured per-call timeout."""
 

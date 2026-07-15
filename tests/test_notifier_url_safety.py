@@ -138,3 +138,15 @@ def test_notifier_with_file_scheme_rejected():
     err = notifier._validate_notifier(n, 0)
     assert err is not None
     assert "scheme 'file'" in err
+
+
+def test_notifier_with_literal_private_ip_is_rejected():
+    err = notifier._validate_notifier_url("https://127.0.0.1/hook")
+    assert err is not None
+    assert "not globally routable" in err
+
+
+def test_notifier_private_ip_can_be_explicitly_enabled(monkeypatch):
+    monkeypatch.setenv("K8S_MCP_NOTIFIER_ALLOW_PRIVATE_HOSTS", "true")
+    reset_settings_cache()
+    assert notifier._validate_notifier_url("https://127.0.0.1/hook") is None

@@ -26,14 +26,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 # Source registrations intentionally exclude server.py's built-in `ping` tool.
-EXPECTED_SOURCE_TOOL_COUNT = 89
-EXPECTED_MCP_TOOL_COUNT = 90
+EXPECTED_SOURCE_TOOL_COUNT = 90
+EXPECTED_MCP_TOOL_COUNT = 91
 DOC_TOOL_COUNT_MARKERS = {
-    "README.md": "**90 个**工具",
-    "README.en.md": "**90 tools**",
-    "docs/README.md": "**90 个工具**",
-    "docs/README.en.md": "**90 tools**",
-    "docs/tools-reference.md": "# 工具参考（90 个，按功能分类）",
+    "README.md": "**91 个**工具",
+    "README.en.md": "**91 tools**",
+    "docs/README.md": "**91 个工具**",
+    "docs/README.en.md": "**91 tools**",
+    "docs/tools-reference.md": "# 工具参考（91 个，按功能分类）",
 }
 
 

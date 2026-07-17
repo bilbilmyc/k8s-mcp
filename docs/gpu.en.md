@@ -2,7 +2,7 @@
 
 [中文](./gpu.md) · [Documentation](./README.en.md) · [RBAC template](../deploy/rbac/nvidia-gpu-read-only.yaml) · [Prometheus configuration](./env.en.md)
 
-`k8s-mcp` now provides eight **read-only** NVIDIA GPU tools for Kubernetes resource/scheduling diagnostics and live Prometheus/DCGM metric discovery. Resource tools discover the `nvidia.com/*` extended resources that are actually exposed instead of assuming a GPU SKU, MIG profile, or GPU Operator version. Metric tools first discover the DCGM metrics that exist in the target Prometheus, then allow custom metric names when required.
+`k8s-mcp` now provides nine **read-only** NVIDIA GPU tools for Kubernetes resource/scheduling diagnostics and live Prometheus/DCGM metric discovery. Resource tools discover the `nvidia.com/*` extended resources that are actually exposed instead of assuming a GPU SKU, MIG profile, or GPU Operator version. Metric tools first discover the DCGM metrics that exist in the target Prometheus, then allow custom metric names when required.
 
 > [!IMPORTANT]
 > Every `gpu_*` tool is always read-only. None installs, upgrades, or changes NVIDIA GPU Operator, Node labels, taints, MIG configuration, time-slicing, or workloads. `K8S_MCP_READ_ONLY=false` does **not** implicitly enable high-impact GPU administration.
@@ -93,6 +93,21 @@ gpu_workload_utilization(
 
 This tool reads the latest samples for one Pod using exact Prometheus `namespace` and `pod` labels, and displays GPU identity, container, and value. The selected exporter metric must carry Kubernetes Pod labels. If no series match, use `gpu_utilization_overview()` for Node/GPU-level data or check the DCGM Exporter Kubernetes label mapping.
 
+### 5. Historical utilization: use a bounded time window
+
+```text
+gpu_utilization_history()
+gpu_utilization_history(duration="6h", step="5m")
+gpu_utilization_history(
+  duration="1h",
+  step="1m",
+  namespace="ml",
+  pod_name="trainer-0",
+)
+```
+
+`gpu_utilization_history` uses a Prometheus range query to summarize sample count, minimum, average, maximum, and latest value for each GPU series instead of dumping every point. The window is capped at 7 days, the minimum step is 15 seconds, each series is limited to at most 1000 theoretical points, and at most 100 series can be rendered. Units still follow the selected exporter metric.
+
 ## Common diagnostic path
 
 ```mermaid
@@ -107,18 +122,19 @@ flowchart TD
     H --> I["gpu_metrics_catalog(): discover available DCGM metrics"]
     I --> J["gpu_utilization_overview(): inspect latest per-GPU samples"]
     J --> K["gpu_workload_utilization(): inspect Pod-attributed samples"]
+    K --> L["gpu_utilization_history(): confirm sustained idle or high load"]
 ```
 
 ## Scope and next steps
 
-This release provides live **instant** metric discovery and inspection, but not long-term trends, capacity forecasting, alert-rule changes, GPU Operator installation/upgrades, MIG/time-slicing changes, or DRA ResourceClaim writes.
+This release provides live **instant** metrics and bounded history summaries of up to 7 days, but not capacity forecasting, alert-rule changes, GPU Operator installation/upgrades, MIG/time-slicing changes, or DRA ResourceClaim writes.
 
 | Phase | Status | Planned capability | Safety boundary |
 |---|---|---|---|
 | GPU diagnostics foundation | ✅ Complete | Node, workload, Pending scheduling, and GPU Operator state diagnostics | Read-only Kubernetes API access |
 | Prometheus / DCGM instant observability | ✅ Complete | Metric discovery, latest per-GPU utilization, and Pod-attributed samples | Read-only PromQL instant queries |
-| Time series and capacity analysis | ⏭️ Next | `gpu_utilization_history`, `gpu_capacity_analyze`, and `gpu_idle_resources`, with bounded windows, steps, and returned series | PromQL range queries correlated with read-only Kubernetes resources |
+| Time series and capacity analysis | 🚧 Partially complete | `gpu_utilization_history` is available; `gpu_capacity_analyze` and `gpu_idle_resources` are next | Bounded PromQL range queries correlated with read-only Kubernetes resources |
 | MIG and DRA discovery | 🧭 Planned | MIG strategy/profile/resource summaries; ResourceClaim, DeviceClass, and ResourceSlice availability and binding state | Discovery and recommendations only; no CRD or Node configuration mutations |
 | GPU management actions | 🔒 Not enabled by default | GPU Operator lifecycle, MIG/time-slicing reconfiguration, and DRA writes | If ever added, require a dedicated switch independent of `K8S_MCP_READ_ONLY`, allowlists, a dry-run plan, and explicit confirmation |
 
-The next phase focuses on three questions: whether GPUs are persistently idle, whether requested capacity matches observed utilization, and whether capacity is fragmented. High-impact GPU management will never be enabled merely by `K8S_MCP_READ_ONLY=false`.
+The next phase correlates utilization history with Kubernetes allocatable resources and Pod limits to determine whether requested capacity matches observed utilization and whether capacity is fragmented. High-impact GPU management will never be enabled merely by `K8S_MCP_READ_ONLY=false`.

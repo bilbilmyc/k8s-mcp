@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from k8s_mcp.tools import nvidia_metrics as gpu_metrics
@@ -96,3 +98,84 @@ def test_gpu_workload_utilization_uses_exact_escaped_pod_labels(monkeypatch):
     assert 'pod="train\\"er"' in seen[0]
     assert "container" in report.lower()
     assert "94" in report
+
+
+
+def test_gpu_utilization_history_summarizes_bounded_range(monkeypatch):
+    captured = {}
+
+    def query(promql, start, end, step, prometheus_url=None):
+        captured.update(promql=promql, start=start, end=end, step=step, url=prometheus_url)
+        return [
+            {
+                "metric": {"Hostname": "gpu-1", "gpu": "0", "UUID": "GPU-a"},
+                "values": [[1, "10"], [2, "30"], [3, "20"]],
+            },
+            {
+                "metric": {"Hostname": "gpu-1", "gpu": "1", "UUID": "GPU-b"},
+                "values": [[1, "80"], [2, "100"]],
+            },
+        ]
+
+    monkeypatch.setattr(gpu_metrics, "_utc_now", lambda: datetime(2026, 7, 17, 4, 0, tzinfo=UTC))
+    monkeypatch.setattr(gpu_metrics, "_query_range", query)
+
+    report = gpu_metrics.gpu_utilization_history(duration="1h", step="5m", prometheus_url="http://prom:9090")
+
+    assert captured == {
+        "promql": "DCGM_FI_DEV_GPU_UTIL",
+        "start": "2026-07-17T03:00:00Z",
+        "end": "2026-07-17T04:00:00Z",
+        "step": "5m",
+        "url": "http://prom:9090",
+    }
+    assert "Series with finite samples: 2" in report
+    assert "GPU-b" in report
+    assert "90" in report
+    assert report.index("GPU-b") < report.index("GPU-a")
+
+
+def test_gpu_utilization_history_escapes_exact_workload_labels(monkeypatch):
+    seen = []
+
+    def query(promql, start, end, step, prometheus_url=None):
+        seen.append(promql)
+        return []
+
+    monkeypatch.setattr(gpu_metrics, "_query_range", query)
+    report = gpu_metrics.gpu_utilization_history(namespace="ml\\team", pod_name='train"er')
+
+    assert 'namespace="ml\\\\team"' in seen[0]
+    assert 'pod="train\\"er"' in seen[0]
+    assert "No finite GPU samples" in report
+
+
+def test_gpu_utilization_history_enforces_query_bounds():
+    with pytest.raises(ValueError, match="must not exceed 7d"):
+        gpu_metrics.gpu_utilization_history(duration="8d")
+    with pytest.raises(ValueError, match="at least 15s"):
+        gpu_metrics.gpu_utilization_history(step="10s")
+    with pytest.raises(ValueError, match="at most 1000 points"):
+        gpu_metrics.gpu_utilization_history(duration="7d", step="5m")
+    with pytest.raises(ValueError, match="namespace is required"):
+        gpu_metrics.gpu_utilization_history(pod_name="trainer")
+    with pytest.raises(ValueError, match="limit must be"):
+        gpu_metrics.gpu_utilization_history(limit=101)
+
+
+def test_gpu_utilization_history_handles_prometheus_error_and_nonfinite_series(monkeypatch):
+    monkeypatch.setattr(
+        gpu_metrics,
+        "_query_range",
+        lambda *args: (_ for _ in ()).throw(LookupError("no endpoint")),
+    )
+    unavailable = gpu_metrics.gpu_utilization_history()
+    assert "Prometheus metric query unavailable: no endpoint" in unavailable
+
+    monkeypatch.setattr(
+        gpu_metrics,
+        "_query_range",
+        lambda *args: [{"metric": {"gpu": "0"}, "values": [[1, "NaN"], [2, "Inf"]]}],
+    )
+    report = gpu_metrics.gpu_utilization_history()
+    assert "Skipped 1 series" in report

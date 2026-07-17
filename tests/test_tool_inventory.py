@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-EXPECTED_TOOL_COUNT = 90
+EXPECTED_TOOL_COUNT = 91
 EXPECTED_TOOLS: frozenset[str] = frozenset({
     "ping",
     # autoscale
@@ -85,6 +85,7 @@ EXPECTED_TOOLS: frozenset[str] = frozenset({
     "gpu_metrics_catalog",
     "gpu_utilization_overview",
     "gpu_workload_utilization",
+    "gpu_utilization_history",
     # notifier
     "notify",
     # pods

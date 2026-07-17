@@ -6,6 +6,12 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+### Added — bounded NVIDIA GPU utilization history (90 → 91 tools)
+
+- **`gpu_utilization_history`** — summarizes up to seven days of GPU metric history as sample count, minimum, average, maximum, and latest value per series.
+- Range queries enforce a minimum step, maximum point count, series render limit, validated metric identifiers, and exact escaped Pod/namespace label matchers.
+- Prometheus now exposes a structured internal `_query_range` helper so high-level tools do not parse human-readable output.
+
 ### Added — NVIDIA GPU Prometheus/DCGM observability (87 → 90 tools)
 
 - **`gpu_metrics_catalog`** — discovers metric names that actually exist in the selected Prometheus, rather than assuming a DCGM deployment or metric schema.
@@ -26,7 +32,7 @@ behavior changes bump the minor (we're pre-1.0).
 
 ### Safety
 
-All eight `gpu_*` tools remain read-only even when normal server mode has read/write/delete enabled. High-impact GPU administration (MIG, time-slicing, GPU Operator lifecycle, and DRA writes) is intentionally deferred behind a separate future safety gate.
+All nine `gpu_*` tools remain read-only even when normal server mode has read/write/delete enabled. High-impact GPU administration (MIG, time-slicing, GPU Operator lifecycle, and DRA writes) is intentionally deferred behind a separate future safety gate.
 
 
 ## [0.6.1] — 2026-07-11

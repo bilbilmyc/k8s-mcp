@@ -1,7 +1,7 @@
 [project]
 name = "k8s-mcp-bilbilmyc"
 version = "0.6.1"
-description = "Kubernetes MCP server for LLM agents — 90 tools covering CRUD on workloads/services/storage/RBAC, logs/events, Prometheus queries, NVIDIA GPU diagnostics, plus pod & deployment diagnosis / RBAC & NetworkPolicy & resource-usage analyzers / owner-chain explain."
+description = "Kubernetes MCP server for LLM agents — 91 tools covering CRUD on workloads/services/storage/RBAC, logs/events, Prometheus queries, NVIDIA GPU diagnostics, plus pod & deployment diagnosis / RBAC & NetworkPolicy & resource-usage analyzers / owner-chain explain."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [

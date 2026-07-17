@@ -679,6 +679,30 @@ def _query_instant(promql: str, base_url: str | None = None) -> list[dict]:
     return (payload.get("data") or {}).get("result") or []
 
 
+def _query_range(
+    promql: str,
+    start: str,
+    end: str,
+    step: str,
+    base_url: str | None = None,
+) -> list[dict]:
+    """Execute a range PromQL query and return the raw matrix result."""
+    settings = get_settings()
+    base = _resolve_base(base_url, settings)
+    payload = _prom_get(
+        "/api/v1/query_range",
+        {"query": promql, "start": start, "end": end, "step": step},
+        base,
+        settings.prometheus_bearer_token,
+    )
+    if payload.get("status") != "success":
+        raise ValueError(
+            f"Prometheus range query failed ({payload.get('errorType', '')}): "
+            f"{payload.get('error') or 'unknown error'}"
+        )
+    return (payload.get("data") or {}).get("result") or []
+
+
 def _extract_promql_metric_name(promql: str) -> str:
     """Return the bare metric name, anchoring on `name{` or `name[`."""
     m = re.search(r"([a-zA-Z_:][a-zA-Z0-9_:]*)(?=[\{\[])", promql)
@@ -881,23 +905,10 @@ def prometheus_query_range(
 
     See `prometheus_query` for error semantics.
     """
-    settings = get_settings()
-    base = _resolve_base(prometheus_url, settings)
-
-    payload = _prom_get(
-        "/api/v1/query_range",
-        {"query": promql, "start": start, "end": end, "step": step},
-        base,
-        settings.prometheus_bearer_token,
-    )
-
-    if payload.get("status") != "success":
-        err = payload.get("error") or "unknown error"
-        err_type = payload.get("errorType", "")
-        raise ValueError(f"Prometheus range query failed ({err_type}): {err}")
-
-    result = (payload.get("data") or {}).get("result") or []
+    result = _query_range(promql, start, end, step, prometheus_url)
     if not result:
+        settings = get_settings()
+        base = _resolve_base(prometheus_url, settings)
         diag = _diagnose_empty_promql(promql, base, settings.prometheus_bearer_token)
         return (
             f"(no data points for `{promql}` in [{start} → {end}] step={step}. "

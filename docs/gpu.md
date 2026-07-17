@@ -2,7 +2,7 @@
 
 [English](./gpu.en.md) · [文档首页](./README.md) · [RBAC 模板](../deploy/rbac/nvidia-gpu-read-only.yaml) · [Prometheus 配置](./env.md)
 
-`k8s-mcp` 当前提供 8 个**只读** NVIDIA GPU 工具，覆盖 Kubernetes 资源/调度诊断和 Prometheus/DCGM 实时指标发现。资源工具动态识别实际暴露的 `nvidia.com/*` 扩展资源，不假设固定 GPU 型号、MIG profile 或 GPU Operator 版本；指标工具则先发现 Prometheus 中真实存在的 DCGM 指标，再允许按需指定自定义指标名。
+`k8s-mcp` 当前提供 9 个**只读** NVIDIA GPU 工具，覆盖 Kubernetes 资源/调度诊断和 Prometheus/DCGM 实时指标发现。资源工具动态识别实际暴露的 `nvidia.com/*` 扩展资源，不假设固定 GPU 型号、MIG profile 或 GPU Operator 版本；指标工具则先发现 Prometheus 中真实存在的 DCGM 指标，再允许按需指定自定义指标名。
 
 > [!IMPORTANT]
 > 所有 `gpu_*` 工具始终只读：不会安装、升级或修改 NVIDIA GPU Operator，也不会修改节点标签、污点、MIG 配置、time-slicing 或工作负载。即使 `K8S_MCP_READ_ONLY=false`，也不会自动开放高影响 GPU 管理操作。
@@ -93,6 +93,21 @@ gpu_workload_utilization(
 
 该工具使用精确的 Prometheus `namespace` 和 `pod` 标签读取某个 Pod 的最新指标样本，展示 GPU identity、container 和数值。它要求 exporter 已将 Kubernetes Pod 标签附加到所选指标；如果没有匹配结果，请改用 `gpu_utilization_overview()` 查看 Node/GPU 层数据，或检查 DCGM Exporter 的 Kubernetes 标签映射。
 
+### 5. 历史利用率：使用有界时间窗口
+
+```text
+gpu_utilization_history()
+gpu_utilization_history(duration="6h", step="5m")
+gpu_utilization_history(
+  duration="1h",
+  step="1m",
+  namespace="ml",
+  pod_name="trainer-0",
+)
+```
+
+`gpu_utilization_history` 使用 Prometheus range query 汇总每个 GPU series 的样本数、最小值、平均值、最大值和最新值，不直接倾倒全部时间点。查询窗口最大为 7 天、步长最小为 15 秒，并限制每个 series 最多 1000 个理论采样点和最多展示 100 个 series，避免 Agent 产生无界查询。数值单位仍由所选 exporter metric 决定。
+
 ## 常见排障路径
 
 ```mermaid
@@ -107,18 +122,19 @@ flowchart TD
     H --> I["gpu_metrics_catalog()：发现可用 DCGM 指标"]
     I --> J["gpu_utilization_overview()：查看每 GPU 最新样本"]
     J --> K["gpu_workload_utilization()：检查 Pod 归属指标"]
+    K --> L["gpu_utilization_history()：确认持续空闲或持续高负载"]
 ```
 
 ## 边界与后续路线
 
-本版本提供实时**瞬时**指标发现与查看，但不做长期趋势、容量预测、告警规则变更、GPU Operator 安装/升级、MIG / time-slicing 变更或 DRA ResourceClaim 写入。
+本版本提供实时**瞬时**指标与最长 7 天的有界历史汇总，但不做容量预测、告警规则变更、GPU Operator 安装/升级、MIG / time-slicing 变更或 DRA ResourceClaim 写入。
 
 | 阶段 | 状态 | 计划能力 | 安全边界 |
 |---|---|---|---|
 | GPU 基础诊断 | ✅ 已完成 | 节点、工作负载、Pending 调度、GPU Operator 状态综合诊断 | Kubernetes API 只读 |
 | Prometheus / DCGM 瞬时观测 | ✅ 已完成 | 指标发现、每 GPU 最新利用率、Pod 归属指标 | PromQL instant query，只读 |
-| 时间序列与容量分析 | ⏭️ 下一阶段 | `gpu_utilization_history`、`gpu_capacity_analyze`、`gpu_idle_resources`；限制查询窗口、步长和返回 series 数 | PromQL range query + Kubernetes 资源只读关联 |
+| 时间序列与容量分析 | 🚧 部分完成 | 已提供 `gpu_utilization_history`；下一步实现 `gpu_capacity_analyze`、`gpu_idle_resources` | 有界 PromQL range query + Kubernetes 资源只读关联 |
 | MIG 与 DRA 发现 | 🧭 规划中 | MIG strategy/profile/资源汇总；ResourceClaim、DeviceClass、ResourceSlice 可用性与绑定状态 | 仅发现与建议，不修改 CRD 或节点配置 |
 | GPU 管理操作 | 🔒 默认不实现 | GPU Operator 生命周期、MIG/time-slicing 重配置、DRA 写入 | 若未来提供，必须使用独立于 `K8S_MCP_READ_ONLY` 的专用开关、allowlist、dry-run 计划和显式确认 |
 
-下一阶段优先解决“GPU 是否长期空闲、请求量是否与真实利用率匹配、容量是否被碎片化”三个问题。任何高风险 GPU 管理能力都不会仅由 `K8S_MCP_READ_ONLY=false` 自动启用。
+下一阶段优先把历史利用率与 Kubernetes allocatable / Pod limits 关联，解决“请求量是否与真实利用率匹配、容量是否被碎片化”两个问题。任何高风险 GPU 管理能力都不会仅由 `K8S_MCP_READ_ONLY=false` 自动启用。

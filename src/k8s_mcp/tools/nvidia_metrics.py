@@ -9,13 +9,18 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..formatters import short_table
-from .prometheus import _query_instant
+from .prometheus import _query_instant, _query_range
 
 _METRIC_NAME_RE = re.compile(r"[a-zA-Z_:][a-zA-Z0-9_:]*\Z")
 _METRIC_PREFIX_RE = re.compile(r"[a-zA-Z_:][a-zA-Z0-9_:]*\Z")
+_DURATION_RE = re.compile(r"([1-9][0-9]*)([smhd])\Z")
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_MAX_HISTORY_SECONDS = 7 * 86400
+_MAX_HISTORY_POINTS = 1000
 
 
 def _validated_metric_name(metric_name: str) -> str:
@@ -258,7 +263,142 @@ def gpu_workload_utilization(
     return "\n".join(lines)
 
 
+def _duration_seconds(value: str, field: str) -> int:
+    match = _DURATION_RE.fullmatch(value)
+    if not match:
+        raise ValueError(f"{field} must be an integer Prometheus duration using s, m, h, or d")
+    return int(match.group(1)) * _DURATION_UNITS[match.group(2)]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _rfc3339(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _history_stats(values: list[Any]) -> tuple[int, float, float, float, float] | None:
+    numbers: list[float] = []
+    for point in values:
+        if not isinstance(point, list | tuple) or len(point) < 2:
+            continue
+        try:
+            number = float(point[1])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            numbers.append(number)
+    if not numbers:
+        return None
+    return len(numbers), min(numbers), sum(numbers) / len(numbers), max(numbers), numbers[-1]
+
+
+def gpu_utilization_history(
+    duration: str = "1h",
+    step: str = "5m",
+    metric_name: str = "DCGM_FI_DEV_GPU_UTIL",
+    namespace: str | None = None,
+    pod_name: str | None = None,
+    limit: int = 20,
+    prometheus_url: str | None = None,
+) -> str:
+    """📉 NVIDIA GPU UTILIZATION HISTORY — summarize a bounded Prometheus time window.
+
+    Args:
+        duration: lookback duration using an integer plus `s`, `m`, `h`, or `d`.
+            The maximum window is 7d.
+        step: Prometheus range-query resolution. It must be at least 15s and
+            produce no more than 1000 points per series.
+        metric_name: GPU utilization metric to query.
+        namespace: optional exact Prometheus `namespace` label filter.
+        pod_name: optional exact `pod` label filter; requires `namespace`.
+        limit: maximum series rendered (1-100, default 20).
+        prometheus_url: optional explicit Prometheus URL.
+
+    The tool is read-only and returns per-series sample count, minimum,
+    average, maximum, and latest finite values instead of dumping every point.
+    Units follow the selected exporter metric.
+    """
+    metric_name = _validated_metric_name(metric_name)
+    duration_seconds = _duration_seconds(duration, "duration")
+    step_seconds = _duration_seconds(step, "step")
+    if duration_seconds > _MAX_HISTORY_SECONDS:
+        raise ValueError("duration must not exceed 7d")
+    if step_seconds < 15:
+        raise ValueError("step must be at least 15s")
+    if duration_seconds / step_seconds > _MAX_HISTORY_POINTS:
+        raise ValueError("duration/step must produce at most 1000 points per series")
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    if pod_name and not namespace:
+        raise ValueError("namespace is required when pod_name is set")
+    if namespace == "":
+        raise ValueError("namespace must not be empty")
+    if pod_name == "":
+        raise ValueError("pod_name must not be empty")
+
+    matchers = []
+    if namespace is not None:
+        matchers.append(f'namespace="{_promql_string(namespace)}"')
+    if pod_name is not None:
+        matchers.append(f'pod="{_promql_string(pod_name)}"')
+    selector = "{" + ",".join(matchers) + "}" if matchers else ""
+    promql = metric_name + selector
+    end_time = _utc_now()
+    start_time = end_time - timedelta(seconds=duration_seconds)
+    start = _rfc3339(start_time)
+    end = _rfc3339(end_time)
+
+    try:
+        series = _query_range(promql, start, end, step, prometheus_url)
+    except (LookupError, ValueError) as exc:
+        return _prometheus_unavailable("NVIDIA GPU utilization history", exc)
+
+    rows = []
+    skipped = 0
+    for result in series:
+        stats = _history_stats(result.get("values") or [])
+        if stats is None:
+            skipped += 1
+            continue
+        samples, minimum, average, maximum, latest = stats
+        labels = result.get("metric") or {}
+        rows.append(
+            {
+                "GPU": _render_gpu_identity(_gpu_series_identity(labels)),
+                "POD": str(labels.get("pod") or "-"),
+                "CONTAINER": str(labels.get("container") or labels.get("container_name") or "-"),
+                "SAMPLES": str(samples),
+                "MIN": f"{minimum:.3g}",
+                "AVG": f"{average:.3g}",
+                "MAX": f"{maximum:.3g}",
+                "LATEST": f"{latest:.3g}",
+            }
+        )
+    rows.sort(key=lambda row: (-float(row["AVG"]), row["GPU"], row["POD"], row["CONTAINER"]))
+    shown = rows[:limit]
+    lines = [
+        "## NVIDIA GPU utilization history",
+        f"Metric: `{metric_name}` | Window: {start} → {end} | Step: {step}",
+        f"Series with finite samples: {len(rows)} | Shown: {len(shown)}",
+        "Values are raw exporter samples summarized over the selected window.",
+        short_table(shown, ["GPU", "POD", "CONTAINER", "SAMPLES", "MIN", "AVG", "MAX", "LATEST"]),
+    ]
+    if not rows:
+        lines.append(
+            "No finite GPU samples were returned. Confirm the metric and labels with `gpu_metrics_catalog()` "
+            "or inspect current samples with `gpu_utilization_overview()`."
+        )
+    if len(rows) > len(shown):
+        lines.append(f"Truncated at limit={limit}; {len(rows) - len(shown)} additional series omitted.")
+    if skipped:
+        lines.append(f"Skipped {skipped} series without finite numeric samples.")
+    return "\n".join(lines)
+
+
 def register(mcp) -> None:
     mcp.tool()(gpu_metrics_catalog)
     mcp.tool()(gpu_utilization_overview)
     mcp.tool()(gpu_workload_utilization)
+    mcp.tool()(gpu_utilization_history)

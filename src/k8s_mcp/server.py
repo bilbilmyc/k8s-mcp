@@ -360,6 +360,7 @@ def _register_tools(mcp: FastMCP) -> None:
         node_ops,
         notifier,
         nvidia_gpu,
+        nvidia_metrics,
         pods,
         prometheus,
         rbac,
@@ -397,6 +398,7 @@ def _register_tools(mcp: FastMCP) -> None:
     rbac.register(mcp)
     networkpolicy.register(mcp)
     nvidia_gpu.register(mcp)
+    nvidia_metrics.register(mcp)
     resource_usage.register(mcp)
     serviceaccount.register(mcp)
     storage.register(mcp)

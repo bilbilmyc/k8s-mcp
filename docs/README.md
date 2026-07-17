@@ -2,7 +2,7 @@
 
 [English](./README.en.md) · [项目首页](../README.md)
 
-这里按“先安全、再连接、最后授权”的顺序组织文档。当前项目公开 **87 个工具**；工具总数、首页和发版检查由 CI 同步校验。
+这里按“先安全、再连接、最后授权”的顺序组织文档。当前项目公开 **90 个工具**；工具总数、首页和发版检查由 CI 同步校验。
 
 ## 新用户路径
 
@@ -20,7 +20,7 @@
 | ServiceAccount 与最小 RBAC | [deployment.md](./deployment.md) | [deployment.en.md](./deployment.en.md) |
 | 全部 `K8S_MCP_*` 变量 | [env.md](./env.md) | [env.en.md](./env.en.md) |
 | NVIDIA GPU / AI 工作负载 | [gpu.md](./gpu.md) | [gpu.en.md](./gpu.en.md) |
-| **87 个工具**完整签名 | [tools-reference.md](./tools-reference.md) | [tools-reference.md](./tools-reference.md) |
+| **90 个工具**完整签名 | [tools-reference.md](./tools-reference.md) | [tools-reference.md](./tools-reference.md) |
 | 重点工具与工作流 | [tools.md](./tools.md) | — |
 | Python 直接调用 | [usage.md](./usage.md) | — |
 | 示例与排障 | [examples.md](./examples.md) / [troubleshooting.md](./troubleshooting.md) | — |

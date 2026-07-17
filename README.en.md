@@ -13,7 +13,7 @@
 
 </div>
 
-`k8s-mcp` exposes Kubernetes operations to Claude, Cursor, Cline, Cherry Studio, and other MCP clients. It currently provides **87 tools** for resource inspection, logs and events, workload delivery, RBAC/NetworkPolicy analysis, Prometheus, notifications, cluster diagnostics, and NVIDIA GPU operations.
+`k8s-mcp` exposes Kubernetes operations to Claude, Cursor, Cline, Cherry Studio, and other MCP clients. It currently provides **90 tools** for resource inspection, logs and events, workload delivery, RBAC/NetworkPolicy analysis, Prometheus, notifications, cluster diagnostics, and NVIDIA GPU operations.
 
 > [!IMPORTANT]
 > **Read, write, and delete are enabled by default.** Set `K8S_MCP_READ_ONLY=true` explicitly for audit, rehearsal, or diagnostic sessions. Production writes should still use `K8S_MCP_NAMESPACE_ALLOWLIST` and least-privilege RBAC.
@@ -83,7 +83,7 @@ For ordinary write access, still scope it with `K8S_MCP_NAMESPACE_ALLOWLIST=stag
 | Generic resources | `list_resources`, `get_resource`, `apply_yaml`, `diff_resource`, `delete_resource` |
 | Security and networking | `whoami`, `analyze_rbac`, `analyze_networkpolicy`, `audit_secrets` |
 | Observability | `top_pods`, `top_nodes`, `prometheus_query`, `find_prometheus_service` |
-| NVIDIA GPU / AI operations | `gpu_cluster_overview`, `gpu_diagnose`, `gpu_node_inspect`, `gpu_workload_inspect`, `gpu_pending_workloads` |
+| NVIDIA GPU / AI operations | `gpu_cluster_overview`, `gpu_diagnose`, `gpu_node_inspect`, `gpu_workload_inspect`, `gpu_pending_workloads`, `gpu_metrics_catalog`, `gpu_utilization_overview`, `gpu_workload_utilization` |
 | Notifications and bootstrap | `notify`, `bootstrap_metrics_server`, `bootstrap_local_path_provisioner` |
 
 See the [tool catalog](./docs/tools-reference.md) for complete signatures and grouping.

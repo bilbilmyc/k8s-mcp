@@ -6,6 +6,14 @@ behavior changes bump the minor (we're pre-1.0).
 
 ## [Unreleased]
 
+### Added — NVIDIA GPU Prometheus/DCGM observability (87 → 90 tools)
+
+- **`gpu_metrics_catalog`** — discovers metric names that actually exist in the selected Prometheus, rather than assuming a DCGM deployment or metric schema.
+- **`gpu_utilization_overview`** — reads latest per-GPU utilization and framebuffer samples, with configurable metric names and safe raw-unit reporting.
+- **`gpu_workload_utilization`** — reads latest GPU metric samples attributed to one exact Kubernetes Pod when exporter labels are available.
+- **`nvidia_metrics.py`** — keeps Prometheus/DCGM concerns separate from Kubernetes GPU diagnostics while preserving the common `register(mcp)` module contract.
+- **`docs/gpu.md` / `docs/gpu.en.md`** — expanded synchronized Prometheus/DCGM setup, discovery workflow, and scope guidance.
+
 ### Added — NVIDIA GPU read-only diagnostics (82 → 87 tools)
 
 - **`gpu_cluster_overview`** — dynamically discovers NVIDIA Node capacity / allocatable `nvidia.com/*` resources, active GPU Pod limits, and optional GPU Operator ClusterPolicy state.
@@ -18,7 +26,7 @@ behavior changes bump the minor (we're pre-1.0).
 
 ### Safety
 
-All five `gpu_*` tools remain read-only even when normal server mode has read/write/delete enabled. High-impact GPU administration (MIG, time-slicing, GPU Operator lifecycle, and DRA writes) is intentionally deferred behind a separate future safety gate.
+All eight `gpu_*` tools remain read-only even when normal server mode has read/write/delete enabled. High-impact GPU administration (MIG, time-slicing, GPU Operator lifecycle, and DRA writes) is intentionally deferred behind a separate future safety gate.
 
 
 ## [0.6.1] — 2026-07-11

@@ -2,7 +2,7 @@
 
 [中文](./README.md) · [Project home](../README.en.md)
 
-The documentation follows a deliberate order: secure the server, connect it, then grant only the authorization needed. The project exposes **87 tools**; CI keeps this inventory, the home pages, and release checks aligned.
+The documentation follows a deliberate order: secure the server, connect it, then grant only the authorization needed. The project exposes **90 tools**; CI keeps this inventory, the home pages, and release checks aligned.
 
 ## New-user path
 
@@ -20,7 +20,7 @@ The documentation follows a deliberate order: secure the server, connect it, the
 | ServiceAccount and least-privilege RBAC | [deployment.md](./deployment.md) | [deployment.en.md](./deployment.en.md) |
 | Every `K8S_MCP_*` variable | [env.md](./env.md) | [env.en.md](./env.en.md) |
 | NVIDIA GPU / AI workloads | [gpu.md](./gpu.md) | [gpu.en.md](./gpu.en.md) |
-| Full **87 tools** signature catalog | [tools-reference.md](./tools-reference.md) | [tools-reference.md](./tools-reference.md) |
+| Full **90 tools** signature catalog | [tools-reference.md](./tools-reference.md) | [tools-reference.md](./tools-reference.md) |
 | Deep dives and workflows | [tools.md](./tools.md) | — |
 | Direct Python calls | [usage.md](./usage.md) | — |
 | Examples and troubleshooting | [examples.md](./examples.md) / [troubleshooting.md](./troubleshooting.md) | — |

@@ -13,7 +13,7 @@
 
 </div>
 
-`k8s-mcp` 将 Kubernetes 运维能力以 MCP 工具暴露给 Claude、Cursor、Cline、Cherry Studio 等 Agent。当前提供 **87 个**工具，覆盖资源检索、日志与事件、工作负载交付、RBAC/NetworkPolicy 分析、Prometheus、告警通知、集群诊断与 NVIDIA GPU 运维。
+`k8s-mcp` 将 Kubernetes 运维能力以 MCP 工具暴露给 Claude、Cursor、Cline、Cherry Studio 等 Agent。当前提供 **90 个**工具，覆盖资源检索、日志与事件、工作负载交付、RBAC/NetworkPolicy 分析、Prometheus、告警通知、集群诊断与 NVIDIA GPU 运维。
 
 > [!IMPORTANT]
 > **默认允许读写与删除。** 需要审计、演练或诊断时，显式设置 `K8S_MCP_READ_ONLY=true` 进入只读模式。生产写入仍建议配置 `K8S_MCP_NAMESPACE_ALLOWLIST` 与最小 RBAC。
@@ -83,7 +83,7 @@ k8s-mcp doctor
 | 通用资源操作 | `list_resources`、`get_resource`、`apply_yaml`、`diff_resource`、`delete_resource` |
 | 安全与网络 | `whoami`、`analyze_rbac`、`analyze_networkpolicy`、`audit_secrets` |
 | 可观测性 | `top_pods`、`top_nodes`、`prometheus_query`、`find_prometheus_service` |
-| NVIDIA GPU / AI 运维 | `gpu_cluster_overview`、`gpu_diagnose`、`gpu_node_inspect`、`gpu_workload_inspect`、`gpu_pending_workloads` |
+| NVIDIA GPU / AI 运维 | `gpu_cluster_overview`、`gpu_diagnose`、`gpu_node_inspect`、`gpu_workload_inspect`、`gpu_pending_workloads`、`gpu_metrics_catalog`、`gpu_utilization_overview`、`gpu_workload_utilization` |
 | 通知与基础能力 | `notify`、`bootstrap_metrics_server`、`bootstrap_local_path_provisioner` |
 
 完整签名和按功能分类的目录见[工具参考](./docs/tools-reference.md)。

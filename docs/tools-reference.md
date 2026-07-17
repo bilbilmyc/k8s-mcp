@@ -1,4 +1,4 @@
-# 工具参考（87 个，按功能分类）
+# 工具参考（90 个，按功能分类）
 
 > 这是**完整目录**——每个工具一行签名，按"读 / 写 / 删"分组。
 > 详细使用说明（陷阱、流程、为什么这么设计）见 [tools.md](./tools.md)。
@@ -45,6 +45,9 @@
 - `gpu_workload_inspect(name, namespace="default", kind="Pod")` — Pod / Deployment / Job 的 GPU limits、节点放置和调度器裁决
 - `gpu_pending_workloads(namespace=None, limit=50)` — 带 `nvidia.com/*` limits 的 Pending Pod 及其 `Unschedulable` 原因
 - `gpu_diagnose(operator_namespace="gpu-operator")` — GPU 节点、ClusterPolicy、GPU Operator Pod 与 Pending GPU workload 的一键只读诊断
+- `gpu_metrics_catalog(metric_prefix="DCGM_", limit=100, prometheus_url=None)` — 从 Prometheus 发现真实存在的 DCGM / GPU 指标及其 series 数
+- `gpu_utilization_overview(utilization_metric="DCGM_FI_DEV_GPU_UTIL", memory_used_metric="DCGM_FI_DEV_FB_USED", memory_total_metric="DCGM_FI_DEV_FB_TOTAL", prometheus_url=None)` — 每 GPU 最新利用率与显存原始指标概览
+- `gpu_workload_utilization(pod_name, namespace="default", metric_name="DCGM_FI_DEV_GPU_UTIL", prometheus_url=None)` — 按 `namespace` / `pod` 标签读取一个 Pod 的 GPU 指标样本
 - `analyze_networkpolicy(namespace, pod=None)` — 🔍 NetworkPolicy 只读连通性 / 覆盖分析器，闭合 `create_networkpolicy` 的验证环。`pod=` 视图评估 `matchLabels` + `matchExpressions`，列出每个 selecting policy 的 ingress/egress 规则（peers + ports），输出每方向实际姿态（selecting policy 列出该 `policyType` → `🔒 default-deny`，否则 `🔓 default-allow`）；`namespace=` 视图是 coverage 扫描：每个 pod 的 in/out 姿态 + 暴露面（无 policy 选中的 pod）+ policy 清单（deny-all 标记）。声明的策略图，是否真正生效要看 CNI 插件
 - `explain_pod(namespace, name)` — 🧭 Pod top-down 看相：沿 `ownerReferences` 爬到顶层 controller（Deployment / StatefulSet / DaemonSet / Job），同顶层 controller 的 sibling pods 列表（用 pod-template labels 查），加上 Pod spec 关键字段（node / serviceAccount / 容器 image）。owner 链中途炸（CRD 缺失/对象已删）会显示断点不抛异常。与 `diagnose_pod` 互补（那个关注运行时；这个关注静态归属 + 调度布局）
 - `analyze_resource_usage(namespace="default", kind="Pod", mode="missing_requests")` — 📊 静态 requests/limits 审计：扫 namespace 找 requests/limits 问题。`mode=` 三选 — `missing_requests`（容器无 requests，Burstable QoS 可被驱逐）/ `missing_limits`（容器无 limits，CPU 无上限）/ `inconsistent`（limits < requests，scheduler 静默改回 requests，manifest 大概率错的）；`kind=` 为 Deployment/StatefulSet/DaemonSet 时扫 pod template 容器；`kind=Pod` 跳过 workload-owned pod（避免重复）只看孤儿 pod。配合 `diagnose_pod`（运行时）和 `cluster_health_snapshot`（广度）使用，这个给静态卫生分

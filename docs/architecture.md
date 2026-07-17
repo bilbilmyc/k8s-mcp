@@ -38,6 +38,8 @@ src/k8s_mcp/
     ├── diagnostics.py   # diagnose_pod + diagnose_deployment（一键深度体检）
     ├── explain.py       # explain_pod（owner 链 + siblings + spec）
     ├── resource_usage.py # analyze_resource_usage（requests/limits 审计）
+    ├── nvidia_gpu.py # NVIDIA GPU 节点、调度与 Operator 只读诊断
+    ├── nvidia_metrics.py # Prometheus/DCGM GPU 指标发现与瞬时观测
     └── notifier.py   # notify 推送 webhook
 }
 ```
@@ -55,7 +57,7 @@ src/k8s_mcp/
 
 每个 `tools/*.py` 模块暴露一个 `register(mcp)` 函数。新增工具模块只要在
 `server.py` 的 `_register_tools` 里 import + 调用一次，**不需要**改其他模块。
-87 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
+90 个工具的注册入口集中在一处，新增模块不会让 `server.py` 增长太多。
 
 ### 配置 + 守门分层
 

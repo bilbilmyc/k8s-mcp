@@ -1,8 +1,7 @@
 # Changelog
 
 All notable changes to k8s-mcp are documented here. Versions follow
-[Semantic Versioning](https://semver.org/) — backwards-incompatible tool
-behavior changes bump the minor (we're pre-1.0).
+[Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 

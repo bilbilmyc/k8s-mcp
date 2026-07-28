@@ -5,6 +5,8 @@ All notable changes to k8s-mcp are documented here. Versions follow
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-07-28
+
 ### Added — bounded NVIDIA GPU utilization history (90 → 91 tools)
 
 - **`gpu_utilization_history`** — summarizes up to seven days of GPU metric history as sample count, minimum, average, maximum, and latest value per series.
@@ -557,3 +559,4 @@ Net result: a safer production posture without changing any of the
 [0.5.3]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.2...v0.5.3
 [0.6.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.3...v0.6.0
 [0.6.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.6.0...v0.6.1
+[1.0.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.6.1...v1.0.0

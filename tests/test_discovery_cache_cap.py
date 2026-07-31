@@ -18,6 +18,8 @@ Three production guards live here:
 from __future__ import annotations
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -60,6 +62,61 @@ def test_small_schema_is_cached(monkeypatch):
     b = discovery._get_openapi_schema()
     assert a == b == {"Pod": {"type": "object"}}
     assert call_count["n"] == 1, "second call within TTL should hit the cache"
+
+
+def test_concurrent_first_use_fetches_schema_once(monkeypatch):
+    call_count = {"n": 0}
+
+    def _slow_fetch():
+        call_count["n"] += 1
+        time.sleep(0.02)
+        return _fake_spec({"Pod": {"type": "object"}})
+
+    monkeypatch.setattr(discovery, "_fetch_openapi_spec", _slow_fetch)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _: discovery._get_openapi_schema(), range(16)))
+
+    assert all(result == {"Pod": {"type": "object"}} for result in results)
+    assert call_count["n"] == 1
+
+
+def test_concurrent_oversized_schema_is_single_flight_but_not_cached(monkeypatch):
+    call_count = {"n": 0}
+    big_schema = {
+        "Huge": {
+            "description": "x" * (discovery._OPENAPI_CACHE_MAX_BYTES + 1),
+        },
+    }
+
+    def _slow_fetch():
+        call_count["n"] += 1
+        time.sleep(0.02)
+        return _fake_spec(big_schema)
+
+    monkeypatch.setattr(discovery, "_fetch_openapi_spec", _slow_fetch)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _: discovery._get_openapi_schema(), range(8)))
+
+    assert all(result is big_schema for result in results)
+    assert call_count["n"] == 1
+    assert discovery._openapi_cache is None
+
+
+def test_cache_is_invalidated_when_kubernetes_client_identity_changes(monkeypatch):
+    identity = {"value": ("cluster-a",)}
+    call_count = {"n": 0}
+
+    monkeypatch.setattr(discovery, "client_cache_key", lambda: identity["value"])
+
+    def _fetch():
+        call_count["n"] += 1
+        return _fake_spec({identity["value"][0]: {"type": "object"}})
+
+    monkeypatch.setattr(discovery, "_fetch_openapi_spec", _fetch)
+    assert set(discovery._get_openapi_schema()) == {"cluster-a"}
+    identity["value"] = ("cluster-b",)
+    assert set(discovery._get_openapi_schema()) == {"cluster-b"}
+    assert call_count["n"] == 2
 
 
 # ---------- size cap: oversized schema is not cached -----------------------

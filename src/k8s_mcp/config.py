@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     # 日志与输出 / Logging / output
     log_level: str = "INFO"
-    default_tail_lines: int = 100
+    default_tail_lines: int = Field(default=100, ge=1, le=10_000)
 
     # 认证模式 A：apiserver URL + token / Auth mode A: apiserver URL + token
     api_server: str | None = None
@@ -79,9 +79,9 @@ class Settings(BaseSettings):
     prometheus_url: str | None = None
     prometheus_bearer_token: str | None = None
     # 发现侧 namespace 白名单。None（默认）= 扫全集群；设置后，
-    # `find_prometheus_service()` 与 `_resolve_prometheus_url()` 的宽
-    # 扫描 fallback 都只扫这些 namespace。在多租户 / 大量 ns 的集群上
-    # 用它限制扫面成本 / 信息暴露面。与 `namespace_allowlist`（写守门）
+    # `find_prometheus_service()` 与 `_resolve_prometheus_url()` 的候选读取、
+    # fallback 都只扫这些 namespace。在多租户 / 大量 ns 的集群上
+    # 用它限制扫描成本 / 信息暴露面。与 `namespace_allowlist`（写守门）
     # 是两套独立的配置：前者是**读**侧白名单。
     prometheus_namespace_allowlist: list[str] | None = None
 
@@ -95,10 +95,8 @@ class Settings(BaseSettings):
     # Keep bootstrap inputs reproducible: never apply a moving `master` / `latest`
     # manifest by default. Air-gapped and enterprise installations can override
     # either URL with a reviewed internal mirror.
-    metrics_server_manifest_url: str = (
-        "https://github.com/kubernetes-sigs/metrics-server/releases/download/"
-        "v0.7.2/components.yaml"
-    )
+    # None delegates to metrics.py's version-pinned canonical default.
+    metrics_server_manifest_url: str | None = None
 
     # 通知 webhook 列表。JSON 字符串，每项是
     # `{"name": "<id>", "type": "feishu|slack|wecom|generic",
@@ -120,40 +118,38 @@ class Settings(BaseSettings):
     # when the MCP process is deliberately allowed to reach an internal hook.
     notifier_allow_private_hosts: bool = False
 
-    @field_validator("namespace_allowlist", mode="before")
+    @field_validator(
+        "namespace_allowlist",
+        "prometheus_namespace_allowlist",
+        "notifier_url_allowlist",
+        mode="before",
+    )
     @classmethod
     def _split_allowlist(cls, v: Any) -> list[str] | None:
-        """解析逗号分隔的环境变量值；空串视作 None。
+        """Parse comma-separated lists once, preserving first-seen order.
 
-        中文说明：
-        允许通过 `K8S_MCP_NAMESPACE_ALLOWLIST=default,app,prod` 这种
-        逗号分隔写法注入列表；空字符串等价于未设置（None = 不限制）。
+        Empty strings mean unset. Non-empty strings that contain no actual
+        values (for example `,`) are rejected because silently converting a
+        typo to an unrestricted namespace policy would be unsafe.
         """
         if v is None or v == "":
             return None
         if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
+            items = list(dict.fromkeys(s.strip() for s in v.split(",") if s.strip()))
+            if not items:
+                raise ValueError("comma-separated allowlist must contain at least one value")
+            return items
         return v
 
-    @field_validator("prometheus_namespace_allowlist", mode="before")
+    @field_validator("log_level", mode="before")
     @classmethod
-    def _split_prom_allowlist(cls, v: Any) -> list[str] | None:
-        """与 `namespace_allowlist` 同形的逗号分隔解析（独立字段，独立的解析器）。"""
-        if v is None or v == "":
-            return None
-        if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
-        return v
-
-    @field_validator("notifier_url_allowlist", mode="before")
-    @classmethod
-    def _split_notifier_allowlist(cls, v: Any) -> list[str] | None:
-        """与 `namespace_allowlist` 同形的逗号分隔解析（独立字段，独立的解析器）。"""
-        if v is None or v == "":
-            return None
-        if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
-        return v
+    def _normalize_log_level(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        normalized = v.upper()
+        if normalized not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("log_level must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
+        return normalized
 
     def ns_allowed(self, namespace: str | None) -> bool:
         """返回该 namespace 是否允许写入。
@@ -172,12 +168,24 @@ class Settings(BaseSettings):
         return namespace in self.namespace_allowlist
 
 
+_runtime_settings: Settings | None = None
+
+
 @lru_cache
 def get_settings() -> Settings:
     """获取单例 Settings；结果会被 lru_cache 缓存，测试里要用 reset 清掉。"""
-    return Settings()
+    return _runtime_settings or Settings()
+
+
+def set_runtime_settings(settings: Settings) -> None:
+    """Install one Settings snapshot for the process-wide stdio server."""
+    global _runtime_settings
+    _runtime_settings = settings
+    get_settings.cache_clear()
 
 
 def reset_settings_cache() -> None:
     """清掉 Settings 单例缓存，方便测试改环境变量后重新加载。"""
+    global _runtime_settings
+    _runtime_settings = None
     get_settings.cache_clear()

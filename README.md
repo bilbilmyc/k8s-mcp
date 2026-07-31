@@ -35,13 +35,12 @@ k8s-mcp --help
 k8s-mcp doctor
 ```
 
-`doctor` 不会连接集群，也不会输出 token；它只显示脱敏后的运行策略。默认输出中 `read_only` 为 `false`。
+`doctor` 不会连接集群，也不会输出 token；它显示生效的默认值、认证来源、传输边界和配置警告。默认输出中 `read_only` 为 `false`。
 
 ### 2. 准备 Kubernetes 凭据
 
 ```bash
 export KUBECONFIG="$HOME/.kube/config"   # 已使用默认路径时可省略
-export K8S_MCP_READ_ONLY=false             # 默认值；可省略
 ```
 
 详细认证路径（kubeconfig、API Server token、in-cluster）见[快速开始](./docs/quickstart.md)。
@@ -53,9 +52,7 @@ export K8S_MCP_READ_ONLY=false             # 默认值；可省略
   "mcpServers": {
     "k8s": {
       "command": "k8s-mcp",
-      "args": ["serve"],
       "env": {
-        "K8S_MCP_READ_ONLY": "false",
         "KUBECONFIG": "/absolute/path/to/kubeconfig"
       }
     }
@@ -63,7 +60,7 @@ export K8S_MCP_READ_ONLY=false             # 默认值；可省略
 }
 ```
 
-不带 `serve` 参数也保持兼容：`k8s-mcp` 默认以 stdio 启动。客户端配置、Windows 路径和排障请看[快速开始](./docs/quickstart.md)。
+`k8s-mcp` 默认以 stdio 启动；`serve` 仅保留为显式别名。若客户端能访问默认 `~/.kube/config`，上面的 `env` 也可以省略。客户端配置、Windows 路径和排障请看[快速开始](./docs/quickstart.md)。
 
 ### 4. 必要时切换为只读模式
 

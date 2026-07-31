@@ -5,6 +5,20 @@ All notable changes to k8s-mcp are documented here. Versions follow
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `top_pods` / `top_nodes` no longer install metrics-server as a read side effect. They retain the metrics-server → Prometheus read cascade and recommend the explicit `bootstrap_metrics_server` tool when both paths fail.
+- `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST` is now a strict discovery boundary: an explicit `find_prometheus_service(namespace=...)` outside the allowlist is rejected without an API request.
+- Invalid log levels, comma-only allowlists, and `K8S_MCP_DEFAULT_TAIL_LINES` values outside 1–10000 now fail configuration validation instead of being accepted silently.
+
+### Changed — configuration and runtime performance
+
+- Kubernetes calls now share a thread-safe `ApiClient` and `DynamicClient`; direct API-server/token authentication is honored by Prometheus and metrics tools instead of falling back to the SDK global configuration.
+- The default 5s connect / 30s read timeout is injected into real SDK requests, and the reusable HTTP pool is sized automatically from `MAX_CONCURRENT_TOOLS`.
+- Prometheus namespace allowlists now issue namespaced Service lists instead of downloading every Service and filtering client-side. Negative discovery results expire after 30 seconds.
+- OpenAPI discovery supports both Kubernetes 29 and 36 client call shapes, prefers the one-request aggregate v2 schema, falls back to merged v3 documents, and single-flights concurrent cache misses.
+- Minimal client examples omit redundant `serve` and `READ_ONLY=false` settings. `doctor` now reports the detected auth source, transport defaults, and actionable warnings without exposing credentials.
+
 ## [1.0.0] — 2026-07-28
 
 ### Added — bounded NVIDIA GPU utilization history (90 → 91 tools)

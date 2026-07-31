@@ -6,8 +6,8 @@
 
 | 环境 | MCP 配置 | Kubernetes 身份 |
 | --- | --- | --- |
-| 开发/日常运维 | `READ_ONLY=false`（默认） | 具备所需写权限的受限身份 |
-| staging 受限写入 | `READ_ONLY=false` + `NAMESPACE_ALLOWLIST=staging` | 仅 `staging` 的 RoleBinding |
+| 开发/日常运维 | 默认策略（无需设置 `READ_ONLY=false`） | 具备所需写权限的受限身份 |
+| staging 受限写入 | `NAMESPACE_ALLOWLIST=staging` | 仅 `staging` 的 RoleBinding |
 | 审计/诊断 | `READ_ONLY=true` | 只读 ServiceAccount 或个人只读 kubeconfig |
 
 ## 快速部署模板
@@ -24,28 +24,27 @@ kubectl apply -f deploy/rbac/namespace-operator.yaml
 > [!CAUTION]
 > 模板是起点，不是“万能生产权限”。不要把 `cluster-admin` 绑定给 MCP ServiceAccount，也不要为了通过一次 `Forbidden` 就扩大到 `*`。
 
-## in-cluster 配置示例
+## in-cluster stdio 客户端片段
+
+stdio server 必须由同一容器内的 MCP 客户端作为子进程启动；下面是合并到 Agent / MCP 客户端 Pod 的认证片段，不是可独立访问的远程服务：
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: k8s-mcp
+  name: your-agent
   namespace: ops
 spec:
   serviceAccountName: k8s-mcp-reader
   containers:
-    - name: server
-      image: your-registry/k8s-mcp:tag
-      command: ["k8s-mcp", "serve"]
+    - name: agent
+      image: your-registry/agent-with-k8s-mcp:tag
       env:
         - name: K8S_MCP_READ_ONLY
-          value: "false"
-        - name: K8S_MCP_MAX_CONCURRENT_TOOLS
-          value: "4"
+          value: "true"
 ```
 
-远程 MCP transport 还需网络层认证、TLS、网络策略、审计和请求大小限制；本仓库默认 transport 是 stdio。
+客户端在该容器内用 `command: k8s-mcp` 启动子进程。若要独立远程部署，需先实现远程 MCP transport，并补齐认证、TLS、网络策略、审计和请求大小限制；本仓库当前只提供 stdio。
 
 ## 上线前检查
 

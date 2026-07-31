@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -35,6 +36,7 @@ from typing import Any
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
+from ..client import client_cache_key, get_api_client
 from ..config import Settings, get_settings
 from ..formatters import short_table
 
@@ -58,7 +60,13 @@ _PROM_CANDIDATES: list[tuple[str, str]] = [
 ]
 
 _DISCOVERY_CACHE: str | None = None
+_DISCOVERY_CACHE_AT: float = 0.0
+_DISCOVERY_CACHE_KEY: tuple | None = None
 _DISCOVERY_TRIED: bool = False
+_DISCOVERY_FAILED_AT: float = 0.0
+_DISCOVERY_POSITIVE_TTL_SECONDS = 300.0
+_DISCOVERY_NEGATIVE_TTL_SECONDS = 30.0
+_DISCOVERY_LOCK = threading.Lock()
 
 
 # =============================================================================
@@ -67,52 +75,85 @@ _DISCOVERY_TRIED: bool = False
 
 
 def _resolve_prometheus_url(settings: Settings) -> str:
+    """Resolve Prometheus once when concurrent tools miss the same cache."""
+    if settings.prometheus_url:
+        return settings.prometheus_url.rstrip("/")
+    with _DISCOVERY_LOCK:
+        return _resolve_prometheus_url_locked(settings)
+
+
+def _resolve_prometheus_url_locked(settings: Settings) -> str:
     """Return a usable Prometheus base URL or raise LookupError.
 
     Resolution order:
       1. `settings.prometheus_url` (explicit env var)
       2. Auto-scan hardcoded (namespace, service) candidates — covers
-         ~80% of standard installs in one apiserver call.
+         common standard installs with narrow Service reads.
       3. **Wide-scan fallback** — when step 2 misses, scan every namespace
          (bounded by `prometheus_namespace_allowlist` if set) for any
          Service whose name matches the prometheus hints. Catches
          non-standard installs like `default/monitor-kube-prometheus-st-prometheus`.
       4. Raise LookupError with a helpful "ask the user" message.
 
-    The result of (2)/(3) is cached for the lifetime of the process.
+    Positive results are cached for five minutes; failures for 30 seconds.
     """
-    global _DISCOVERY_CACHE, _DISCOVERY_TRIED
+    global _DISCOVERY_CACHE, _DISCOVERY_CACHE_AT, _DISCOVERY_CACHE_KEY
+    global _DISCOVERY_TRIED, _DISCOVERY_FAILED_AT
 
-    if settings.prometheus_url:
-        return settings.prometheus_url.rstrip("/")
+    discovery_key = (
+        client_cache_key(settings),
+        tuple(settings.prometheus_namespace_allowlist)
+        if settings.prometheus_namespace_allowlist is not None
+        else None,
+    )
+    if _DISCOVERY_CACHE_KEY != discovery_key:
+        _DISCOVERY_CACHE = None
+        _DISCOVERY_CACHE_AT = 0.0
+        _DISCOVERY_TRIED = False
+        _DISCOVERY_FAILED_AT = 0.0
+        _DISCOVERY_CACHE_KEY = discovery_key
 
     if _DISCOVERY_CACHE:
-        return _DISCOVERY_CACHE
+        if (time.monotonic() - _DISCOVERY_CACHE_AT) < _DISCOVERY_POSITIVE_TTL_SECONDS:
+            return _DISCOVERY_CACHE
+        _DISCOVERY_CACHE = None
+        _DISCOVERY_CACHE_AT = 0.0
 
     if _DISCOVERY_TRIED:
-        # We already scanned and found nothing; don't spam the apiserver.
-        raise LookupError(_not_found_message())
+        # Avoid hammering the apiserver, but recover when Prometheus is
+        # installed after this process starts or a transient request failed.
+        if (time.monotonic() - _DISCOVERY_FAILED_AT) < _DISCOVERY_NEGATIVE_TTL_SECONDS:
+            raise LookupError(_not_found_message())
+        _DISCOVERY_TRIED = False
+        _DISCOVERY_FAILED_AT = 0.0
 
-    _DISCOVERY_TRIED = True
-
-    core = client.CoreV1Api()
+    core = client.CoreV1Api(get_api_client(settings))
     tried: list[str] = []
+    allowed_namespaces = (
+        set(settings.prometheus_namespace_allowlist)
+        if settings.prometheus_namespace_allowlist is not None
+        else None
+    )
 
     # Step 2: hardcoded small candidate list.
     for ns, svc in _PROM_CANDIDATES:
+        if allowed_namespaces is not None and ns not in allowed_namespaces:
+            continue
         tried.append(f"{ns}/{svc}")
         try:
-            core.read_namespaced_service(name=svc, namespace=ns)
+            obj = core.read_namespaced_service(name=svc, namespace=ns)
         except ApiException as e:
             if e.status == 404:
                 continue
-            # RBAC denied / transient error → don't crash the whole tool;
-            # fall through to LookupError so the agent can react.
             logger.debug("prom discovery: error reading %s/%s: %s", ns, svc, e)
-            continue
+            _DISCOVERY_TRIED = True
+            _DISCOVERY_FAILED_AT = time.monotonic()
+            raise LookupError(_not_found_message(tried=tried)) from e
         except Exception as e:  # noqa: BLE001 — defensive
             logger.debug("prom discovery: unexpected error for %s/%s: %s", ns, svc, e)
-            continue
+            _DISCOVERY_TRIED = True
+            _DISCOVERY_FAILED_AT = time.monotonic()
+            raise LookupError(_not_found_message(tried=tried)) from e
 
         # Found a candidate. Resolve to an externally-reachable URL:
         # NodePort / LoadBalancer get a real `<node-ip>:<node_port>` /
@@ -122,12 +163,14 @@ def _resolve_prometheus_url(settings: Settings) -> str:
         # that makes `prometheus_query()` work without an explicit
         # `K8S_MCP_PROMETHEUS_URL`.
         try:
-            obj = core.read_namespaced_service(name=svc, namespace=ns)
             url = _external_service_url(core, obj) or _service_url(obj)
         except Exception as e:  # noqa: BLE001 — defensive
             logger.debug("prom discovery: cannot build URL from %s/%s: %s", ns, svc, e)
             continue
         _DISCOVERY_CACHE = url
+        _DISCOVERY_CACHE_AT = time.monotonic()
+        _DISCOVERY_TRIED = False
+        _DISCOVERY_FAILED_AT = 0.0
         logger.info("Auto-discovered Prometheus at %s (Service %s/%s)", url, ns, svc)
         return url
 
@@ -149,12 +192,19 @@ def _resolve_prometheus_url(settings: Settings) -> str:
             logger.debug("prom discovery: cannot build URL from %s/%s: %s", ns_name, svc_obj.metadata.name, e)
         else:
             _DISCOVERY_CACHE = url
+            _DISCOVERY_CACHE_AT = time.monotonic()
+            _DISCOVERY_TRIED = False
+            _DISCOVERY_FAILED_AT = 0.0
             logger.info(
                 "Auto-discovered Prometheus via wide scan at %s (Service %s/%s)",
                 url, ns_name, svc_obj.metadata.name,
             )
             return url
 
+    _DISCOVERY_TRIED = True
+    # Start the negative TTL after the complete scan. A slow failure should
+    # not expire while it is still holding the single-flight lock.
+    _DISCOVERY_FAILED_AT = time.monotonic()
     raise LookupError(_not_found_message(tried=tried))
 
 
@@ -176,9 +226,8 @@ def _wide_scan_prometheus_matches(
 
     Args:
         namespace: when set, only that namespace is scanned via
-            `list_namespaced_service`. Allowlist is bypassed because the
-            caller asked for a specific namespace — silently dropping it
-            would be wrong. When None, cluster-wide via
+            `list_namespaced_service`, provided it is inside the configured
+            Prometheus namespace allowlist. When None, cluster-wide via
             `list_service_for_all_namespaces`, bounded by
             `settings.prometheus_namespace_allowlist` when set (see
             `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST`).
@@ -187,39 +236,72 @@ def _wide_scan_prometheus_matches(
       - `_resolve_prometheus_url` as a fallback after hardcoded candidates miss
       - `find_prometheus_service` for both single-ns and cluster-wide discovery
 
-    Single cluster-wide `list_service_for_all_namespaces` call (instead
-    of N×`list_namespaced_service`). For a 50-ns cluster this is one
-    apiserver round-trip instead of 50 — ~50× faster on slow apiservers.
-    The allowlist is applied client-side on the resulting items.
+    Without an allowlist, use one cluster-wide list call. With an allowlist,
+    query only those namespaces so the setting also bounds apiserver work,
+    response bytes, and the required RBAC scope.
     """
     if namespace is not None:
+        allowlist = settings.prometheus_namespace_allowlist
+        if allowlist is not None and namespace not in allowlist:
+            logger.debug(
+                "prom scan: namespace %s is outside the discovery allowlist",
+                namespace,
+            )
+            return []
         try:
             items = core.list_namespaced_service(namespace=namespace).items
         except ApiException as e:
             logger.debug(
                 "prom scan: namespaced list (%s) failed: %s", namespace, e,
             )
-            return []
+            if e.status == 404:
+                return []
+            raise
         except Exception as e:  # noqa: BLE001 — defensive
             logger.debug(
                 "prom scan: namespaced list (%s) error: %s", namespace, e,
             )
-            return []
-        # Single-namespace path: trust the apiserver's order; don't
-        # reshuffle by svc type since allowlist is bypassed and the
-        # caller already constrained to one ns.
+            raise
+        # Single-namespace path: trust the apiserver's order; the caller
+        # already constrained the result set to one namespace.
         return [(namespace, svc) for svc in items]
 
-    # Cluster-wide path.
+    # Cluster-wide path. An explicit allowlist should reduce work at the
+    # apiserver, not merely filter an already downloaded cluster-wide result.
     allowlist = settings.prometheus_namespace_allowlist
-    try:
-        all_services = core.list_service_for_all_namespaces().items
-    except ApiException as e:
-        logger.debug("prom wide-scan: cluster-wide service list failed: %s", e)
-        return []
-    except Exception as e:  # noqa: BLE001 — defensive
-        logger.debug("prom wide-scan: cluster-wide service list error: %s", e)
-        return []
+    all_services: list[Any] = []
+    if allowlist is not None:
+        for allowed_namespace in dict.fromkeys(allowlist):
+            try:
+                result = core.list_namespaced_service(namespace=allowed_namespace)
+            except ApiException as e:
+                logger.debug(
+                    "prom wide-scan: namespaced list (%s) failed: %s",
+                    allowed_namespace,
+                    e,
+                )
+                if e.status == 404:
+                    continue
+                raise
+            except Exception as e:  # noqa: BLE001 — defensive
+                logger.debug(
+                    "prom wide-scan: namespaced list (%s) error: %s",
+                    allowed_namespace,
+                    e,
+                )
+                raise
+            all_services.extend(result.items or [])
+    else:
+        try:
+            all_services = list(core.list_service_for_all_namespaces().items or [])
+        except ApiException as e:
+            logger.debug("prom wide-scan: cluster-wide service list failed: %s", e)
+            if e.status == 404:
+                return []
+            raise
+        except Exception as e:  # noqa: BLE001 — defensive
+            logger.debug("prom wide-scan: cluster-wide service list error: %s", e)
+            raise
 
     nodeport_first: list[tuple[str, Any]] = []
     clusterip_after: list[tuple[str, Any]] = []
@@ -389,7 +471,8 @@ def _not_found_message(tried: list[str] | None = None) -> str:
     for t in (tried or [f"{ns}/{svc}" for ns, svc in _PROM_CANDIDATES]):
         msg += f"  - {t}\n"
     msg += (
-        "\nA cluster-wide fallback scan (looking for any Service whose "
+        "\nA fallback scan (cluster-wide, or limited to the configured namespaces; "
+        "looking for any Service whose "
         "name contains `prometheus` / `kube-prometheus` / `prom`) also "
         "found nothing. If Prometheus is in a namespace excluded by "
         "`K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST`, widen it.\n"
@@ -408,10 +491,15 @@ def reset_prometheus_discovery_cache() -> None:
     """Drop the cached Prometheus URL + diagnostic hints. Tests should call
     this between scenarios so cached `(name, base_url) → hint` mappings
     don't leak across fake-apiserver setups."""
-    global _DISCOVERY_CACHE, _DISCOVERY_TRIED
-    _DISCOVERY_CACHE = None
-    _DISCOVERY_TRIED = False
-    _DIAGNOSE_CACHE.clear()
+    global _DISCOVERY_CACHE, _DISCOVERY_CACHE_AT, _DISCOVERY_CACHE_KEY
+    global _DISCOVERY_TRIED, _DISCOVERY_FAILED_AT
+    with _DISCOVERY_LOCK:
+        _DISCOVERY_CACHE = None
+        _DISCOVERY_CACHE_AT = 0.0
+        _DISCOVERY_CACHE_KEY = None
+        _DISCOVERY_TRIED = False
+        _DISCOVERY_FAILED_AT = 0.0
+        _DIAGNOSE_CACHE.clear()
 
 
 # Common Service name patterns we'd consider "likely Prometheus". The fuzzy
@@ -436,9 +524,10 @@ def find_prometheus_service(namespace: str | None = None) -> str:
     a wider scan so the agent can find Prometheus in *any* namespace.
 
     Args:
-        namespace: optional — limit search to a single namespace. If
-            omitted, scans every namespace in the cluster (cheap; ns list
-            is one API call).
+        namespace: optional — limit search to a single namespace. If omitted,
+            use one cluster-wide Service list, or namespaced lists when
+            `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST` is set. An explicit
+            namespace outside that allowlist is rejected without an API call.
 
     Returns:
         A formatted table of candidate Services. Each row has
@@ -470,18 +559,18 @@ def find_prometheus_service(namespace: str | None = None) -> str:
         list_resources(kind="Node")                     # get a Node IP
         prometheus_query(..., prometheus_url='http://<node-ip>:<nodePort>')
     """
-    core = client.CoreV1Api()
+    core = client.CoreV1Api(get_api_client())
     settings = get_settings()
-    # One scan path handles both single-namespace and cluster-wide:
-    # the helper bypasses the namespace allowlist when `namespace` is
-    # given (caller is explicit) and honors it for cluster-wide
-    # discovery. Sorting NodePort/LoadBalancer first only applies in
-    # cluster-wide mode — single-namespace scans keep the apiserver's
-    # natural order, which is fine because the agent asked for a
-    # specific ns and just wants what's there.
+    # One scan path handles both single-namespace and cluster-wide discovery.
+    # Sorting NodePort/LoadBalancer first only applies in cluster-wide mode;
+    # single-namespace scans keep the apiserver's natural order.
     pairs = _wide_scan_prometheus_matches(core, settings, namespace=namespace)
     if namespace is not None:
-        scanned_label = f"namespace={namespace}"
+        allowlist = settings.prometheus_namespace_allowlist
+        if allowlist is not None and namespace not in allowlist:
+            scanned_label = f"namespace={namespace} excluded by allowlist={allowlist}"
+        else:
+            scanned_label = f"namespace={namespace}"
     elif settings.prometheus_namespace_allowlist is None:
         scanned_label = f"{len(pairs)} match(es) across namespaces"
     else:
@@ -1314,7 +1403,7 @@ def expose_prometheus_as_nodeport(
     # namespace-allowlist failures, matching every other write tool.
     _ensure_prometheus_write_allowed(namespace)
 
-    core = client.CoreV1Api()
+    core = client.CoreV1Api(get_api_client())
 
     # 1. Read the original Service (the existing ClusterIP one).
     try:

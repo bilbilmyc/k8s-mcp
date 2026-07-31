@@ -20,7 +20,7 @@ import yaml
 from kubernetes import dynamic
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
-from ..client import get_api_client
+from ..client import get_dynamic_client
 from ..formatters import short_table
 from . import generic
 
@@ -99,7 +99,7 @@ def _normalize_rule(rule: dict, direction: str) -> dict:
 
 
 def _dyn_client() -> dynamic.DynamicClient:
-    return dynamic.DynamicClient(get_api_client())
+    return get_dynamic_client()
 
 
 def _np_resource(dc: dynamic.DynamicClient):

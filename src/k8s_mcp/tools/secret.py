@@ -29,10 +29,9 @@ import base64
 import logging
 
 import yaml
-from kubernetes import dynamic
 from kubernetes.client.rest import ApiException
 
-from ..client import get_api_client
+from ..client import get_dynamic_client
 from ..config import get_settings
 from ..formatters import format_age, short_table
 from . import generic
@@ -43,7 +42,7 @@ SECRET_API_VERSION = "v1"
 
 
 def _dyn():
-    return dynamic.DynamicClient(get_api_client())
+    return get_dynamic_client()
 
 
 def _read_only_guard(action: str) -> None:

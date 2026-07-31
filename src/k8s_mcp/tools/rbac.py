@@ -22,7 +22,7 @@ from kubernetes import client, dynamic
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
 
-from ..client import get_api_client
+from ..client import get_api_client, get_dynamic_client
 from ..formatters import short_table
 from . import generic
 
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _dyn_client() -> dynamic.DynamicClient:
-    return dynamic.DynamicClient(get_api_client())
+    return get_dynamic_client()
 
 
 def _rbac_resource(dc: dynamic.DynamicClient, kind: str):

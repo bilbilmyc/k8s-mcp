@@ -28,15 +28,14 @@ import time
 
 from kubernetes.client.rest import ApiException
 
-from ..client import get_api_client
+from ..client import get_dynamic_client
 from .generic import _api_version_for
 
 logger = logging.getLogger(__name__)
 
 
 def _dyn():
-    from kubernetes import dynamic
-    return dynamic.DynamicClient(get_api_client())
+    return get_dynamic_client()
 
 
 def wait_resource(

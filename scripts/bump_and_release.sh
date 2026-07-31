@@ -37,6 +37,9 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
 fi
 NEW_VERSION="${1:-}"
 [ -n "$NEW_VERSION" ] || die "Usage: $0 <X.Y.Z> [--dry-run]"
+shift
+if [ "${1:-}" = "--dry-run" ]; then DRY_RUN=1; shift; fi
+[ "$#" -eq 0 ] || die "Usage: $0 <X.Y.Z> [--dry-run]"
 
 if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     die "Version must look like X.Y.Z (e.g. 0.3.0); got '$NEW_VERSION'"

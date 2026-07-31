@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from k8s_mcp.client import reset_client_cache
 from k8s_mcp.config import Settings, reset_settings_cache
 
 # env vars that need a clean slate between tests
@@ -20,9 +21,15 @@ _K8S_MCP_ENV_KEYS = [
     "K8S_MCP_KUBE_CONTEXT",
     "K8S_MCP_READ_ONLY",
     "K8S_MCP_NAMESPACE_ALLOWLIST",
+    "K8S_MCP_RATE_LIMIT_RPM",
+    "K8S_MCP_TOOL_TIMEOUT_S",
     "K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST",
+    "K8S_MCP_PROMETHEUS_URL",
+    "K8S_MCP_PROMETHEUS_BEARER_TOKEN",
+    "K8S_MCP_LOCAL_PATH_PROVISIONER_URL",
     "K8S_MCP_METRICS_SERVER_MANIFEST_URL",
     "K8S_MCP_MAX_CONCURRENT_TOOLS",
+    "K8S_MCP_NOTIFIERS",
     "K8S_MCP_NOTIFIER_ALLOW_PRIVATE_HOSTS",
     "K8S_MCP_NOTIFIER_URL_ALLOW_HTTP",
     "K8S_MCP_NOTIFIER_URL_ALLOWLIST",
@@ -35,9 +42,11 @@ def _clean_env(monkeypatch):
     for k in _K8S_MCP_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
     reset_settings_cache()
+    reset_client_cache()
 
     yield
     reset_settings_cache()
+    reset_client_cache()
 
 
 @pytest.fixture

@@ -102,9 +102,7 @@ def test_get_endpoints_legacy_path():
     # EndpointSlice discovery fails (cluster too old) → fallback to legacy.
     dc = MagicMock()
     dc.resources.get.side_effect = Exception("no slice API")
-    stub_client = MagicMock()
-    with patch.object(service, "get_api_client", return_value=stub_client), \
-         patch.object(service.dynamic, "DynamicClient", return_value=dc), \
+    with patch.object(service, "_dyn_client", return_value=dc), \
          patch.object(service, "_core_v1", return_value=core):
         out = service.get_endpoints("web", "default")
     assert "web-1" in out
@@ -119,9 +117,7 @@ def test_get_endpoints_404_returns_hint():
 
     dc = MagicMock()
     dc.resources.get.side_effect = Exception("no slice")
-    stub_client = MagicMock()
-    with patch.object(service, "get_api_client", return_value=stub_client), \
-         patch.object(service.dynamic, "DynamicClient", return_value=dc), \
+    with patch.object(service, "_dyn_client", return_value=dc), \
          patch.object(service, "_core_v1", return_value=core):
         out = service.get_endpoints("missing", "default")
     assert "no endpoints for Service default/missing" in out
@@ -139,11 +135,7 @@ def test_get_endpoints_uses_endpointslice_when_available():
     dc = MagicMock()
     dc.resources.get.return_value = slice_res
 
-    # Patch `get_api_client` to return a stub so DynamicClient's __init__
-    # doesn't try to talk to a real apiserver.
-    stub_client = MagicMock()
-    with patch.object(service, "get_api_client", return_value=stub_client), \
-         patch.object(service.dynamic, "DynamicClient", return_value=dc), \
+    with patch.object(service, "_dyn_client", return_value=dc), \
          patch.object(service, "_core_v1", return_value=core):
         out = service.get_endpoints("prom", "monitoring")
     assert "web-2" in out

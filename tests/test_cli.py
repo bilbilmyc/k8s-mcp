@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -26,8 +27,15 @@ def test_version_is_available(capsys):
 
 
 def test_doctor_is_redacted_by_default(capsys):
-    main(["doctor"])
+    with patch(
+        "k8s_mcp.server.inspect_auth",
+        return_value=("unavailable", "none", ["no credentials detected"]),
+    ):
+        main(["doctor"])
     payload = json.loads(capsys.readouterr().out)
     assert payload["read_only"] is False
-    assert payload["auth_mode"] == "auto_detect"
+    assert payload["auth_mode"] == "unavailable"
+    assert payload["auth_source"] == "none"
+    assert payload["kubernetes_transport"]["read_timeout_s"] == 30
+    assert payload["warnings"]
     assert "api_token" not in payload

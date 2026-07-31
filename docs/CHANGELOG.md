@@ -5,6 +5,8 @@ All notable changes to k8s-mcp are documented here. Versions follow
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-07-31
+
 ### Breaking changes
 
 - `top_pods` / `top_nodes` no longer install metrics-server as a read side effect. They retain the metrics-server → Prometheus read cascade and recommend the explicit `bootstrap_metrics_server` tool when both paths fail.
@@ -551,7 +553,7 @@ Net result: a safer production posture without changing any of the
 ## [0.1.1] — 2026-04-xx
 - Initial PyPI release notes.
 
-[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.4.3...HEAD
+[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/v2.0.0...HEAD
 [0.4.3]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.0...v0.4.1
@@ -574,3 +576,4 @@ Net result: a safer production posture without changing any of the
 [0.6.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.3...v0.6.0
 [0.6.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.6.0...v0.6.1
 [1.0.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.6.1...v1.0.0
+[2.0.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v1.0.0...v2.0.0

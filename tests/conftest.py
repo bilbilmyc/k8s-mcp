@@ -1,38 +1,23 @@
 """Shared pytest fixtures."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from k8s_mcp.config import Settings, reset_settings_cache
 
-# env vars that need a clean slate between tests
+# env vars that need a clean slate between tests. Wipe by prefix so newly
+# added K8S_MCP_* settings can never leak from the operator's shell into
+# a test run (the old explicit-list approach already missed several).
 _K8S_MCP_ENV_PREFIX = "K8S_MCP_"
-_K8S_MCP_ENV_KEYS = [
-    "K8S_MCP_LOG_LEVEL",
-    "K8S_MCP_DEFAULT_TAIL_LINES",
-    "K8S_MCP_API_SERVER",
-    "K8S_MCP_API_TOKEN",
-    "K8S_MCP_API_CA_CERT",
-    "K8S_MCP_API_INSECURE",
-    "K8S_MCP_KUBECONFIG",
-    "K8S_MCP_KUBE_CONTEXT",
-    "K8S_MCP_READ_ONLY",
-    "K8S_MCP_NAMESPACE_ALLOWLIST",
-    "K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST",
-    "K8S_MCP_METRICS_SERVER_MANIFEST_URL",
-    "K8S_MCP_MAX_CONCURRENT_TOOLS",
-    "K8S_MCP_NOTIFIER_ALLOW_PRIVATE_HOSTS",
-    "K8S_MCP_NOTIFIER_URL_ALLOW_HTTP",
-    "K8S_MCP_NOTIFIER_URL_ALLOWLIST",
-]
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """Wipe K8S_MCP_* env vars and reset settings cache between tests."""
-    for k in _K8S_MCP_ENV_KEYS:
+    for k in [k for k in os.environ if k.startswith(_K8S_MCP_ENV_PREFIX)]:
         monkeypatch.delenv(k, raising=False)
     reset_settings_cache()
 

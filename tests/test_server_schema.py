@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from k8s_mcp.config import Settings
 from k8s_mcp.server import _K8sMCP, create_server
 
 
@@ -21,7 +22,7 @@ async def test_all_tools_have_no_output_schema():
     mcp = _K8sMCP("probe")
     # Use the same registration the real server runs.
     from k8s_mcp import server as srv_mod
-    srv_mod._register_tools(mcp)
+    srv_mod._register_tools(mcp, Settings())
 
     tools = await mcp.list_tools()
     assert tools, "expected at least one tool registered"

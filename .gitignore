@@ -31,3 +31,6 @@ htmlcov/
 
 # Note: dist/ is intentionally NOT ignored — this repo commits the built
 # wheel/sdist so agents can install directly from a fresh clone.
+# OpenClaw workspace internals (don't commit)
+.tmp/
+openclaw-workspace-state.json

@@ -283,7 +283,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         """Health check. Returns the k8s-mcp version (e.g. `pong (0.2.2)`)."""
         return f"pong (k8s-mcp {__version__})"
 
-    _register_tools(mcp)
+    _register_tools(mcp, settings)
     return mcp
 
 
@@ -334,13 +334,15 @@ def in_flight_dec() -> None:
             _in_flight -= 1
 
 
-def _register_tools(mcp: FastMCP) -> None:
+def _register_tools(mcp: FastMCP, settings: Settings) -> None:
     """注册 MCP 工具。每个模块使用 `register(mcp)` 模式挂载。
 
     中文说明：
-    所有 tools/*.py 都遵循 `def register(mcp)` 约定；这里集中调用，
-    后续新增 tool 模块只要在两个地方 import + 调用即可。
+    模块按功能组（k8s_mcp.tool_groups）组织；`K8S_MCP_ENABLED_GROUPS`
+    未设置时全部注册，设置了则只挂载对应组的模块，让 GPU 专用或只读
+    部署可以裁剪 Agent 看到的工具面。
     """
+    from .tool_groups import TOOL_GROUP_MODULES
     from .tools import (
         autoscale,
         certs,
@@ -353,6 +355,7 @@ def _register_tools(mcp: FastMCP) -> None:
         explain,
         generic,
         health,
+        jsonpath,
         logs,
         metrics,
         namespace,
@@ -373,41 +376,70 @@ def _register_tools(mcp: FastMCP) -> None:
         wait_tool,
         workload,
     )
-    from .tools import (
-        jsonpath as jsonpath_tools,
-    )
 
-    generic.register(mcp)
-    logs.register(mcp)
-    events.register(mcp)
-    pods.register(mcp)
-    diagnostics.register(mcp)
-    explain.register(mcp)
-    workload.register(mcp)
-    service.register(mcp)
-    configmap.register(mcp)
-    delete_tool.register(mcp)
-    metrics.register(mcp)
-    rollout.register(mcp)
-    node_ops.register(mcp)
-    wait_tool.register(mcp)
-    jsonpath_tools.register(mcp)
-    secret.register(mcp)
-    discovery.register(mcp)
-    autoscale.register(mcp)
-    rbac.register(mcp)
-    networkpolicy.register(mcp)
-    nvidia_gpu.register(mcp)
-    nvidia_metrics.register(mcp)
-    resource_usage.register(mcp)
-    serviceaccount.register(mcp)
-    storage.register(mcp)
-    prometheus.register(mcp)
-    certs.register(mcp)
-    health.register(mcp)
-    notifier.register(mcp)
-    namespace.register(mcp)
-    cluster_info.register(mcp)
+    # name → module. A KeyError here means tool_groups.py names a module
+    # this import list does not cover — keep the two in sync.
+    modules: dict[str, Any] = {
+        "autoscale": autoscale,
+        "certs": certs,
+        "cluster_info": cluster_info,
+        "configmap": configmap,
+        "delete_tool": delete_tool,
+        "diagnostics": diagnostics,
+        "discovery": discovery,
+        "events": events,
+        "explain": explain,
+        "generic": generic,
+        "health": health,
+        "jsonpath": jsonpath,
+        "logs": logs,
+        "metrics": metrics,
+        "namespace": namespace,
+        "networkpolicy": networkpolicy,
+        "node_ops": node_ops,
+        "notifier": notifier,
+        "nvidia_gpu": nvidia_gpu,
+        "nvidia_metrics": nvidia_metrics,
+        "pods": pods,
+        "prometheus": prometheus,
+        "rbac": rbac,
+        "resource_usage": resource_usage,
+        "rollout": rollout,
+        "secret": secret,
+        "service": service,
+        "serviceaccount": serviceaccount,
+        "storage": storage,
+        "wait_tool": wait_tool,
+        "workload": workload,
+    }
+    unmapped = {
+        name for names in TOOL_GROUP_MODULES.values() for name in names
+    } - modules.keys()
+    if unmapped:
+        raise RuntimeError(f"tool_groups.py references unknown modules: {sorted(unmapped)}")
+
+    enabled = settings.enabled_groups  # None = all groups
+    for group, module_names in TOOL_GROUP_MODULES.items():
+        if enabled is not None and group not in enabled:
+            logger.info(
+                "tool group %r not in K8S_MCP_ENABLED_GROUPS — skipping %d module(s)",
+                group, len(module_names),
+            )
+            continue
+        for name in module_names:
+            modules[name].register(mcp)
+
+    # Defensive completeness check: every module must have been either
+    # registered or skipped as part of a disabled group.
+    registered_count = sum(
+        len(names) for group, names in TOOL_GROUP_MODULES.items()
+        if enabled is None or group in enabled
+    )
+    logger.info(
+        "registered %d/%d tool modules (groups: %s)",
+        registered_count, len(modules),
+        "all" if enabled is None else ",".join(sorted(enabled)),
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -429,6 +461,7 @@ def _doctor_payload(settings: Settings) -> dict[str, Any]:
         "version": __version__,
         "read_only": settings.read_only,
         "namespace_allowlist": settings.namespace_allowlist,
+        "enabled_groups": settings.enabled_groups or "all",
         "rate_limit_rpm": settings.rate_limit_rpm,
         "tool_timeout_s": settings.tool_timeout_s,
         "max_concurrent_tools": settings.max_concurrent_tools,

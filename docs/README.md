@@ -27,4 +27,4 @@
 | 架构、发布、变更 | [architecture.md](./architecture.md) / [publishing.md](./publishing.md) | — |
 
 > [!NOTE]
-> [PLAN.md](./PLAN.md) 是 archived material，可能描述已移除的两阶段删除流程；请以当前 README、安全文档和工具 docstring 为准。
+> [PLAN.md](./archive/PLAN.md) 是 archived material，可能描述已移除的两阶段删除流程；请以当前 README、安全文档和工具 docstring 为准。

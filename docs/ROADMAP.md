@@ -65,19 +65,29 @@ LLM 选工具靠 description；当前 72 个工具里没有重叠（v0.5.0 已�
 
 深水区，影响频繁调用 Prometheus / 多 pod 日志 / 大 CRD 集群。
 
-- [ ] **C1 · 连接池 + 超时分级**
-  - 新增 `src/k8s_mcp/_http.py`：`shared_requests_session()` (thread-local, pool_connections=10)
-  - `prometheus._prom_get` 改用 session
-  - `logs._fetch_logs_multi` 多 pod 改 `ThreadPoolExecutor(max_workers=8)` 并发
-  - `_PROM_HTTP_TIMEOUT` 拆 `(5, 30)` connect/read
+- [x] **C1 · 连接池 + 超时分级** — 关闭（2026-08-28）：拆开核查后，
+  三个子项里两个已在后续迭代中实现，第三项经评估不再做：
+  - [x] `logs._fetch_logs_multi` 多 pod 并发 —— 已实现
+    （`_MULTI_PARALLEL_THRESHOLD=5`、`_MULTI_PARALLEL_MAX_WORKERS=8`，
+    `logs.py` 并行路径 + 确定性合并）
+  - [x] 共享连接池 —— notifier 已用模块级 `requests.Session()` +
+    `Retry`（Phase A1）；已覆盖本项目唯一的 requests 高频调用方
+  - [x] `prometheus._prom_get` 超时 —— 已实现（urllib socket timeout
+    15s，对 connect 和每次 read 分别生效）
+  - [~] 「prometheus 改用 requests session + (5,30) 分级」—— 不做：
+    `_prom_get` 走的是 urllib 而非当时假设的 requests；单值 socket
+    timeout 已分别约束连接与读取，迁移 requests 只为拿到 connect/read
+    双值没有用户可见收益，还会重写一批 urlopen mock
 
 - [x] **C2 · OpenAPI cache 大小上限** — `discovery.py` — v0.5.0
   - [x] `_OPENAPI_CACHE_MAX_BYTES = 8 MiB`，超 cap 清空强制下次重读
   - [x] 顺带修了 `kubernetes.client.OpenApiApi` 在 client v36+ 已删除的潜在 bug（改走 `api.call_api("/openapi/v3", "GET")`）
   - [x] `tests/test_discovery_cache_cap.py` 8 个测试覆盖 size-cap / TTL / 重置
 
-- [ ] **C3 · auth.py 双路径去重** — `auth.py`
-  - 抽 `_default_kubeconfig_path()` helper，line 74-87 和 122-126 共用
+- [x] **C3 · auth.py 双路径去重** — `auth.py` — 2026-08-28
+  - [x] 抽 `_resolve_kubeconfig_path()`：显式 `K8S_MCP_KUBECONFIG` →
+    `KUBECONFIG` env 首项 → 默认 `~/.kube/config`；`_load_kube_config`
+    与 `load_configuration` 的 last-try 分支共用
 
 ---
 
@@ -224,16 +234,6 @@ HITL），不再让工具层背锅。
 
 ---
 
-**变更记录**
-- 2026-07-05 初稿：从 plan 转成 checkbox 列表
-- 2026-07-05 B2 完成：bulk_* → list variant，修复 2 处重复检查 bug，所有 23 个 bulk 测试通过
-- 2026-07-06 v0.4.3 完成: Phase E 4+ 个分析器/diagnose/explain 工具 + search/add_label/remove_label/exec_pod，666 tests passing
-- 2026-07-06 v0.5.0 完成: A1+A2 收尾 + B1+B2 收尾（删 9 个 deprecated）+ C2 OpenAPI cap + docs 刷新，655 tests passing
-- 2026-07-07 v0.5.2 完成: 单步删除（删 HMAC token subsystem）+ Prometheus NodePort/LoadBalancer URL 修正，630 tests passing
-- 2026-07-07 v0.5.3 完成: `top_pods` / `top_nodes` 三档级联 + `bootstrap_metrics_server` 显式工具，643 tests passing
-
----
-
 ## v0.5.3 — `top_pods` / `top_nodes` 三档级联 + 自动 bootstrap（2026-07-07）
 
 **主题**：用户在 v0.5.2 发版验证里提了一个观察——"既然 Prometheus 已经在抓 cAdvisor + node-exporter，metrics-server 那条路径基本上是多余的。"把这观察落地为级联策略：让 `top_pods` / `top_nodes` 在 metrics-server 缺失时透明地落到 Prometheus，**仅在两条路径都断且有写权限时才尝试自动装 metrics-server**，避免 LLM 死磕 `bootstrap_metrics_server`。
@@ -272,6 +272,39 @@ metrics-server / Prometheus"，不需要理解内部状态机。
 
 ---
 
+## v1.0.x — 工具面分组开关 + 部署故事修正（2026-08-28）
+
+**主题**：整体边界复查后的三个动作——让 91 个工具的面可以按组裁剪
+（GPU 专用/只读部署不必把全部工具暴露给 LLM）；修正「stdio-only
+server 配 in-cluster Pod」这份站不住的部署文档；清掉挂账的 Phase C。
+
+- [x] **H1 · `K8S_MCP_ENABLED_GROUPS` 工具分组开关**
+  - 新增 `src/k8s_mcp/tool_groups.py`：组名 → tools/ 模块名的单一
+    事实来源（core / workload / observability / security / gpu / notify，
+    共 6 组 31 模块；`ping` 不属于任何组，永远注册）
+  - `config.py` 新增 `enabled_groups`：逗号分隔、大小写不敏感、
+    空串 = 全部；未知组名启动即拒绝（`ValidationError`）
+  - `server.py::_register_tools` 按组挂载，跳过的组记 INFO 日志；
+    `doctor` 输出新增 `enabled_groups`（未设置显示 `all`）
+  - `tests/test_tool_groups.py` 10 个测试；conftest 清环境变量改为
+    `K8S_MCP_*` 前缀全量 wipe（旧显式清单已经漏了好几个变量）
+- [x] **H2 · transport/部署文档矛盾修正**
+  - `docs/deployment.md` / `.en.md`：删除「in-cluster Pod 跑
+    `k8s-mcp serve`」示例——stdio server 放进集群远程客户端连不上，
+    示例从未可用；改讲两条受支持路径：本地 kubeconfig、
+    本地 + SA token 直连 apiserver（认证模式 A）
+  - `docs/tools.md` 删掉「改用 in-cluster 的 MCP server 模式」的
+    兜底建议，改为 SSH-tunnel 具体做法
+  - HTTP transport 仍在 v2+ 清单，落地前需 transport 层认证/TLS/审计
+- [x] **H3 · Phase C 收账**
+  - C1 关闭：logs 并发与 notifier session 早已实现、prometheus
+    urllib 超时已存在；requests 迁移经评估不做（见 Phase C 备注）
+  - C3 完成：`auth.py` 抽 `_resolve_kubeconfig_path()` 去重
+- [x] **H4 · 仓库卫生**
+  - `tests/test_tool_inventory.py` docstring 87→91、v0.7.0→v1.0.0 漂移修复
+  - 本文件重复的「变更记录」块去重（旧版块中间多了一份拷贝）
+  - `docs/PLAN.md` → `docs/archive/PLAN.md`，引用链接同步
+
 **变更记录**
 - 2026-07-05 初稿：从 plan 转成 checkbox 列表
 - 2026-07-05 B2 完成：bulk_* → list variant，修复 2 处重复检查 bug，所有 23 个 bulk 测试通过
@@ -279,3 +312,4 @@ metrics-server / Prometheus"，不需要理解内部状态机。
 - 2026-07-06 v0.5.0 完成: A1+A2 收尾 + B1+B2 收尾（删 9 个 deprecated）+ C2 OpenAPI cap + docs 刷新，655 tests passing
 - 2026-07-07 v0.5.2 完成: 单步删除（删 HMAC token subsystem）+ Prometheus NodePort/LoadBalancer URL 修正，630 tests passing
 - 2026-07-07 v0.5.3 完成: `top_pods` / `top_nodes` 三档级联 + `bootstrap_metrics_server` 显式工具，643 tests passing
+- 2026-08-28 v1.0.x 完成: H1 工具分组开关 + H2 部署文档修正 + H3 Phase C 收账（C1 关闭/C3 完成）+ H4 仓库卫生，725 tests passing

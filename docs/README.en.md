@@ -27,4 +27,4 @@ The documentation follows a deliberate order: secure the server, connect it, the
 | Architecture, publishing, changes | [architecture.md](./architecture.md) / [publishing.md](./publishing.md) | — |
 
 > [!NOTE]
-> [PLAN.md](./PLAN.md) is archived design material. It can describe removed behavior such as two-phase deletion; follow the current README, security documentation, and tool docstrings instead.
+> [PLAN.md](./archive/PLAN.md) is archived design material. It can describe removed behavior such as two-phase deletion; follow the current README, security documentation, and tool docstrings instead.

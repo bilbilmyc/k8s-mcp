@@ -24,28 +24,38 @@ kubectl apply -f deploy/rbac/namespace-operator.yaml
 > [!CAUTION]
 > These templates are a starting point, not universal production permissions. Never bind `cluster-admin` to an MCP ServiceAccount, and do not expand to `*` simply to clear one `Forbidden` error.
 
-## In-cluster configuration example
+## Where the server runs and how it connects
 
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: k8s-mcp
-  namespace: ops
-spec:
-  serviceAccountName: k8s-mcp-reader
-  containers:
-    - name: server
-      image: your-registry/k8s-mcp:tag
-      command: ["k8s-mcp", "serve"]
-      env:
-        - name: K8S_MCP_READ_ONLY
-          value: "false"
-        - name: K8S_MCP_MAX_CONCURRENT_TOOLS
-          value: "4"
+k8s-mcp currently supports **stdio transport only**: the MCP client (Claude Desktop, Cursor, …) launches `k8s-mcp serve` as a **local subprocess**, the server runs on the same machine as the client, and reaches the Kubernetes API over the network with its credentials. There is deliberately no "run the server as an in-cluster Pod and point a remote MCP client at it" topology — stdio requires the subprocess to live on the client machine. A remote HTTP transport is on the [roadmap](./ROADMAP.md) (v2+); landing it also requires transport-layer authentication, TLS, network policies, auditing, and request-size limits.
+
+Two supported combinations, depending on where the server runs and which identity it uses:
+
+### Option 1: local kubeconfig (default for personal dev/ops)
+
+The server uses the same kubeconfig as your `kubectl`; its permissions are your personal RBAC identity:
+
+```bash
+export KUBECONFIG="$HOME/.kube/config"
+export K8S_MCP_KUBE_CONTEXT=my-cluster   # optional, for multi-context setups
+k8s-mcp serve
 ```
 
-For a remote MCP transport, add authentication, TLS, network policies, auditing, and request-size limits at the transport layer. This repository’s default transport is stdio.
+### Option 2: local server + ServiceAccount token against the apiserver (shared/restricted identity)
+
+Create a restricted ServiceAccount from the `deploy/rbac/` templates, mint a token, and let the local server run with that **least-privilege cluster identity** — useful when the identity should be a dedicated account rather than your personal kubeconfig:
+
+```bash
+# 1. Create the restricted ServiceAccount (templates above)
+kubectl apply -f deploy/rbac/read-only.yaml
+
+# 2. Mint a time-bound token and hand it to the server (auth mode A)
+export K8S_MCP_API_SERVER="https://api.example.com:6443"
+export K8S_MCP_API_TOKEN="$(kubectl -n ops create token k8s-mcp-reader --duration=8h)"
+export K8S_MCP_API_CA_CERT="$HOME/.kube/ca.crt"   # required with a private CA
+k8s-mcp serve
+```
+
+Tokens expire; re-mint when they do. Never commit them to client configs or the repository.
 
 ## Go-live checklist
 

@@ -15,6 +15,7 @@ Every variable uses the `K8S_MCP_` prefix; Pydantic settings are case-insensitiv
 | `K8S_MCP_RATE_LIMIT_RPM` | `120` | Per-tool RPM; `0` disables it |
 | `K8S_MCP_TOOL_TIMEOUT_S` | `60` | Seconds an MCP request waits; `0` disables it |
 | `K8S_MCP_MAX_CONCURRENT_TOOLS` | `8` | Concurrent synchronous tools, range 1–64 |
+| `K8S_MCP_ENABLED_GROUPS` | unset (all) | Comma-separated tool groups: `core` / `workload` / `observability` / `security` / `gpu` / `notify` (case-insensitive); unset registers all 91 tools, `ping` is always registered |
 
 ## Authentication
 

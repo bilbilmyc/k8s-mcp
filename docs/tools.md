@@ -234,8 +234,9 @@ k8s-mcp 走"三层发现 + 两套桥接"：
      `http://<node-ip>:<node_port>` 去查。**不依赖 kubectl**。
    - **`TYPE=ClusterIP` 但节点 IP 不可路由**（远程 / 多层 NAT / 严格
      防火墙，常见于公有云托管 K8s）→ 没有 ClusterIP → NodePort 之外的
-     兜底。用户在这种场景下需自己解决节点 IP 的可达性，例如直接
-     SSH-tunnel 或改用 in-cluster 的 MCP server 模式。
+     兜底。用户在这种场景下需自己解决节点 IP 的可达性，例如
+     SSH-tunnel 到节点（`ssh -L <port>:<node-ip>:<node_port>`）后走
+     隧道地址查询。
 
 3. **Agent 拿 URL 调 Prometheus 工具** —— `prometheus_query(promql,
    prometheus_url=<URL>)` / `prometheus_query_range(...)` /

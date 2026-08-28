@@ -21,6 +21,7 @@
 ## 为什么选择它
 
 - **安全可控**：可随时切换只读模式、namespace 写入边界、每工具限流、调用超时、有界 worker pool、Kubernetes 错误脱敏。
+- **工具面可裁剪**：`K8S_MCP_ENABLED_GROUPS` 按组启用 `core` / `workload` / `observability` / `security` / `gpu` / `notify`——GPU 专用或只读部署不必把全部工具暴露给 Agent。
 - **Agent 友好**：工具说明提供参数约束与下一步建议；诊断、解释和分析工具减少“先 list 再猜”的多轮调用。
 - **可运营**：`doctor` 命令、可复现的组件 manifest、CI 中的工具数/文档/版本一致性检查。
 - **可渐进授权**：从只读 `view` 身份开始；仅为需要写入的 namespace 配置窄权限 Role。

@@ -5,6 +5,24 @@
 
 ---
 
+## 工具分组（`K8S_MCP_ENABLED_GROUPS`）
+
+默认注册全部 91 个工具。只需要部分能力时（GPU 专用、只读审计等部署），
+用逗号分隔的组名裁剪 Agent 看到的工具面（大小写不敏感，未知组名会拒绝启动）：
+
+| 组 | 覆盖的 tools/ 模块 | 典型部署 |
+| --- | --- | --- |
+| `core` | generic、logs、events、pods、configmap、namespace、secret、delete_tool、jsonpath、discovery、wait_tool、cluster_info | 任何部署的基础；只读审计 + `READ_ONLY=true` |
+| `workload` | workload、service、storage、autoscale、rollout、node_ops、certs、serviceaccount | 交付/运维写入 |
+| `observability` | metrics、prometheus、health、diagnostics、explain、resource_usage | 监控/诊断值班 |
+| `security` | rbac、networkpolicy | 安全审计 |
+| `gpu` | nvidia_gpu、nvidia_metrics | GPU/AI 集群 |
+| `notify` | notifier | 告警通知出口 |
+
+`ping`（health check）不属于任何组，始终注册。示例：`K8S_MCP_ENABLED_GROUPS=core,gpu`。
+
+---
+
 ## 新会话开局协议
 
 **前两件事**一定是：

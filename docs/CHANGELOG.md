@@ -5,6 +5,24 @@ All notable changes to k8s-mcp are documented here. Versions follow
 
 ## [Unreleased]
 
+### Added — tool-surface groups (`K8S_MCP_ENABLED_GROUPS`)
+
+- **`src/k8s_mcp/tool_groups.py`** — single source of truth mapping six groups (`core` / `workload` / `observability` / `security` / `gpu` / `notify`) to the 31 `tools/` modules. `ping` is groupless and always registered.
+- **`K8S_MCP_ENABLED_GROUPS`** — comma-separated, case-insensitive group allowlist; unset/empty registers the full 91-tool inventory. Unknown group names fail at settings load instead of silently registering the wrong subset.
+- `doctor` output now includes the effective `enabled_groups` (`all` when unset).
+- 10 new tests in `tests/test_tool_groups.py`; test-env cleanup in `conftest.py` now wipes every `K8S_MCP_*` variable by prefix instead of a hand-maintained list that had already drifted.
+
+### Changed — deployment story
+
+- `docs/deployment.md` / `deployment.en.md` — removed the in-cluster Pod running `k8s-mcp serve` example: the server is stdio-only, so a Pod-hosted server is unreachable by remote MCP clients and the example never worked. The section now documents the two supported topologies (local kubeconfig; local server + ServiceAccount token against the apiserver, auth mode A) and points to the roadmap for a future HTTP transport.
+- `docs/tools.md` — replaced the "switch to an in-cluster MCP server" fallback suggestion with a concrete SSH-tunnel recipe.
+
+### Internal
+
+- ROADMAP Phase C closed out: C3 done (`_resolve_kubeconfig_path()` dedup in `auth.py`); C1 closed after audit — multi-pod log fan-out and the notifier's shared `requests.Session` already shipped, and migrating `_prom_get` from urllib to requests was evaluated and declined (no user-visible gain, mock rewrites only).
+- Repository hygiene: `docs/PLAN.md` moved to `docs/archive/PLAN.md` (links updated), duplicate changelog block removed from `docs/ROADMAP.md`, `tests/test_tool_inventory.py` docstring drift fixed (87 → 91, v0.7.0 → v1.0.0).
+- 725 tests passing.
+
 ## [1.0.0] — 2026-07-28
 
 ### Added — bounded NVIDIA GPU utilization history (90 → 91 tools)

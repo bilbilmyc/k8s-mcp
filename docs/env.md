@@ -15,6 +15,7 @@
 | `K8S_MCP_RATE_LIMIT_RPM` | `120` | 每个工具 RPM；`0` 关闭 |
 | `K8S_MCP_TOOL_TIMEOUT_S` | `60` | 单次 MCP 请求等待秒数；`0` 关闭 |
 | `K8S_MCP_MAX_CONCURRENT_TOOLS` | `8` | 同时运行的同步工具数，范围 1–64 |
+| `K8S_MCP_ENABLED_GROUPS` | 空（全部） | 逗号分隔的工具组：`core` / `workload` / `observability` / `security` / `gpu` / `notify`（大小写不敏感）；未设置注册全部 91 个工具，`ping` 始终注册 |
 
 ## 认证
 

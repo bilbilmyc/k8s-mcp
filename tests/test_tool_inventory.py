@@ -1,12 +1,12 @@
-"""Pin the tool inventory at 87 entries.
+"""Pin the tool inventory at 91 entries.
 
 This is a guard against accidental additions/removals that change the
 tool surface LLM agents see. If you intentionally add or remove a tool,
 update BOTH the expected count AND the expected set in one shot.
 
 `EXPECTED_TOOLS` is the canonical list of tools registered on the
-FastMCP instance after v0.7.0 (NVIDIA GPU diagnostics added — see
-`docs/CHANGELOG.md` [Unreleased] for details).
+FastMCP instance as of v1.0.0 (NVIDIA GPU utilization history was the
+latest addition — see `docs/CHANGELOG.md` for details).
 Adding a new tool requires updating this list in the same PR.
 """
 from __future__ import annotations

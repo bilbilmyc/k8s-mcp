@@ -24,28 +24,38 @@ kubectl apply -f deploy/rbac/namespace-operator.yaml
 > [!CAUTION]
 > 模板是起点，不是“万能生产权限”。不要把 `cluster-admin` 绑定给 MCP ServiceAccount，也不要为了通过一次 `Forbidden` 就扩大到 `*`。
 
-## in-cluster 配置示例
+## 运行位置与连接方式
 
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: k8s-mcp
-  namespace: ops
-spec:
-  serviceAccountName: k8s-mcp-reader
-  containers:
-    - name: server
-      image: your-registry/k8s-mcp:tag
-      command: ["k8s-mcp", "serve"]
-      env:
-        - name: K8S_MCP_READ_ONLY
-          value: "false"
-        - name: K8S_MCP_MAX_CONCURRENT_TOOLS
-          value: "4"
+k8s-mcp 目前**只支持 stdio transport**：MCP 客户端（Claude Desktop、Cursor 等）把 `k8s-mcp serve` 作为**本地子进程**启动，server 与客户端同机运行，再通过网络凭据访问 Kubernetes API。因此不存在"把 server 跑成集群里的 Pod、远程 MCP 客户端直连"的部署形态——stdio 要求子进程在客户端机器上。远程 HTTP transport 在[路线图](./ROADMAP.md)的 v2+ 清单中，落地前还需要解决传输层认证、TLS、网络策略、审计和请求大小限制。
+
+按"server 跑在哪、用什么身份连集群"，有两种受支持的组合：
+
+### 方式一：本地 kubeconfig（个人开发/运维默认）
+
+Server 与你的 `kubectl` 用同一份 kubeconfig，权限即你个人的 RBAC 身份：
+
+```bash
+export KUBECONFIG="$HOME/.kube/config"
+export K8S_MCP_KUBE_CONTEXT=my-cluster   # 多 context 时可选
+k8s-mcp serve
 ```
 
-远程 MCP transport 还需网络层认证、TLS、网络策略、审计和请求大小限制；本仓库默认 transport 是 stdio。
+### 方式二：本地运行 + ServiceAccount token 直连 apiserver（共享/受控身份）
+
+用 `deploy/rbac/` 里的模板创建受限 ServiceAccount，然后签发 token，让本地 server 以**集群侧最小权限**身份运行——适合把身份收敛成专用账号而不是复用个人 kubeconfig：
+
+```bash
+# 1. 创建受限 ServiceAccount（见上文模板）
+kubectl apply -f deploy/rbac/read-only.yaml
+
+# 2. 签发有时效的 token 并交给 server（认证模式 A）
+export K8S_MCP_API_SERVER="https://api.example.com:6443"
+export K8S_MCP_API_TOKEN="$(kubectl -n ops create token k8s-mcp-reader --duration=8h)"
+export K8S_MCP_API_CA_CERT="$HOME/.kube/ca.crt"   # 自签 CA 时必需
+k8s-mcp serve
+```
+
+token 有时效，过期后需重新签发；不要把它写进客户端配置文件或代码仓库。
 
 ## 上线前检查
 

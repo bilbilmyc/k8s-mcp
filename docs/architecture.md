@@ -48,7 +48,7 @@ src/k8s_mcp/
 `diff_resource`（apply 前预览差异）、`search_resources`（跨 kind 名字子串搜）、
 `add_label` / `remove_label`（单 label 原子改，RFC 6901 转义）。
 
-完整设计档案见 [PLAN.md](./PLAN.md)（archived），当前路线图见
+完整设计档案见 [PLAN.md](./archive/PLAN.md)（archived），当前路线图见
 [ROADMAP.md](./ROADMAP.md)，用法示例见 [tests/](../tests/)。
 
 ## 设计要点

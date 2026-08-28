@@ -64,21 +64,25 @@ def _load_token_config(settings: Settings) -> client.Configuration:
     return cfg
 
 
+def _resolve_kubeconfig_path(settings: Settings) -> str | None:
+    """Kubeconfig lookup order shared by both mode-B call sites:
+    explicit `K8S_MCP_KUBECONFIG` → `KUBECONFIG` env (first entry) →
+    default `~/.kube/config` when it exists. Returns None when nothing
+    points at a candidate."""
+    if settings.kubeconfig:
+        return str(Path(settings.kubeconfig).expanduser())
+    env_kc = os.environ.get("KUBECONFIG")
+    if env_kc:
+        return env_kc.split(os.pathsep)[0]
+    default = Path.home() / ".kube" / "config"
+    if default.exists():
+        return str(default)
+    return None
+
+
 def _load_kube_config(settings: Settings) -> client.Configuration:
     """Mode B: kubeconfig file (explicit path or KUBECONFIG env or default)."""
-    kubeconfig_path = (
-        str(Path(settings.kubeconfig).expanduser()) if settings.kubeconfig else None
-    )
-    # When no explicit path, fall back to KUBECONFIG env (which the kubernetes
-    # client also reads), or the default ~/.kube/config location.
-    if kubeconfig_path is None:
-        env_kc = os.environ.get("KUBECONFIG")
-        if env_kc:
-            kubeconfig_path = env_kc.split(os.pathsep)[0]
-        else:
-            default = Path.home() / ".kube" / "config"
-            if default.exists():
-                kubeconfig_path = str(default)
+    kubeconfig_path = _resolve_kubeconfig_path(settings)
 
     if not kubeconfig_path or not Path(kubeconfig_path).exists():
         raise AuthError(
@@ -120,8 +124,7 @@ def load_configuration(settings: Settings) -> client.Configuration:
         return _load_incluster()
 
     # Last try: default kubeconfig location
-    default_kc = Path.home() / ".kube" / "config"
-    if default_kc.exists() or os.environ.get("KUBECONFIG"):
+    if _resolve_kubeconfig_path(settings):
         logger.info("Auth mode B: default kubeconfig")
         return _load_kube_config(settings)
 

@@ -18,6 +18,8 @@ from typing import Any
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .tool_groups import ALL_TOOL_GROUPS, unknown_groups
+
 
 class Settings(BaseSettings):
     """Pydantic-Settings 模型，承载全部 K8S_MCP_* 环境变量。
@@ -56,6 +58,13 @@ class Settings(BaseSettings):
     # session; combine write access with a namespace allowlist where needed.
     read_only: bool = False
     namespace_allowlist: list[str] | None = None
+
+    # Tool-surface trimming. None (default) registers every tool group;
+    # a comma-separated subset registers only those groups (see
+    # k8s_mcp.tool_groups for the group catalog). `ping` is always on.
+    # Lets a GPU-only or read-only deployment shrink the tool list the
+    # LLM has to choose from.
+    enabled_groups: list[str] | None = None
 
     # Operational safety nets (P0 hardening for production). Applied at
     # the FastMCP call_tool boundary in server.py:
@@ -119,6 +128,26 @@ class Settings(BaseSettings):
     # default, even when HTTP is enabled for local development. Enable only
     # when the MCP process is deliberately allowed to reach an internal hook.
     notifier_allow_private_hosts: bool = False
+
+    @field_validator("enabled_groups", mode="before")
+    @classmethod
+    def _split_enabled_groups(cls, v: Any) -> list[str] | None:
+        """逗号分隔解析（组名大小写不敏感）；空串等价于未设置（None = 全部）。"""
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            return [s.strip().lower() for s in v.split(",") if s.strip()]
+        return v
+
+    @field_validator("enabled_groups")
+    @classmethod
+    def _validate_enabled_groups(cls, v: list[str] | None) -> list[str] | None:
+        """未知组名直接拒绝启动，避免静默注册了错误子集才发现。"""
+        if v is not None and (bad := unknown_groups(v)):
+            raise ValueError(
+                f"unknown tool group(s) {bad}; valid groups: {sorted(ALL_TOOL_GROUPS)}"
+            )
+        return v
 
     @field_validator("namespace_allowlist", mode="before")
     @classmethod

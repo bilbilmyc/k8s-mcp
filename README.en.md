@@ -21,6 +21,7 @@
 ## Why k8s-mcp
 
 - **Controllable safety:** an on-demand read-only mode, namespace write boundaries, per-tool rate limiting, call timeouts, a bounded worker pool, and sanitized Kubernetes errors.
+- **Trimable tool surface:** `K8S_MCP_ENABLED_GROUPS` enables tool groups (`core` / `workload` / `observability` / `security` / `gpu` / `notify`) individually — a GPU-only or read-only deployment doesn't have to expose every tool to the agent.
 - **Designed for agents:** constrained tool inputs and diagnostic/explanation tools reduce trial-and-error calls.
 - **Operable:** a `doctor` command, reproducible bootstrap manifests, and CI checks for tool, documentation, and version drift.
 - **Incremental authorization:** begin with a read-only `view` identity and grant narrow namespace Roles only when writes are required.

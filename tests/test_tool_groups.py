@@ -13,7 +13,7 @@ from k8s_mcp.config import Settings, get_settings, reset_settings_cache
 from k8s_mcp.server import _doctor_payload, create_server
 from k8s_mcp.tool_groups import ALL_TOOL_GROUPS, TOOL_GROUP_MODULES
 
-# The 11 read-only NVIDIA GPU tools registered by the `gpu` group.
+# The 13 read-only NVIDIA GPU tools registered by the `gpu` group.
 _GPU_TOOLS = frozenset({
     "gpu_cluster_overview",
     "gpu_diagnose",
@@ -26,10 +26,12 @@ _GPU_TOOLS = frozenset({
     "gpu_utilization_history",
     "gpu_mig_overview",
     "gpu_dra_overview",
+    "gpu_capacity_analyze",
+    "gpu_idle_resources",
 })
 
-# Full inventory (92 group tools + ping), mirrors tests/test_tool_inventory.py.
-_FULL_INVENTORY_COUNT = 93
+# Full inventory (94 group tools + ping), mirrors tests/test_tool_inventory.py.
+_FULL_INVENTORY_COUNT = 95
 
 
 def _server_tools() -> frozenset[str]:

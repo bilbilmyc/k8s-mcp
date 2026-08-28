@@ -323,6 +323,22 @@ server 配 in-cluster Pod」这份站不住的部署文档；清掉挂账的 Pha
 - [x] 测试 +3（MIG 盘点/缺省、DRA 正常/缺 API 组/403）及分组提示适配，
   工具清单与中英文档计数同步 93
 
+---
+
+## v2.0.x — GPU 容量分析（2026-08-28）
+
+**主题**：落地 `docs/gpu.md` 路线表中「时间序列与容量分析」剩余半行
+（`gpu_capacity_analyze` / `gpu_idle_resources`），工具总数 93 → 95；
+GPU 路线仅剩 🔒 管理操作（设计上默认不实现，需要独立安全闸门）。
+
+- [x] **`gpu_capacity_analyze`** — 节点级"可分配/已持有 vs 窗口 AVG/MAX
+  利用率"关联；占而不用、Pending 与闲置并存碎片化、series 无法归属节点
+  三类发现；`avg_over_time`/`max_over_time` instant 查询，无 range 点数预算
+- [x] **`gpu_idle_resources`** — 低于阈值的 GPU series（最安静的在前，
+  保留窗口 MAX 防误杀突发型）；节点级 rollup 区分"持有但闲置"（合并）
+  与"无人持有"（缩容）
+- [x] 新模块 `gpu_capacity.py` 归入 `gpu` 组；测试 +7；文档与计数同步 95
+
 **变更记录**
 - 2026-07-05 初稿：从 plan 转成 checkbox 列表
 - 2026-07-05 B2 完成：bulk_* → list variant，修复 2 处重复检查 bug，所有 23 个 bulk 测试通过
@@ -332,3 +348,4 @@ server 配 in-cluster Pod」这份站不住的部署文档；清掉挂账的 Pha
 - 2026-07-07 v0.5.3 完成: `top_pods` / `top_nodes` 三档级联 + `bootstrap_metrics_server` 显式工具，643 tests passing
 - 2026-08-28 v1.0.x 完成: H1 工具分组开关 + H2 部署文档修正 + H3 Phase C 收账（C1 关闭/C3 完成）+ H4 仓库卫生，725 tests passing
 - 2026-08-28 v2.0.x 完成: 合并上游 2.0.0（client 复用重构）后新增 gpu_mig_overview / gpu_dra_overview，91 → 93 工具，766 tests passing
+- 2026-08-28 v2.0.x 完成: 新增 gpu_capacity_analyze / gpu_idle_resources，93 → 95 工具，773 tests passing

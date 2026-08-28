@@ -1,4 +1,4 @@
-# 工具参考（93 个，按功能分类）
+# 工具参考（95 个，按功能分类）
 
 > 这是**完整目录**——每个工具一行签名，按"读 / 写 / 删"分组。
 > 详细使用说明（陷阱、流程、为什么这么设计）见 [tools.md](./tools.md)。
@@ -7,7 +7,7 @@
 
 ## 工具分组（`K8S_MCP_ENABLED_GROUPS`）
 
-默认注册全部 93 个工具。只需要部分能力时（GPU 专用、只读审计等部署），
+默认注册全部 95 个工具。只需要部分能力时（GPU 专用、只读审计等部署），
 用逗号分隔的组名裁剪 Agent 看到的工具面（大小写不敏感，未知组名会拒绝启动）：
 
 | 组 | 覆盖的 tools/ 模块 | 典型部署 |
@@ -16,7 +16,7 @@
 | `workload` | workload、service、storage、autoscale、rollout、node_ops、certs、serviceaccount | 交付/运维写入 |
 | `observability` | metrics、prometheus、health、diagnostics、explain、resource_usage | 监控/诊断值班 |
 | `security` | rbac、networkpolicy | 安全审计 |
-| `gpu` | nvidia_gpu、nvidia_metrics | GPU/AI 集群 |
+| `gpu` | nvidia_gpu、nvidia_metrics、gpu_capacity | GPU/AI 集群 |
 | `notify` | notifier | 告警通知出口 |
 
 `ping`（health check）不属于任何组，始终注册。示例：`K8S_MCP_ENABLED_GROUPS=core,gpu`。
@@ -65,6 +65,8 @@
 - `gpu_diagnose(operator_namespace="gpu-operator")` — GPU 节点、ClusterPolicy、GPU Operator Pod 与 Pending GPU workload 的一键只读诊断
 - `gpu_mig_overview()` — MIG 只读盘点：`nvidia.com/mig-*` 切片资源、`nvidia.com/mig.*` 标签、ClusterPolicy `migManager.strategy`、每节点切片容量/可分配、持有切片的 Pod、超额与 Pending 的 MIG 请求
 - `gpu_dra_overview()` — DRA（resource.k8s.io v1 → v1beta1 自动回退）只读发现：DeviceClasses、每驱动 ResourceSlice 设备清单、ResourceClaims 的分配/预留状态；仅发现不修改
+- `gpu_capacity_analyze(duration="1h", metric_name="DCGM_FI_DEV_GPU_UTIL", idle_threshold=10.0, limit=50, prometheus_url=None)` — 把各节点 Kubernetes 可分配/已持有 GPU 单元与窗口内 AVG/MAX 利用率对齐；找出"占而不用"、Pending 旁边闲置、以及无法归属到节点的 series
+- `gpu_idle_resources(duration="24h", metric_name="DCGM_FI_DEV_GPU_UTIL", threshold=10.0, limit=50, prometheus_url=None)` — 按 exporter GPU series 列出窗口均值低于阈值的闲置卡（最安静的排最前，保留 MAX 以免误杀突发型），并按节点汇总"持有但闲置 vs 无人持有"
 - `gpu_metrics_catalog(metric_prefix="DCGM_", limit=100, prometheus_url=None)` — 从 Prometheus 发现真实存在的 DCGM / GPU 指标及其 series 数
 - `gpu_utilization_overview(utilization_metric="DCGM_FI_DEV_GPU_UTIL", memory_used_metric="DCGM_FI_DEV_FB_USED", memory_total_metric="DCGM_FI_DEV_FB_TOTAL", prometheus_url=None)` — 每 GPU 最新利用率与显存原始指标概览
 - `gpu_workload_utilization(pod_name, namespace="default", metric_name="DCGM_FI_DEV_GPU_UTIL", prometheus_url=None)` — 按 `namespace` / `pod` 标签读取一个 Pod 的 GPU 指标样本

@@ -5,6 +5,13 @@ All notable changes to k8s-mcp are documented here. Versions follow
 
 ## [Unreleased]
 
+### Added — GPU capacity analysis (93 → 95 tools)
+
+- **`src/k8s_mcp/tools/gpu_capacity.py`** (new module, `gpu` group) — joins the Kubernetes resource view (`nvidia_gpu`) with the Prometheus/DCGM view (`nvidia_metrics`).
+- **`gpu_capacity_analyze`** — per-node alignment of allocatable/held GPU units with window AVG/MAX utilization; WARN findings for reserved-but-idle nodes and free units stranded next to Pending GPU Pods; unmatched exporter series reported instead of dropped. Uses `avg_over_time`/`max_over_time` instant queries so no range-query point budget applies.
+- **`gpu_idle_resources`** — exporter GPU series whose window average sits below a threshold, quietest first with window MAX kept visible (bursty-low-average GPUs are not misjudged as dead); per-node rollup separates held-but-idle (consolidation signal) from unheld idle (scale-down signal).
+- Window bounds follow the existing metrics tools: integer Prometheus durations, 7d cap, metric-name validation, group-aware failure hints.
+
 ### Added — NVIDIA MIG & DRA discovery (91 → 93 tools)
 
 - **`gpu_mig_overview`** — read-only MIG inventory: `nvidia.com/mig-*` slice resources, `nvidia.com/mig.*` feature-discovery labels, GPU Operator `migManager.strategy` (ClusterPolicy, best-effort), per-Node slice capacity/allocatable, slice-consuming Pods, and WARN findings for requested profiles exceeding allocatable capacity or Pending Pods whose profile no Node advertises.
@@ -14,7 +21,7 @@ All notable changes to k8s-mcp are documented here. Versions follow
 
 ### Added — tool-surface groups (`K8S_MCP_ENABLED_GROUPS`)
 
-- **`src/k8s_mcp/tool_groups.py`** — single source of truth mapping six groups (`core` / `workload` / `observability` / `security` / `gpu` / `notify`) to the 31 `tools/` modules. `ping` is groupless and always registered.
+- **`src/k8s_mcp/tool_groups.py`** — single source of truth mapping six groups (`core` / `workload` / `observability` / `security` / `gpu` / `notify`) to the 32 `tools/` modules. `ping` is groupless and always registered.
 - **`K8S_MCP_ENABLED_GROUPS`** — comma-separated, case-insensitive group allowlist; unset/empty registers the full 93-tool inventory. Unknown group names fail at settings load instead of silently registering the wrong subset.
 - `doctor` output now includes the effective `enabled_groups` (`all` when unset).
 - 10 new tests in `tests/test_tool_groups.py`; test-env cleanup in `conftest.py` now wipes every `K8S_MCP_*` variable by prefix instead of a hand-maintained list that had already drifted.
@@ -28,7 +35,7 @@ All notable changes to k8s-mcp are documented here. Versions follow
 
 - ROADMAP Phase C closed out: C3 closed via the 2.0.0 auth rework (mode B/fallback kubeconfig resolution rewritten upstream; the small single-path dedup helper was dropped in the merge as obsolete); C1 closed after audit — multi-pod log fan-out and the notifier's shared `requests.Session` already shipped, and migrating `_prom_get` from urllib to requests was evaluated and declined (no user-visible gain, mock rewrites only).
 - Repository hygiene: `docs/PLAN.md` moved to `docs/archive/PLAN.md` (links updated), duplicate changelog block removed from `docs/ROADMAP.md`, `tests/test_tool_inventory.py` docstring drift fixed (87 → 91, v0.7.0 → v1.0.0).
-- 766 tests passing.
+- 773 tests passing.
 
 ## [2.0.0] — 2026-07-31
 

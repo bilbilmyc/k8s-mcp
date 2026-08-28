@@ -64,6 +64,7 @@ TOOL_GROUP_MODULES: dict[str, tuple[str, ...]] = {
     "gpu": (
         "nvidia_gpu",
         "nvidia_metrics",
+        "gpu_capacity",
     ),
     "notify": (
         "notifier",

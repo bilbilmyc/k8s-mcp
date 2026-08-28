@@ -73,8 +73,8 @@ def cluster_info() -> str:
     apps = client.AppsV1Api(api_client)
 
     # Counts — sequential apiserver calls; each is bounded by the
-    # Configuration-level conn_timeout / read_timeout configured in
-    # `client.py`. On huge clusters `Pods` may take seconds; we let it
+    # ApiClient request-level connect / read timeouts in `client.py`.
+    # On huge clusters `Pods` may take seconds; we let it
     # surface that latency honestly rather than masking it with parallel
     # fetches (which would complicate error attribution).
     lines.append("")

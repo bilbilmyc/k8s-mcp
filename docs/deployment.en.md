@@ -6,8 +6,8 @@
 
 | Environment | MCP configuration | Kubernetes identity |
 | --- | --- | --- |
-| Development / normal operations | `READ_ONLY=false` (default) | Restricted identity with the required write access |
-| Scoped staging writes | `READ_ONLY=false` + `NAMESPACE_ALLOWLIST=staging` | RoleBinding only in `staging` |
+| Development / normal operations | Default policy (no `READ_ONLY=false` override) | Restricted identity with the required write access |
+| Scoped staging writes | `NAMESPACE_ALLOWLIST=staging` | RoleBinding only in `staging` |
 | Audit / diagnostics | `READ_ONLY=true` | Read-only ServiceAccount or personal read-only kubeconfig |
 
 ## Quick deployment templates
@@ -56,6 +56,30 @@ k8s-mcp serve
 ```
 
 Tokens expire; re-mint when they do. Never commit them to client configs or the repository.
+
+### Option 3: in-cluster sidecar (subprocess launched inside the Agent container)
+
+The stdio server must be launched as a child process by an MCP client in the same container. Bundle `k8s-mcp` into the Agent image and use this Pod fragment to run the full Agent + MCP combination in-cluster — it is a client-side subprocess, not a standalone remote service:
+
+The stdio server must be launched as a child process by an MCP client in the same container. Merge this authentication fragment into the Agent or MCP client Pod; it is not a standalone remote service:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: your-agent
+  namespace: ops
+spec:
+  serviceAccountName: k8s-mcp-reader
+  containers:
+    - name: agent
+      image: your-registry/agent-with-k8s-mcp:tag
+      env:
+        - name: K8S_MCP_READ_ONLY
+          value: "true"
+```
+
+Configure that client to launch `command: k8s-mcp` inside the container. A standalone deployment first needs a remote MCP transport plus authentication, TLS, network policies, auditing, and request-size limits; this repository currently provides stdio only.
 
 ## Go-live checklist
 

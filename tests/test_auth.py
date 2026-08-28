@@ -1,6 +1,7 @@
 """Tests for auth mode selection (A / B / C)."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,7 +10,9 @@ from kubernetes import client
 
 from k8s_mcp.auth import (
     AuthError,
+    _load_kube_config,
     _load_token_config,
+    inspect_auth,
     is_in_cluster,
     load_configuration,
 )
@@ -91,8 +94,9 @@ def test_mode_b_explicit_kubeconfig(tmp_kubeconfig: Path):
     s = Settings(kubeconfig=str(tmp_kubeconfig), kube_context="test")
     cfg = load_configuration(s)
     assert cfg.host == "https://test.example.com:6443"
-    # kubernetes client stores kubeconfig token under 'BearerToken' key
-    assert "fake-token" in cfg.api_key.get("BearerToken", "")
+    # Kubernetes 29 uses `authorization`; newer clients use `BearerToken`.
+    token_value = cfg.api_key.get("BearerToken") or cfg.api_key.get("authorization", "")
+    assert "fake-token" in token_value
 
 
 def test_mode_c_when_in_cluster_no_kubeconfig():
@@ -141,6 +145,37 @@ def test_mode_b_default_kubeconfig_when_env_set(tmp_path: Path, monkeypatch):
     s = Settings()
     cfg = load_configuration(s)
     assert cfg.host == "https://default"
+
+
+def test_kubeconfig_env_preserves_multiple_paths(tmp_path: Path, monkeypatch):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.write_text("apiVersion: v1\nkind: Config\n")
+    second.write_text("apiVersion: v1\nkind: Config\n")
+    combined = f"{first}{os.pathsep}{second}"
+    monkeypatch.setenv("KUBECONFIG", combined)
+
+    with patch("k8s_mcp.auth.load_kube_config") as load:
+        _load_kube_config(Settings())
+
+    assert load.call_args.kwargs["config_file"] == combined
+
+
+def test_inspect_auth_reports_incomplete_token_pair_and_fallback(tmp_path: Path):
+    settings = Settings(api_server="https://api.example")
+    with patch("k8s_mcp.auth.is_in_cluster", return_value=False), \
+         patch("k8s_mcp.auth.Path.home", return_value=tmp_path):
+        mode, source, warnings = inspect_auth(settings)
+    assert (mode, source) == ("unavailable", "none")
+    assert any("K8S_MCP_API_TOKEN" in warning for warning in warnings)
+
+
+def test_inspect_auth_reports_incluster_before_standard_kubeconfig(monkeypatch):
+    monkeypatch.setenv("KUBECONFIG", "C:/does-not-need-to-exist")
+    with patch("k8s_mcp.auth.is_in_cluster", return_value=True):
+        mode, source, warnings = inspect_auth(Settings())
+    assert (mode, source) == ("in_cluster", "service_account")
+    assert warnings == []
 
 
 def test_mode_a_requires_both_api_server_and_token():

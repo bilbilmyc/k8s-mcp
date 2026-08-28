@@ -2,17 +2,18 @@
 
 Priority:
   A. apiserver URL + token   (settings.api_server AND settings.api_token set)
-  B. kubeconfig              (settings.kubeconfig path or default ~/.kube/config)
+  B. explicit kubeconfig     (settings.kubeconfig)
   C. in-cluster              (auto-detected via service account token file)
+  D. standard/default kubeconfig (KUBECONFIG or ~/.kube/config)
 
 中文说明：
 认证自动选择三档之一，按优先级匹配：
 
   - 模式 A：`K8S_MCP_API_SERVER` + `K8S_MCP_API_TOKEN` 都设置 → 直连 apiserver
-  - 模式 B：`K8S_MCP_KUBECONFIG` 显式路径，或 `KUBECONFIG` 环境变量，
-    或默认 `~/.kube/config`
+  - 模式 B：`K8S_MCP_KUBECONFIG` 显式路径
   - 模式 C：检测到 `/var/run/secrets/kubernetes.io/serviceaccount/token`
     → 集群内 SA 模式（sidecar / pod 内运行时）
+  - 最后尝试标准 `KUBECONFIG` 环境变量或默认 `~/.kube/config`
 
 任意一种匹配成功即可，三档全失败则抛 AuthError。
 """
@@ -64,27 +65,31 @@ def _load_token_config(settings: Settings) -> client.Configuration:
     return cfg
 
 
-def _resolve_kubeconfig_path(settings: Settings) -> str | None:
-    """Kubeconfig lookup order shared by both mode-B call sites:
-    explicit `K8S_MCP_KUBECONFIG` → `KUBECONFIG` env (first entry) →
-    default `~/.kube/config` when it exists. Returns None when nothing
-    points at a candidate."""
-    if settings.kubeconfig:
-        return str(Path(settings.kubeconfig).expanduser())
-    env_kc = os.environ.get("KUBECONFIG")
-    if env_kc:
-        return env_kc.split(os.pathsep)[0]
-    default = Path.home() / ".kube" / "config"
-    if default.exists():
-        return str(default)
-    return None
-
-
 def _load_kube_config(settings: Settings) -> client.Configuration:
     """Mode B: kubeconfig file (explicit path or KUBECONFIG env or default)."""
-    kubeconfig_path = _resolve_kubeconfig_path(settings)
+    kubeconfig_path = (
+        str(Path(settings.kubeconfig).expanduser()) if settings.kubeconfig else None
+    )
+    # When no explicit path, fall back to KUBECONFIG env (which the kubernetes
+    # client also reads), or the default ~/.kube/config location.
+    if kubeconfig_path is None:
+        env_kc = os.environ.get("KUBECONFIG")
+        if env_kc:
+            # The Kubernetes loader merges path-separated kubeconfig files.
+            # Preserve that standard behavior instead of silently using only
+            # the first entry.
+            kubeconfig_path = env_kc
+        else:
+            default = Path.home() / ".kube" / "config"
+            if default.exists():
+                kubeconfig_path = str(default)
 
-    if not kubeconfig_path or not Path(kubeconfig_path).exists():
+    existing_paths = (
+        [Path(p).expanduser() for p in kubeconfig_path.split(os.pathsep) if p]
+        if kubeconfig_path
+        else []
+    )
+    if not existing_paths or not any(path.exists() for path in existing_paths):
         raise AuthError(
             f"kubeconfig not found (path={kubeconfig_path!r}). "
             "Set K8S_MCP_KUBECONFIG or KUBECONFIG env var."
@@ -98,6 +103,40 @@ def _load_kube_config(settings: Settings) -> client.Configuration:
     except ConfigException as e:
         raise AuthError(f"Failed to load kubeconfig ({kubeconfig_path}): {e}") from e
     return client.Configuration.get_default_copy()
+
+
+def inspect_auth(settings: Settings) -> tuple[str, str, list[str]]:
+    """Inspect the auth source without loading credentials or contacting a cluster."""
+    warnings: list[str] = []
+    if settings.api_server or settings.api_token:
+        if settings.api_server and settings.api_token:
+            return "api_server_token", "K8S_MCP_API_SERVER", warnings
+        missing = "K8S_MCP_API_TOKEN" if settings.api_server else "K8S_MCP_API_SERVER"
+        warnings.append(f"incomplete API token auth: set {missing} as well")
+
+    if settings.kubeconfig:
+        paths = [Path(p).expanduser() for p in settings.kubeconfig.split(os.pathsep) if p]
+        if not any(path.exists() for path in paths):
+            warnings.append("K8S_MCP_KUBECONFIG does not point to an existing file")
+        return "kubeconfig", "K8S_MCP_KUBECONFIG", warnings
+
+    if is_in_cluster():
+        return "in_cluster", "service_account", warnings
+
+    env_kubeconfig = os.environ.get("KUBECONFIG")
+    if env_kubeconfig:
+        paths = [Path(p).expanduser() for p in env_kubeconfig.split(os.pathsep) if p]
+        if not any(path.exists() for path in paths):
+            warnings.append("KUBECONFIG does not contain an existing file")
+        return "kubeconfig", "KUBECONFIG", warnings
+
+    if (Path.home() / ".kube" / "config").exists():
+        return "kubeconfig", "~/.kube/config", warnings
+
+    warnings.append(
+        "no Kubernetes credentials detected; configure KUBECONFIG, API server + token, or in-cluster auth"
+    )
+    return "unavailable", "none", warnings
 
 
 def _load_incluster() -> client.Configuration:
@@ -124,7 +163,8 @@ def load_configuration(settings: Settings) -> client.Configuration:
         return _load_incluster()
 
     # Last try: default kubeconfig location
-    if _resolve_kubeconfig_path(settings):
+    default_kc = Path.home() / ".kube" / "config"
+    if default_kc.exists() or os.environ.get("KUBECONFIG"):
         logger.info("Auth mode B: default kubeconfig")
         return _load_kube_config(settings)
 

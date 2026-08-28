@@ -23,7 +23,7 @@ from kubernetes import dynamic
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import ResourceNotFoundError, ResourceNotUniqueError
 
-from ..client import get_api_client
+from ..client import get_dynamic_client
 from ..config import get_settings
 from ..formatters import describe as describe_fmt
 from ..formatters import format_age, mask_secret_data, short_table, to_yaml
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 def _dyn_client() -> dynamic.DynamicClient:
-    return dynamic.DynamicClient(get_api_client())
+    return get_dynamic_client()
 
 
 def _to_dict(resource: Any) -> dict:

@@ -13,18 +13,22 @@ Both are read-only and bypass the namespace allowlist.
   - `get_api_resources(prefix=...)`：列出所有 API 资源（含 CRD），
     字段与 `kubectl api-resources` 一致。
   - `explain_resource(kind, field_path=..., api_version=...)`：通过
-    OpenAPI v3 schema 反查 kind / 字段的定义与描述，等价于
+    OpenAPI schema 反查 kind / 字段的定义与描述，等价于
     `kubectl explain`。
 
 两个工具都只读，自动绕开 namespace allowlist（只读不需要守门）。
 """
 from __future__ import annotations
 
+import json
 import logging
+import threading
+import urllib.parse
+from concurrent.futures import Future
 
-from kubernetes import client
+from kubernetes.dynamic.resource import ResourceList
 
-from ..client import get_api_client
+from ..client import client_cache_key, get_api_client, get_dynamic_client
 from ..formatters import short_table
 
 logger = logging.getLogger(__name__)
@@ -49,84 +53,40 @@ def get_api_resources(prefix: str | None = None) -> str:
     Includes CRDs (custom resources registered in the cluster), so this is
     the right way to ask "what kinds exist here?".
     """
-    api = client.ApisApi(get_api_client())
     rows: list[dict[str, str]] = []
-
-    # Each "group" in /apis returns its own resource list.
-    # (Note: the core v1 group is at /api not /apis.)
-    groups = [g["name"] for g in api.get_api_versions().groups]
-    for group in groups:
-        try:
-            resources = api.get_api_resources(group).resources or []
-        except Exception as e:  # noqa: BLE001 — surface one bad group, keep going
-            logger.debug("api_resources: skipping group %s: %s", group, e)
-            continue
-        for r in resources:
-            name = (r.get("name") or "").strip()
-            kind = (r.get("kind") or "").strip()
-            api_version = f"{group}/{(r.get('version') or '').strip()}"
-            if not name or not kind:
-                continue
-            if prefix and prefix.lower() not in name.lower() and prefix.lower() not in kind.lower():
-                continue
-            namespaced = "true" if r.get("namespaced") else "false"
-            short_names = ",".join(r.get("shortNames") or [])
-            verbs = ",".join((r.get("verbs") or [])[:4])  # cap to first 4 verbs
-            rows.append({
-                "NAME": name,
-                "SHORTNAMES": short_names,
-                "APIVERSION": api_version,
-                "NAMESPACED": namespaced,
-                "KIND": kind,
-                "VERBS": verbs,
-            })
-
-    # Also include the core v1 group
-    core_resources = _core_api_resources()
-    for r in core_resources:
-        name = r["name"]
-        kind = r["kind"]
-        if prefix and prefix.lower() not in name.lower() and prefix.lower() not in kind.lower():
-            continue
-        rows.append({
-            "NAME": name,
-            "SHORTNAMES": r.get("shortName", ""),
-            "APIVERSION": "v1",
-            "NAMESPACED": "true",
-            "KIND": kind,
-            "VERBS": r.get("verbs", ""),
-        })
+    needle = prefix.lower() if prefix else None
+    # LazyDiscoverer.__iter__ yields one list per Kind (the SDK stores
+    # multiple same-Kind resources together), so flatten those groups.
+    try:
+        for discovered_group in get_dynamic_client().resources:
+            resources = discovered_group if isinstance(discovered_group, list) else [discovered_group]
+            for resource in resources:
+                if isinstance(resource, ResourceList):
+                    continue
+                name = (resource.name or "").strip()
+                kind = (resource.kind or "").strip()
+                if not name or not kind or "/" in name:
+                    continue
+                if needle and needle not in name.lower() and needle not in kind.lower():
+                    continue
+                rows.append({
+                    "NAME": name,
+                    "SHORTNAMES": ",".join(resource.short_names or []),
+                    "APIVERSION": resource.group_version,
+                    "NAMESPACED": "true" if resource.namespaced else "false",
+                    "KIND": kind,
+                    "VERBS": ",".join((resource.verbs or [])[:4]),
+                })
+    except Exception as exc:  # noqa: BLE001 - keep resources from healthy API groups
+        logger.debug("api_resources: discovery stopped after a group failure: %s", exc)
 
     if not rows:
         return f"(no API resources match prefix={prefix!r})"
     rows.sort(key=lambda x: (x["APIVERSION"], x["KIND"]))
     return short_table(rows, ["NAME", "SHORTNAMES", "APIVERSION", "NAMESPACED", "KIND", "VERBS"])
 
-
-def _core_api_resources() -> list[dict[str, str]]:
-    """Hardcoded list of Core v1 resources (the /api endpoint is not always
-    exposed as a discovery list by python-client)."""
-    return [
-        {"name": "pods", "shortName": "po", "kind": "Pod", "verbs": "get list watch create delete"},
-        {"name": "services", "shortName": "svc", "kind": "Service", "verbs": "get list watch create delete"},
-        {"name": "configmaps", "shortName": "cm", "kind": "ConfigMap", "verbs": "get list watch create delete"},
-        {"name": "secrets", "kind": "Secret", "verbs": "get list watch create delete"},
-        {"name": "namespaces", "shortName": "ns", "kind": "Namespace", "verbs": "get list watch create delete"},
-        {"name": "nodes", "shortName": "no", "kind": "Node", "verbs": "get list watch create delete"},
-        {"name": "persistentvolumes", "shortName": "pv", "kind": "PersistentVolume", "verbs": "get list watch create delete"},
-        {"name": "persistentvolumeclaims", "shortName": "pvc", "kind": "PersistentVolumeClaim", "verbs": "get list watch create delete"},
-        {"name": "serviceaccounts", "shortName": "sa", "kind": "ServiceAccount", "verbs": "get list watch create delete"},
-        {"name": "endpoints", "shortName": "ep", "kind": "Endpoints", "verbs": "get list watch"},
-        {"name": "events", "shortName": "ev", "kind": "Event", "verbs": "get list watch"},
-        {"name": "replicationcontrollers", "shortName": "rc", "kind": "ReplicationController", "verbs": "get list watch create delete"},
-        {"name": "resourcequotas", "shortName": "quota", "kind": "ResourceQuota", "verbs": "get list watch create delete"},
-        {"name": "limitranges", "shortName": "limits", "kind": "LimitRange", "verbs": "get list watch create delete"},
-        {"name": "podtemplates", "kind": "PodTemplate", "verbs": "get list watch create delete"},
-    ]
-
-
 # =============================================================================
-# explain_resource — kubectl explain via OpenAPI v3 schema
+# explain_resource — kubectl explain via aggregate OpenAPI schema
 # =============================================================================
 
 
@@ -188,54 +148,121 @@ def explain_resource(
 # would exceed the cap, we return it but skip caching — next call refetches.
 _openapi_cache: dict | None = None
 _openapi_cache_at: float = 0.0
+_openapi_cache_key: tuple | None = None
 _OPENAPI_CACHE_TTL_SECONDS = 300
 _OPENAPI_CACHE_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB
+_openapi_cache_lock = threading.Lock()
+_openapi_inflight: dict[tuple, Future[dict]] = {}
+
+
+def _call_openapi_json(relative_url: str) -> dict:
+    """Call one authenticated OpenAPI endpoint and return its JSON object."""
+    parsed = urllib.parse.urlsplit(relative_url)
+    api_client = get_api_client()
+    kwargs = {
+        "query_params": urllib.parse.parse_qsl(parsed.query),
+        "header_params": {"Accept": "application/json"},
+        "auth_settings": ["BearerToken"],
+        "_return_http_data_only": True,
+    }
+    try:
+        # Kubernetes 30+ renamed the single response type parameter to a
+        # status-code map. Keep the declared kubernetes>=29 compatibility.
+        result = api_client.call_api(
+            parsed.path,
+            "GET",
+            response_types_map={200: "object"},
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "response_types_map" not in str(exc):
+            raise
+        result = api_client.call_api(
+            parsed.path,
+            "GET",
+            response_type="object",
+            **kwargs,
+        )
+    if isinstance(result, tuple):
+        result = result[0]
+    return result if isinstance(result, dict) else {}
 
 
 def _fetch_openapi_spec() -> dict:
-    """Hit apiserver for the OpenAPI v3 schema. Returns the raw spec dict.
+    """Fetch one aggregate schema, preferring the single-call v2 endpoint.
 
-    Uses the lower-level `call_api("/openapi/v3", "GET")` route because
-    `kubernetes.client.OpenApiApi` was removed in client v36+. If the
-    cluster only exposes `/openapi/v2` (older clusters), the helper
-    falls back transparently.
+    Kubernetes still serves aggregate OpenAPI v2 alongside v3. V2 is one
+    request and therefore substantially cheaper than fetching every path in
+    the v3 index. If v2 is disabled, fetch and merge the v3 group-version
+    documents advertised by `/openapi/v3`.
     """
-    api = get_api_client()
-    for path in ("/openapi/v3", "/openapi/v2"):
-        try:
-            spec, _status, _hdrs = api.call_api(
-                path, "GET",
-                response_type="object",
-                auth_settings=["BearerToken"],
-            )
-            if isinstance(spec, dict):
-                return spec
-        except Exception:  # noqa: BLE001 — try next path
+    try:
+        v2 = _call_openapi_json("/openapi/v2")
+    except Exception as e:  # noqa: BLE001 — fall back to v3
+        logger.debug("OpenAPI v2 fetch failed; trying v3: %s", e)
+    else:
+        definitions = v2.get("definitions")
+        if isinstance(definitions, dict):
+            return {"components": {"schemas": definitions}}
+
+    try:
+        index = _call_openapi_json("/openapi/v3")
+    except Exception as e:  # noqa: BLE001 — surface as an empty schema
+        logger.debug("OpenAPI v3 index fetch failed: %s", e)
+        return {}
+
+    merged: dict = {}
+    for item in (index.get("paths") or {}).values():
+        relative_url = item.get("serverRelativeURL") if isinstance(item, dict) else None
+        if not relative_url:
             continue
-    return {}
+        try:
+            document = _call_openapi_json(relative_url)
+        except Exception as e:  # noqa: BLE001 — one unavailable API group should not hide all others
+            logger.debug("OpenAPI v3 document %s failed: %s", relative_url, e)
+            continue
+        schemas = document.get("components", {}).get("schemas", {})
+        if isinstance(schemas, dict):
+            merged.update(schemas)
+    return {"components": {"schemas": merged}}
 
 
-def _store_openapi_spec_if_within_cap(spec: dict | None) -> dict:
+def _fits_openapi_cache(value: dict) -> bool:
+    """Measure encoded JSON incrementally and stop once the cap is exceeded."""
+    total = 0
+    for chunk in json.JSONEncoder().iterencode(value):
+        total += len(chunk.encode("utf-8"))
+        if total > _OPENAPI_CACHE_MAX_BYTES:
+            return False
+    return True
+
+
+def _store_openapi_spec_if_within_cap(
+    spec: dict | None,
+    *,
+    cache_key: tuple | None = None,
+) -> dict:
     """Apply the size-cap policy to a freshly-fetched spec.
 
     Returns the spec to cache (or `None` if it's too big to retain). Split
     out from `_get_openapi_schema` so the cap policy is testable without
     touching the kubernetes client.
     """
-    global _openapi_cache, _openapi_cache_at
-    import json
+    global _openapi_cache, _openapi_cache_at, _openapi_cache_key
     schemas = (
         spec.get("components", {}).get("schemas", {})
         if isinstance(spec, dict)
         else {}
     )
-    if len(json.dumps(schemas)) <= _OPENAPI_CACHE_MAX_BYTES:
+    if _fits_openapi_cache(schemas):
         _openapi_cache = schemas
         _openapi_cache_at = _now()
+        _openapi_cache_key = cache_key
         return _openapi_cache
     # Schema too big to cache — leave cache empty so next call refetches.
     _openapi_cache = None
     _openapi_cache_at = 0.0
+    _openapi_cache_key = None
     return schemas
 
 
@@ -248,19 +275,53 @@ def _now() -> float:
 
 def _get_openapi_schema() -> dict:
     """Fetch and cache the cluster's OpenAPI v3 schema (lazy, TTL'd, size-capped)."""
-    global _openapi_cache, _openapi_cache_at
-    if _openapi_cache is not None and (_now() - _openapi_cache_at) <= _OPENAPI_CACHE_TTL_SECONDS:
-        return _openapi_cache
-    spec = _fetch_openapi_spec()
-    schemas = _store_openapi_spec_if_within_cap(spec)
-    return schemas
+    global _openapi_cache, _openapi_cache_at, _openapi_cache_key
+    key = client_cache_key()
+    with _openapi_cache_lock:
+        if _openapi_cache_key != key:
+            _openapi_cache = None
+            _openapi_cache_at = 0.0
+            _openapi_cache_key = None
+        if (
+            _openapi_cache is not None
+            and (_now() - _openapi_cache_at) <= _OPENAPI_CACHE_TTL_SECONDS
+        ):
+            return _openapi_cache
+        future = _openapi_inflight.get(key)
+        leader = future is None
+        if leader:
+            future = Future()
+            _openapi_inflight[key] = future
+
+    if not leader:
+        return future.result()
+
+    try:
+        spec = _fetch_openapi_spec()
+        with _openapi_cache_lock:
+            schemas = _store_openapi_spec_if_within_cap(spec, cache_key=key)
+        future.set_result(schemas)
+        return schemas
+    except BaseException as exc:
+        future.set_exception(exc)
+        # A leader has no consumer for its own Future exception. Retrieving it
+        # prevents Python from reporting an unobserved Future during cleanup.
+        future.exception()
+        raise
+    finally:
+        with _openapi_cache_lock:
+            if _openapi_inflight.get(key) is future:
+                _openapi_inflight.pop(key, None)
 
 
 def reset_openapi_cache() -> None:
     """Clear the OpenAPI schema cache. Test-only helper."""
-    global _openapi_cache, _openapi_cache_at
-    _openapi_cache = None
-    _openapi_cache_at = 0.0
+    global _openapi_cache, _openapi_cache_at, _openapi_cache_key
+    with _openapi_cache_lock:
+        _openapi_cache = None
+        _openapi_cache_at = 0.0
+        _openapi_cache_key = None
+        _openapi_inflight.clear()
 
 
 def _find_kind_def(schema: dict, kind: str, api_version: str | None) -> dict | None:
@@ -269,7 +330,7 @@ def _find_kind_def(schema: dict, kind: str, api_version: str | None) -> dict | N
     for k, v in schema.items():
         if not isinstance(v, dict):
             continue
-        # OpenAPI v3 model names look like "io.k8s.api.apps.v1.Deployment".
+        # Kubernetes model names look like "io.k8s.api.apps.v1.Deployment".
         # We match by checking whether the kind name and api_version tokens appear.
         parts = k.lower().split(".")
         if kind.lower() not in [p.split("_")[-1] for p in parts]:

@@ -2,8 +2,9 @@
 
 每个注册到 FastMCP 的工具同时也是 `k8s_mcp.tools.*` 下的纯 Python 函数，
 所以你可以在脚本、notebook 或 CLI 里直接调，**不用启 MCP server**。认证、
-安全、namespace allowlist 都仍然生效——它们住在 `config`、`safety` 和
-各 tool 的内部检查里，不在 MCP 层。
+Kubernetes HTTP 5s/30s 默认超时，以及各写工具内部的 read-only / namespace
+allowlist 仍然生效。MCP 边界的每工具 RPM、整次调用超时、有界并发和错误脱敏
+不会包裹这种直接调用；脚本需要自己处理调度和异常。
 
 ```python
 # 1) 加载配置（读取 K8S_MCP_* 环境变量）
@@ -55,7 +56,7 @@ print(out)
 `k8s_mcp.client.get_api_client()` 返回缓存的
 `kubernetes.client.api_client.ApiClient`，自动套用同样的三档认证，所以
 任何想下沉到原始 kubernetes-python-client 的代码也能享受 kubeconfig /
-apiserver-token / in-cluster 自动探测。
+apiserver-token / in-cluster 自动探测、共享连接池和默认请求超时。
 
 ## 适用场景
 

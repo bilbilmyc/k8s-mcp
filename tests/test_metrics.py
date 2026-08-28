@@ -1,9 +1,9 @@
 """Tests for the metrics cascade (top_pods / top_nodes + bootstrap_metrics_server).
 
 The non-trivial behavior is the **cascade contract**: top_pods / top_nodes
-must transparently fall back from metrics-server to Prometheus, and only
-escalate to `bootstrap_metrics_server` when both fail and write perms
-allow. The error message when ALL paths fail must literally name every
+must transparently fall back from metrics-server to Prometheus without
+installing components as a read side effect. The error message when both
+paths fail must literally name every
 next-step tool the agent can call, otherwise the agent fixates on
 "install metrics-server" and never reaches for `find_prometheus_service()`.
 
@@ -14,8 +14,8 @@ Tests split by cascade path:
   - `test_top_*_error_when_both_missing_and_read_only` — paths 1 + 2
     fail, path 3 unavailable (READ_ONLY). Error names bootstrap_metrics_server,
     find_prometheus_service(), prometheus_query().
-  - `test_top_*_auto_bootstraps_when_perms_allow` — paths 1 + 2 fail,
-    path 3 succeeds via the mocked apply_yaml path.
+  - `test_top_*_never_auto_bootstraps` — paths 1 + 2 fail and the explicit
+    bootstrap tool is not invoked.
 
 bootstrap_metrics_server itself:
   - `test_bootstrap_metrics_server_idempotent` — Deployment already exists
@@ -35,7 +35,8 @@ from k8s_mcp.tools import metrics
 
 
 @pytest.fixture(autouse=True)
-def _clear():
+def _clear(monkeypatch):
+    monkeypatch.setattr(metrics, "get_api_client", lambda: object())
     reset_settings_cache()
     yield
     reset_settings_cache()
@@ -204,6 +205,22 @@ def test_top_pods_label_selector_translated_to_pod_regex():
     assert "nginx-bbb" in out
 
 
+def test_pod_selector_lookup_uses_shared_api_client(monkeypatch):
+    api_client = object()
+    captured = {}
+    core = MagicMock()
+    core.list_namespaced_pod.return_value.items = []
+    monkeypatch.setattr(metrics, "get_api_client", lambda: api_client)
+
+    def build_core(received):
+        captured["api_client"] = received
+        return core
+
+    monkeypatch.setattr(metrics.client, "CoreV1Api", build_core)
+    metrics._pods_matching_selector("default", "app=web")
+    assert captured["api_client"] is api_client
+
+
 def test_top_nodes_via_prometheus_when_metrics_missing():
     fake_api = MagicMock()
     fake_api.return_value = _FakeCustomObjectsApi()
@@ -237,9 +254,6 @@ def test_top_pods_error_when_both_missing_and_read_only(monkeypatch):
     """
     monkeypatch.setenv("K8S_MCP_READ_ONLY", "true")
     reset_settings_cache()
-    # Reset the one-shot gate so this test sees a fresh attempt decision.
-    metrics._BOOTSTRAP_ATTEMPTED = False
-
     fake_api = MagicMock()
     fake_api.return_value = _FakeCustomObjectsApi()
     with patch.object(metrics, "_custom_objects_api", fake_api), \
@@ -258,8 +272,6 @@ def test_top_pods_error_when_both_missing_and_read_only(monkeypatch):
 def test_top_nodes_error_when_both_missing_and_read_only(monkeypatch):
     monkeypatch.setenv("K8S_MCP_READ_ONLY", "true")
     reset_settings_cache()
-    metrics._BOOTSTRAP_ATTEMPTED = False
-
     fake_api = MagicMock()
     fake_api.return_value = _FakeCustomObjectsApi()
     with patch.object(metrics, "_custom_objects_api", fake_api), \
@@ -279,8 +291,6 @@ def test_top_pods_error_when_both_missing_and_allowlist_excludes_kube_system(mon
     the same hint as READ_ONLY."""
     monkeypatch.setenv("K8S_MCP_NAMESPACE_ALLOWLIST", "default,app")
     reset_settings_cache()
-    metrics._BOOTSTRAP_ATTEMPTED = False
-
     fake_api = MagicMock()
     fake_api.return_value = _FakeCustomObjectsApi()
     with patch.object(metrics, "_custom_objects_api", fake_api), \
@@ -295,58 +305,25 @@ def test_top_pods_error_when_both_missing_and_allowlist_excludes_kube_system(mon
     assert "kube-system" in msg  # the deny reason surfaces
 
 
-# ---------- Path 3: bootstrap auto-attempts and succeeds --------------------
+# ---------- Path 3: bootstrap is always explicit ----------------------------
 
 
-def test_top_pods_auto_bootstraps_when_perms_allow(monkeypatch):
-    """When both paths fail and write perms allow kube-system writes,
-    the cascade auto-invokes bootstrap_metrics_server. We mock the
-    apply step + Deployment probe so this test stays offline."""
-    metrics._BOOTSTRAP_ATTEMPTED = False
-
+def test_top_pods_never_auto_bootstraps(monkeypatch):
     fake_metrics_api = MagicMock()
     fake_metrics_api.return_value = _FakeCustomObjectsApi()
-
-    fake_apps_api = MagicMock()
-    # Probe reads as 404 (not installed yet) — bootstrap proceeds.
-    fake_apps_api.read_namespaced_deployment.side_effect = ApiException(
-        status=404, reason="Not Found"
-    )
 
     with patch.object(metrics, "_custom_objects_api", fake_metrics_api), \
          patch.object(
              metrics.prom_mod, "_query_instant",
              side_effect=LookupError("Prometheus is not auto-discoverable"),
          ), \
-         patch.object(metrics, "apply_yaml") as mock_apply, \
-         patch.object(metrics.client, "AppsV1Api", return_value=fake_apps_api), \
-         patch.object(metrics, "_patch_metrics_server_kubelet_flag"), \
-         patch.object(metrics, "_wait_for_deployment_ready", return_value=(1, 1, 0)), \
-         patch("urllib.request.urlopen") as mock_urlopen:
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b"x"
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-        # Bootstrap succeeds. The cascade's metrics-server retry still
-        # 404s (no real apiserver) so top_pods raises RuntimeError — but
-        # we asserted the auto-bootstrap was attempted.
-        with pytest.raises(RuntimeError):
+         patch.object(metrics, "bootstrap_metrics_server") as bootstrap:
+        with pytest.raises(RuntimeError, match="NOT RUN automatically"):
             metrics.top_pods(namespace="default")
-        mock_apply.assert_called_once()
-        # Probe read happened once (the post-apply wait is mocked).
-        assert fake_apps_api.read_namespaced_deployment.call_count == 1
-        # The manifest fetch was made exactly once.
-        assert mock_urlopen.call_count == 1
-    assert metrics._BOOTSTRAP_ATTEMPTED is True
+        bootstrap.assert_not_called()
 
 
-def test_top_pods_bootstrap_attempt_is_one_shot_per_process(monkeypatch):
-    """A failed bootstrap attempt must NOT be retried on the next
-    top_pods call — that would hammer the apiserver with apply + probe
-    every time the agent re-runs top_pods."""
-    metrics._BOOTSTRAP_ATTEMPTED = False
-
+def test_repeated_top_pods_never_auto_bootstraps(monkeypatch):
     fake_api = MagicMock()
     fake_api.return_value = _FakeCustomObjectsApi()
     with patch.object(metrics, "_custom_objects_api", fake_api), \
@@ -354,16 +331,12 @@ def test_top_pods_bootstrap_attempt_is_one_shot_per_process(monkeypatch):
              metrics.prom_mod, "_query_instant",
              side_effect=LookupError("Prometheus is not auto-discoverable"),
          ):
-        # First call: tries bootstrap. Mock it to raise so the gate flips.
-        with patch.object(metrics, "bootstrap_metrics_server", side_effect=RuntimeError("boom")):
+        with patch.object(metrics, "bootstrap_metrics_server") as bootstrap:
             with pytest.raises(RuntimeError):
                 metrics.top_pods()
-            # Second call in the same process: bootstrap skipped.
-            metrics.bootstrap_metrics_server.reset_mock()
-            with pytest.raises(RuntimeError) as ei:
+            with pytest.raises(RuntimeError):
                 metrics.top_pods()
-            metrics.bootstrap_metrics_server.assert_not_called()
-            assert "already attempted" in str(ei.value)
+            bootstrap.assert_not_called()
 
 
 # ---------- bootstrap_metrics_server tool itself ---------------------------

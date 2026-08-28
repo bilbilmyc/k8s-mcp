@@ -1,7 +1,7 @@
 """Resource usage metrics (kubectl top equivalent).
 
-Three-tier cascade so `top_pods` / `top_nodes` work even when metrics-server
-isn't installed:
+Two read paths plus an explicit recovery tool let `top_pods` / `top_nodes`
+work without mutating the cluster when metrics-server isn't installed:
 
   1. **metrics-server** (the canonical data source, fastest path) — direct
      apiserver aggregation layer `/apis/metrics.k8s.io/v1beta1/...`.
@@ -10,16 +10,13 @@ isn't installed:
      `container_memory_working_set_bytes` (kubelet/cAdvisor scrape) for
      pods and `node_cpu_seconds_total` + `node_memory_MemAvailable_bytes`
      (node-exporter) for nodes.
-  3. **`bootstrap_metrics_server`** — auto-invoked when both #1 and #2
-     fail AND write permission to `kube-system` is available. Idempotent:
-     already-installed Deployment short-circuits with status. When the
-     auto-install can't proceed (READ_ONLY or allowlist excludes
-     kube-system), the cascade raises a RuntimeError that names the
-     bootstrap tool and the missing-prometheus path as fallbacks.
+  3. **`bootstrap_metrics_server`** — an explicit recovery tool when both
+     read paths fail. Metric reads never install cluster components as a
+     side effect.
 
 中文：
 - `top_pods` / `top_nodes`：优先走 metrics-server，没有就 fallback 到
-  Prometheus；都没有就尝试 `bootstrap_metrics_server` 安装。
+  Prometheus；都没有时提示显式调用 `bootstrap_metrics_server`。
 - `sort_by=memory|cpu`：排序字段；CPU 单位是核（如 250m），内存是字节。
 - `prometheus_url`：可选，绕过自动发现；agent 通常先用
   `find_prometheus_service()` 拿到 URL 再传过来。
@@ -75,13 +72,6 @@ _METRICS_SERVER_DEFAULT_MANIFEST_URL = (
 _METRICS_SERVER_DEPLOYMENT_NAME = "metrics-server"
 _METRICS_SERVER_NAMESPACE = "kube-system"
 
-# One-shot gate so a failed bootstrap attempt doesn't get retried on every
-# subsequent top_pods/top_nodes call. Reset by process restart (intentional —
-# if the operator fixes kube-system perms, the next start picks up the new
-# state).
-_BOOTSTRAP_ATTEMPTED = False
-
-
 # =============================================================================
 # Exceptions
 # =============================================================================
@@ -90,8 +80,8 @@ _BOOTSTRAP_ATTEMPTED = False
 class _MetricsServerNotInstalledError(Exception):
     """Internal signal: metrics-server's aggregated API returned 404.
 
-    Translated by the public `top_*` wrappers into either a Prometheus
-    fallback or a bootstrap-attempt, so it never escapes to the agent.
+    Translated by the public `top_*` wrappers into a Prometheus fallback and
+    explicit recovery guidance, so it never escapes to the agent.
     """
 
 
@@ -115,9 +105,8 @@ def top_pods(
          auto-discoverable), query it directly with
          `container_cpu_usage_seconds_total` /
          `container_memory_working_set_bytes`.
-      3. `bootstrap_metrics_server` — if both fail and write permission to
-         `kube-system` is available, install metrics-server, then retry
-         step 1.
+      3. Guidance for explicitly calling `bootstrap_metrics_server`; this
+         read tool never installs components automatically.
 
     Only emits CPU + memory (the two things metrics-server / cAdvisor
     carry). For richer signals (network rx/tx, fs r/w, per-container
@@ -150,13 +139,11 @@ def top_pods(
         pass
 
     # Prometheus fallback. If it succeeds, we're done; if it raises a
-    # connection error, we'll try the bootstrap path before giving up.
+    # connection error, surface the explicit recovery paths.
     try:
         return _top_pods_prometheus(namespace, label_selector, sort_by, prometheus_url)
     except (LookupError, ValueError) as prom_err:
-        bootstrap_msg = _maybe_bootstrap_metrics_server(
-            trigger_reason=str(prom_err),
-        )
+        bootstrap_msg = _bootstrap_metrics_server_guidance()
         raise RuntimeError(
             "top_pods: neither metrics-server nor Prometheus is reachable.\n"
             f"  - metrics-server: not installed (apiserver 404 on /apis/metrics.k8s.io)\n"
@@ -178,7 +165,7 @@ def top_nodes(
       2. Prometheus via `node_cpu_seconds_total{mode!="idle"}` /
          `node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes`
          (node-exporter scrape).
-      3. `bootstrap_metrics_server` if both fail and perms allow.
+      3. Guidance for explicitly calling `bootstrap_metrics_server`.
 
     Args:
         sort_by: "cpu" or "memory" (default "memory").
@@ -198,9 +185,7 @@ def top_nodes(
     try:
         return _top_nodes_prometheus(sort_by, prometheus_url)
     except (LookupError, ValueError) as prom_err:
-        bootstrap_msg = _maybe_bootstrap_metrics_server(
-            trigger_reason=str(prom_err),
-        )
+        bootstrap_msg = _bootstrap_metrics_server_guidance()
         raise RuntimeError(
             "top_nodes: neither metrics-server nor Prometheus is reachable.\n"
             f"  - metrics-server: not installed (apiserver 404 on /apis/metrics.k8s.io)\n"
@@ -456,7 +441,7 @@ def _pods_matching_selector(
     is already gone at this point).
     """
     try:
-        core = client.CoreV1Api()
+        core = client.CoreV1Api(get_api_client())
         if namespace:
             pods = core.list_namespaced_pod(
                 namespace=namespace, label_selector=label_selector
@@ -477,37 +462,22 @@ def _promql_escape(s: str) -> str:
 
 
 # =============================================================================
-# Path 3: bootstrap metrics-server (auto + explicit)
+# Path 3: explicit bootstrap metrics-server guidance
 # =============================================================================
 
 
-def _maybe_bootstrap_metrics_server(*, trigger_reason: str) -> str:
-    """Try to install metrics-server when the cascade can't find either
-    data source. Returns a guidance message for the public tool to embed
-    in its RuntimeError — empty if bootstrap ran successfully (caller
-    will then retry path 1 and either succeed or surface a fresh error).
-
-    Behavior:
-      - Read-only mode or `kube-system` not in `NAMESPACE_ALLOWLIST`
-        → no-op; returns hint that points the agent at the explicit tool
-        name and the Prometheus path.
-      - First invocation in this process where write perms allow →
-        apply the official manifest, wait briefly for Deployment
-        availability, return "" (caller proceeds to retry metrics-server).
-      - Second+ invocation with the same trigger → no-op; return hint
-        with the recorded failure reason (avoid hammering the apiserver
-        on every subsequent top_pods call).
-    """
-    global _BOOTSTRAP_ATTEMPTED
+def _bootstrap_metrics_server_guidance() -> str:
+    """Explain the explicit recovery path without mutating the cluster."""
     settings = get_settings()
 
-    if not _write_permitted(settings, _METRICS_SERVER_NAMESPACE):
+    if not _write_permitted(settings):
         return (
             "  - bootstrap_metrics_server: SKIPPED (server is read-only, "
-            "or `kube-system` is not in K8S_MCP_NAMESPACE_ALLOWLIST).\n"
+            "or a namespace allowlist around kube-system blocks the manifest's "
+            "cluster-scoped RBAC).\n"
             "    Next steps (pick one):\n"
-            "      a) Allow `kube-system` in K8S_MCP_NAMESPACE_ALLOWLIST and "
-            "re-call, or\n"
+            "      a) Allow the required writes and explicitly call "
+            "bootstrap_metrics_server(), or\n"
             "      b) Manually install metrics-server:\n"
             "         kubectl apply -f "
             "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml\n"
@@ -515,34 +485,19 @@ def _maybe_bootstrap_metrics_server(*, trigger_reason: str) -> str:
             "agent discover it via `find_prometheus_service()`.\n"
         )
 
-    if _BOOTSTRAP_ATTEMPTED:
-        return (
-            "  - bootstrap_metrics_server: SKIPPED (already attempted this "
-            "process; restart the MCP server to retry, or check kube-system "
-            "Deployment/metrics-server manually).\n"
-        )
-
-    _BOOTSTRAP_ATTEMPTED = True
-    try:
-        bootstrap_metrics_server()
-        return ""  # success — caller will retry path 1
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "auto-bootstrap of metrics-server failed (trigger: %s): %s",
-            trigger_reason, e,
-        )
-        return (
-            f"  - bootstrap_metrics_server: auto-install FAILED — {e}\n"
-            "    Inspect the cluster and re-call, or install Prometheus.\n"
-        )
+    return (
+        "  - bootstrap_metrics_server: NOT RUN automatically. Read tools do "
+        "not install cluster components. Call bootstrap_metrics_server() "
+        "explicitly after reviewing its cluster-scoped RBAC changes.\n"
+    )
 
 
-def _write_permitted(settings: Settings, namespace: str) -> bool:
+def _write_permitted(settings: Settings) -> bool:
     if settings.read_only:
         return False
-    if settings.namespace_allowlist is None:
-        return True
-    return namespace in settings.namespace_allowlist
+    # The upstream manifest includes ClusterRole and ClusterRoleBinding.
+    # A namespace allowlist deliberately rejects all cluster-scoped writes.
+    return settings.namespace_allowlist is None
 
 
 def bootstrap_metrics_server(
@@ -555,10 +510,8 @@ def bootstrap_metrics_server(
     Idempotent: if `Deployment/metrics-server` already exists, returns
     immediately with its status instead of re-applying.
 
-    Used by the `top_pods` / `top_nodes` cascade (auto-invoked when both
-    metrics-server and Prometheus are unreachable and write permission
-    to `kube-system` is available), and as an explicit tool the agent
-    can call when it wants metrics-server up before other work.
+    Explicit tool for installing metrics-server before calling `top_pods`
+    or `top_nodes`. Metric reads never invoke this tool automatically.
 
     Args:
         manifest_url: defaults to the official
@@ -585,12 +538,9 @@ def bootstrap_metrics_server(
         Note: <helpful note if any>
 
     Errors:
-      PermissionError — READ_ONLY is true, or `kube-system` is not in
-        `K8S_MCP_NAMESPACE_ALLOWLIST` (the allowlist only accepts
-        namespaced writes; cluster-scoped Resources in the manifest like
-        ClusterRole / ClusterRoleBinding / ServiceAccount *are* needed
-        and *will* be applied if `kube-system` is allowed — K8s itself
-        does the namespaced-vs-cluster-scoped split).
+      PermissionError — READ_ONLY is true, or a namespace allowlist is set.
+        The upstream manifest includes ClusterRole and ClusterRoleBinding,
+        and namespace-scoped MCP sessions intentionally reject those writes.
       RuntimeError — manifest fetch failed, apiserver rejected apply,
         or Deployment didn't reach Available within `wait_seconds`.
     """
@@ -601,12 +551,12 @@ def bootstrap_metrics_server(
             "Server is in read-only mode (K8S_MCP_READ_ONLY=true); "
             "installing metrics-server requires write access."
         )
-    if settings.namespace_allowlist is not None and (
-        _METRICS_SERVER_NAMESPACE not in settings.namespace_allowlist
-    ):
+    if settings.namespace_allowlist is not None:
         raise PermissionError(
-            f"Namespace '{_METRICS_SERVER_NAMESPACE}' is not in "
-            "K8S_MCP_NAMESPACE_ALLOWLIST; install metrics-server refused."
+            "Installing metrics-server in kube-system includes cluster-scoped RBAC resources, "
+            "which K8S_MCP_NAMESPACE_ALLOWLIST intentionally blocks. Use a "
+            "separate reviewed deployment identity or apply the manifest outside "
+            "this namespace-scoped MCP server."
         )
 
     url = (
@@ -616,7 +566,7 @@ def bootstrap_metrics_server(
     )
 
     # 1. Idempotency probe.
-    apps = client.AppsV1Api()
+    apps = client.AppsV1Api(get_api_client())
     existing = None
     try:
         existing = apps.read_namespaced_deployment(
@@ -714,7 +664,7 @@ def _patch_metrics_server_kubelet_flag() -> None:
     The patch is intentionally narrow — only the `args` field is touched,
     everything else stays as upstream.
     """
-    apps = client.AppsV1Api()
+    apps = client.AppsV1Api(get_api_client())
     try:
         deploy = apps.read_namespaced_deployment(
             name=_METRICS_SERVER_DEPLOYMENT_NAME,
@@ -764,7 +714,7 @@ def _wait_for_deployment_ready(
     """Poll Deployment status until ready or timeout. Returns (ready, desired, waited)."""
     import time
 
-    apps = client.AppsV1Api()
+    apps = client.AppsV1Api(get_api_client())
     deadline = time.monotonic() + timeout_s
     waited = 0
     while True:

@@ -17,10 +17,10 @@ import logging
 from typing import Any
 
 import yaml
-from kubernetes import client, dynamic
+from kubernetes import client
 from kubernetes.client.rest import ApiException
 
-from ..client import get_api_client
+from ..client import get_api_client, get_dynamic_client
 from ..config import get_settings
 from ..formatters import short_table
 from . import generic
@@ -229,6 +229,10 @@ def _networking_v1():
     return client.NetworkingV1Api(get_api_client())
 
 
+def _dyn_client():
+    return get_dynamic_client()
+
+
 # ---------- get_endpoints ------------------------------------------------------
 
 
@@ -258,7 +262,7 @@ def get_endpoints(service_name: str, namespace: str = "default") -> str:
     # modern cluster.
     slices: list = []
     try:
-        dc = dynamic.DynamicClient(get_api_client())
+        dc = _dyn_client()
         slice_res = dc.resources.get(
             api_version="discovery.k8s.io/v1", kind="EndpointSlice",
         )

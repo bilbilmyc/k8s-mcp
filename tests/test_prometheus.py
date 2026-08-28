@@ -1,6 +1,8 @@
 """Tests for Prometheus integration: discovery, query, query_range, pod_metrics."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from kubernetes.client.rest import ApiException
 
@@ -9,7 +11,8 @@ from k8s_mcp.tools import prometheus
 
 
 @pytest.fixture(autouse=True)
-def _clear():
+def _clear(monkeypatch):
+    monkeypatch.setattr(prometheus, "get_api_client", lambda *_args, **_kwargs: object())
     reset_settings_cache()
     prometheus.reset_prometheus_discovery_cache()
     yield
@@ -46,10 +49,29 @@ def test_explicit_url_wins_over_discovery(monkeypatch):
         def read_namespaced_service(self, **kw):
             return fake_read(**kw)
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     url = prometheus._resolve_prometheus_url(prometheus.get_settings())
     assert url == "http://my-prom.example.com:9090"
     assert calls["apiserver"] == 0  # no apiserver calls
+
+
+def test_discovery_uses_shared_api_client(monkeypatch):
+    api_client = object()
+    captured = {}
+
+    class _Core:
+        def read_namespaced_service(self, **_kwargs):
+            return _FakeService()
+
+    monkeypatch.setattr(prometheus, "get_api_client", lambda *_args: api_client)
+
+    def build_core(received):
+        captured["api_client"] = received
+        return _Core()
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", build_core)
+    prometheus._resolve_prometheus_url(prometheus.get_settings())
+    assert captured["api_client"] is api_client
 
 
 def test_discovery_finds_monitoring_prometheus(monkeypatch):
@@ -68,7 +90,7 @@ def test_discovery_finds_monitoring_prometheus(monkeypatch):
         def read_namespaced_service(self, name, namespace, **kw):
             return fake_read(name=name, namespace=namespace, **kw)
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     url = prometheus._resolve_prometheus_url(prometheus.get_settings())
     assert url == "http://10.96.10.20:9090"
     # We stop at the first hit, not iterate the full candidate list
@@ -89,7 +111,7 @@ def test_discovery_falls_back_to_later_candidate(monkeypatch):
         def read_namespaced_service(self, name, namespace, **kw):
             return fake_read(name=name, namespace=namespace, **kw)
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     url = prometheus._resolve_prometheus_url(prometheus.get_settings())
     assert url == "http://10.96.50.50:9090"
 
@@ -107,7 +129,7 @@ def test_discovery_not_found_returns_helpful_message(monkeypatch):
         def read_namespaced_service(self, name, namespace, **kw):
             return fake_read(name=name, namespace=namespace, **kw)
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     with pytest.raises(LookupError) as exc:
         prometheus._resolve_prometheus_url(prometheus.get_settings())
     msg = str(exc.value)
@@ -131,7 +153,7 @@ def test_discovery_not_found_is_cached(monkeypatch):
         def read_namespaced_service(self, name, namespace, **kw):
             return fake_read(name=name, namespace=namespace, **kw)
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     s = prometheus.get_settings()
     with pytest.raises(LookupError):
         prometheus._resolve_prometheus_url(s)
@@ -139,6 +161,102 @@ def test_discovery_not_found_is_cached(monkeypatch):
         prometheus._resolve_prometheus_url(s)
     # Should be at most one apiserver sweep, not multiple
     assert calls["n"] <= len(prometheus._PROM_CANDIDATES)
+
+
+def test_negative_discovery_cache_expires(monkeypatch):
+    now = {"value": 100.0}
+    calls = {"n": 0}
+    monkeypatch.setattr(prometheus.time, "monotonic", lambda: now["value"])
+
+    class _Core:
+        def read_namespaced_service(self, **_kwargs):
+            calls["n"] += 1
+            raise ApiException(status=404, reason="not found")
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
+    with pytest.raises(LookupError):
+        prometheus._resolve_prometheus_url(prometheus.get_settings())
+    first_sweep_calls = calls["n"]
+    now["value"] += prometheus._DISCOVERY_NEGATIVE_TTL_SECONDS + 1
+    with pytest.raises(LookupError):
+        prometheus._resolve_prometheus_url(prometheus.get_settings())
+    assert calls["n"] == first_sweep_calls * 2
+
+
+def test_negative_cache_ttl_starts_after_a_slow_scan(monkeypatch):
+    now = {"value": 100.0}
+    calls = {"n": 0}
+    monkeypatch.setattr(prometheus.time, "monotonic", lambda: now["value"])
+
+    class _Core:
+        def read_namespaced_service(self, **_kwargs):
+            calls["n"] += 1
+            now["value"] += 31
+            raise ApiException(status=404, reason="not found")
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
+    settings = prometheus.get_settings()
+    with pytest.raises(LookupError):
+        prometheus._resolve_prometheus_url(settings)
+    first_sweep_calls = calls["n"]
+    with pytest.raises(LookupError):
+        prometheus._resolve_prometheus_url(settings)
+    assert calls["n"] == first_sweep_calls
+
+
+def test_discovery_cache_is_bound_to_kubernetes_client_identity(monkeypatch):
+    identity = {"value": ("cluster-a",)}
+    monkeypatch.setattr(
+        prometheus,
+        "client_cache_key",
+        lambda _settings: identity["value"],
+    )
+
+    class _Core:
+        def read_namespaced_service(self, **_kwargs):
+            ip = "10.0.0.1" if identity["value"] == ("cluster-a",) else "10.0.0.2"
+            return _FakeService(ip=ip)
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
+    settings = prometheus.get_settings()
+    assert prometheus._resolve_prometheus_url(settings) == "http://10.0.0.1:9090"
+    identity["value"] = ("cluster-b",)
+    assert prometheus._resolve_prometheus_url(settings) == "http://10.0.0.2:9090"
+
+
+def test_positive_discovery_cache_expires(monkeypatch):
+    now = {"value": 100.0}
+    calls = {"n": 0}
+    monkeypatch.setattr(prometheus.time, "monotonic", lambda: now["value"])
+
+    class _Core:
+        def read_namespaced_service(self, **_kwargs):
+            calls["n"] += 1
+            return _FakeService(ip=f"10.0.0.{calls['n']}")
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
+    settings = prometheus.get_settings()
+    assert prometheus._resolve_prometheus_url(settings) == "http://10.0.0.1:9090"
+    assert prometheus._resolve_prometheus_url(settings) == "http://10.0.0.1:9090"
+    now["value"] += prometheus._DISCOVERY_POSITIVE_TTL_SECONDS + 1
+    assert prometheus._resolve_prometheus_url(settings) == "http://10.0.0.2:9090"
+
+
+def test_concurrent_discovery_uses_one_apiserver_probe(monkeypatch):
+    calls = {"n": 0}
+
+    class _Core:
+        def read_namespaced_service(self, **_kwargs):
+            calls["n"] += 1
+            return _FakeService(ip="10.0.0.9")
+
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
+    settings = prometheus.get_settings()
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        urls = list(executor.map(lambda _: prometheus._resolve_prometheus_url(settings), range(16)))
+
+    assert set(urls) == {"http://10.0.0.9:9090"}
+    assert calls["n"] == 1
 
 
 def test_service_url_picks_http_port():
@@ -382,7 +500,7 @@ def test_query_propagates_prom_error_when_discovery_fails(monkeypatch):
         def read_namespaced_service(self, **kw):
             raise ApiException(status=404, reason="not found")
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     with pytest.raises(LookupError, match="Ask the user"):
         prometheus.prometheus_query("up")
 
@@ -697,7 +815,7 @@ def test_query_with_passed_url_skips_discovery(monkeypatch):
             apiserver_calls["n"] += 1
             return _FakeService()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     prometheus.prometheus_query("up", prometheus_url="http://agent-found.example.com:9090")
     assert captured["base_url"] == "http://agent-found.example.com:9090"
     # Discovery did NOT run — apiserver not called
@@ -771,7 +889,7 @@ def test_find_prometheus_service_scans_all_namespaces(monkeypatch):
                 flat.extend(items)
             return type("R", (), {"items": flat})()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     out = prometheus.find_prometheus_service()
     # Both non-standard and standard names should appear (table format)
     assert "monitor-kube-prometheus-st-prometheus" in out
@@ -799,7 +917,7 @@ def test_find_prometheus_service_namespace_filter(monkeypatch):
             assert namespace == "default"
             return type("R", (), {"items": services})()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     out = prometheus.find_prometheus_service(namespace="default")
     assert "default" in out
     assert "prometheus" in out
@@ -826,7 +944,7 @@ def test_find_prometheus_service_filters_non_matching_names(monkeypatch):
         def list_service_for_all_namespaces(self, **kw):
             return type("R", (), {"items": services})()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     out = prometheus.find_prometheus_service()
     assert "my-app" not in out
     assert "prometheus-operated" in out
@@ -838,13 +956,10 @@ def test_find_prometheus_service_empty_returns_helpful_notice(monkeypatch):
     reset_settings_cache()
 
     class _Core:
-        def list_namespace(self, **kw):
-            return type("R", (), {"items": [_ns_obj("default")]})()
-
-        def list_namespaced_service(self, namespace, **kw):
+        def list_service_for_all_namespaces(self, **kw):
             return type("R", (), {"items": [_ns_service("default", "nginx")]})()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     out = prometheus.find_prometheus_service()
     assert "No Prometheus-looking Services" in out
     assert out.strip() != ""
@@ -908,7 +1023,7 @@ def test_find_prometheus_service_clusterip_row_recommends_nodeport(monkeypatch):
                 ],
             })()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     out = prometheus.find_prometheus_service()
 
     # Table column headers must include the new TYPE/RECOMMENDED columns.
@@ -968,7 +1083,7 @@ def test_find_prometheus_service_nodeport_row_says_direct(monkeypatch):
                 ],
             })()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     out = prometheus.find_prometheus_service()
 
     assert "NodePort" in out
@@ -1028,7 +1143,7 @@ def test_find_prometheus_service_loadbalancer_row_says_direct(monkeypatch):
                 ],
             })()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     out = prometheus.find_prometheus_service()
 
     assert "LoadBalancer" in out
@@ -1078,7 +1193,7 @@ def test_find_prometheus_service_guidance_omits_portforward_warning_when_only_no
                 ],
             })()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     out = prometheus.find_prometheus_service()
 
     # Guidance is still present (top-level NodePort / LoadBalancer section)
@@ -1170,7 +1285,7 @@ def test_nodeport_already_nodeport_short_circuits(monkeypatch):
             node_port=31234,
         )],
     })
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     out = prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
     assert "already type=NodePort" in out
     assert "no new Service was created" in out
@@ -1185,7 +1300,7 @@ def test_nodeport_loadbalancer_also_short_circuits(monkeypatch):
             selector={"app": "prom"},
         )],
     })
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     out = prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
     assert "LoadBalancer" in out
     assert "no new Service was created" in out
@@ -1215,7 +1330,7 @@ def test_nodeport_clusterip_creates_clone(monkeypatch):
         return body
 
     fake._on_create = simulate_apiserver_allocate
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     out = prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
     assert "Created NodePort clone" in out
     assert "monitoring/prometheus-np" in out
@@ -1249,7 +1364,7 @@ def test_nodeport_does_not_set_node_port_in_request(monkeypatch):
             body.spec.ports[0].node_port = 31200
             return body
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
     # The body we hand to the apiserver carries no node_port — the
     # apiserver fills it in atomically (single-leader, in-memory set).
@@ -1286,7 +1401,7 @@ def test_nodeport_targets_http_port_only(monkeypatch):
         return body
 
     fake._on_create = grab_body
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
     sent_ports = captured["body"].spec.ports
     # Only one port; it's the `http` one
@@ -1312,7 +1427,7 @@ def test_nodeport_targets_web_when_no_http(monkeypatch):
         return body
 
     fake._on_create = grab_body
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
     assert captured["body"].spec.ports[0].name == "web"
 
@@ -1335,7 +1450,7 @@ def test_nodeport_targets_first_port_for_unusual_names(monkeypatch):
         return body
 
     fake._on_create = grab_body
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
     assert captured["body"].spec.ports[0].name == "my-custom-port"
 
@@ -1356,7 +1471,7 @@ def test_nodeport_apiserver_error_wrapped(monkeypatch):
             err.body = b'{"message":"forbidden"}'
             raise err
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     with pytest.raises(RuntimeError, match="HTTP 422"):
         prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
 
@@ -1374,7 +1489,7 @@ def test_nodeport_idempotent_reuses_existing_clone(monkeypatch):
                           node_port=31299),
         ],
     }, namespaces=["monitoring"])
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     out = prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
     assert "already exists" in out
     # No third Service was added
@@ -1389,7 +1504,7 @@ def test_nodeport_rejects_headless_service(monkeypatch):
             selector={"app": "prom"},
         )],
     }, namespaces=["monitoring"])
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     with pytest.raises(ValueError, match="Headless"):
         prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
 
@@ -1402,7 +1517,7 @@ def test_nodeport_rejects_empty_selector(monkeypatch):
             type_="ClusterIP", ip="10.96.10.20", selector={},
         )],
     }, namespaces=["monitoring"])
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     with pytest.raises(ValueError, match="no selector"):
         prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
 
@@ -1414,7 +1529,7 @@ def test_nodeport_rejects_empty_ports(monkeypatch):
             selector={"app": "prom"}, ports=[],
         )],
     }, namespaces=["monitoring"])
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     with pytest.raises(ValueError, match="no ports"):
         prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
 
@@ -1422,7 +1537,7 @@ def test_nodeport_rejects_empty_ports(monkeypatch):
 def test_nodeport_404_raises_value_error(monkeypatch):
     """A missing source Service → actionable error, not raw ApiException."""
     fake = _FakeCoreForNodeport({}, namespaces=[])
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     with pytest.raises(ValueError, match="not found"):
         prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
 
@@ -1468,7 +1583,7 @@ def test_nodeport_no_retry_loop(monkeypatch):
         )],
     }, namespaces=["monitoring"])
     fake._on_create = counting_create
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: fake)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: fake)
     prometheus.expose_prometheus_as_nodeport("monitoring", "prometheus")
     assert calls["n"] == 1  # exactly one apiserver roundtrip
 
@@ -1584,7 +1699,7 @@ def test_resolve_wide_scan_finds_non_standard_namespace(monkeypatch):
             "kube-system": [_svc("kube-system", "kube-dns")],
         },
     )
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: core)
     url = prometheus._resolve_prometheus_url(prometheus.get_settings())
     assert url == "http://10.96.3.39:9090"
 
@@ -1624,7 +1739,7 @@ def test_resolve_wide_scan_prefers_nodeport_over_clusterip(monkeypatch):
             })(),
         ],
     })()
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: core)
     url = prometheus._resolve_prometheus_url(prometheus.get_settings())
     # NodePort is preferred, AND the URL is now the real externally-reachable
     # form (`<node-ip>:<node_port>`) instead of the ClusterIP URL the
@@ -1661,7 +1776,7 @@ def test_resolve_hardcoded_nodeport_candidate_returns_external_url(monkeypatch):
                 ],
             })()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     url = prometheus._resolve_prometheus_url(prometheus.get_settings())
     assert url == "http://10.0.0.5:31200"
 
@@ -1688,7 +1803,7 @@ def test_resolve_nodeport_falls_back_to_clusterip_when_no_node(monkeypatch):
             # Empty — no addresses found.
             return type("R", (), {"items": []})()
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     url = prometheus._resolve_prometheus_url(prometheus.get_settings())
     assert url == "http://10.96.10.20:9090"
 
@@ -1711,7 +1826,7 @@ def test_resolve_wide_scan_respects_allowlist(monkeypatch):
             "monitoring": [_svc("monitoring", "kube-dns")],
         },
     )
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: core)
     with pytest.raises(LookupError):
         prometheus._resolve_prometheus_url(prometheus.get_settings())
 
@@ -1734,9 +1849,30 @@ def test_resolve_wide_scan_allowlist_includes_match(monkeypatch):
             "monitoring": [_svc("monitoring", "grafana")],
         },
     )
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: core)
     url = prometheus._resolve_prometheus_url(prometheus.get_settings())
     assert url == "http://10.96.3.39:9090"
+
+
+def test_resolve_allowlist_skips_hardcoded_namespaces_outside_scope(monkeypatch):
+    monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "default")
+    reset_settings_cache()
+    core = _WideScanCore(
+        namespaces=["default"],
+        services_by_ns={
+            "default": [_svc("default", "custom-prometheus", ip="10.96.9.9")],
+        },
+    )
+    hardcoded_reads = {"n": 0}
+
+    def reject_hardcoded_reads(**_kwargs):
+        hardcoded_reads["n"] += 1
+        raise AssertionError("candidate namespace is outside the allowlist")
+
+    core.read_namespaced_service = reject_hardcoded_reads
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: core)
+    assert prometheus._resolve_prometheus_url(prometheus.get_settings()) == "http://10.96.9.9:9090"
+    assert hardcoded_reads["n"] == 0
 
 
 # =============================================================================
@@ -1765,7 +1901,7 @@ def test_find_prometheus_service_respects_allowlist(monkeypatch):
             ],
         },
     )
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: core)
     out = prometheus.find_prometheus_service()
     # Allowed ns shows up
     assert "kube-prometheus-stack-prometheus" in out
@@ -1774,26 +1910,21 @@ def test_find_prometheus_service_respects_allowlist(monkeypatch):
     assert "monitor-kube-prometheus-st-prometheus" not in out
 
 
-def test_find_prometheus_service_explicit_namespace_bypasses_allowlist(monkeypatch):
-    """An explicit `namespace=` arg is a deliberate single-ns query — it
-    should NOT be silently filtered by the allowlist. (The caller knows
-    what they're asking for.)"""
+def test_find_prometheus_service_explicit_namespace_respects_allowlist(monkeypatch):
+    """The discovery allowlist is a request and information boundary even
+    when the caller supplies an explicit namespace."""
     monkeypatch.delenv("K8S_MCP_PROMETHEUS_URL", raising=False)
     monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "monitoring")
     reset_settings_cache()
 
     class _Core:
         def list_namespaced_service(self, namespace, **kw):
-            assert namespace == "default"
-            return _SvcList([
-                _svc("default", "monitor-kube-prometheus-st-prometheus",
-                     ip="10.96.3.39"),
-            ])
+            raise AssertionError(f"unexpected API call for {namespace}")
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     out = prometheus.find_prometheus_service(namespace="default")
-    assert "monitor-kube-prometheus-st-prometheus" in out
-    assert "default" in out
+    assert "excluded by allowlist" in out
+    assert "monitoring" in out
 
 
 def test_find_prometheus_service_empty_allowlist_surfaces_allowlist_in_message(monkeypatch):
@@ -1813,7 +1944,7 @@ def test_find_prometheus_service_empty_allowlist_surfaces_allowlist_in_message(m
             ],
         },
     )
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: core)
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: core)
     out = prometheus.find_prometheus_service()
     assert "allowlist" in out.lower()
     assert "monitoring" in out
@@ -1845,7 +1976,7 @@ def test_wide_scan_with_namespace_uses_namespaced_list(monkeypatch):
             called["all_ns"] += 1
             return _SvcList([])
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     pairs = prometheus._wide_scan_prometheus_matches(
         _Core(), prometheus.get_settings(), namespace="monitoring",
     )
@@ -1855,34 +1986,24 @@ def test_wide_scan_with_namespace_uses_namespaced_list(monkeypatch):
     assert pairs[0][0] == "monitoring"
 
 
-def test_wide_scan_with_namespace_bypasses_allowlist(monkeypatch):
-    """Allowlist is meaningless for an explicit namespace request —
-    caller is naming the namespace, not bounding the search surface.
-    If allowlist were applied, the explicit request could be silently
-    dropped, which is the opposite of what the agent asked for."""
+def test_wide_scan_with_namespace_respects_allowlist(monkeypatch):
+    """An explicit namespace outside the discovery allowlist makes no API call."""
     monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "other-ns")
     reset_settings_cache()
 
     class _Core:
         def list_namespaced_service(self, namespace, **kw):
-            # Namespace != allowlist but caller asked for it explicitly —
-            # we should still return the result.
-            return _SvcList([
-                _svc(namespace, "prometheus",
-                     ip="10.96.1.1", port=9090, svc_type="ClusterIP"),
-            ])
+            raise AssertionError(f"unexpected API call for {namespace}")
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda *_args, **_kwargs: _Core())
     pairs = prometheus._wide_scan_prometheus_matches(
         _Core(), prometheus.get_settings(), namespace="monitoring",
     )
-    assert len(pairs) == 1
-    assert pairs[0][0] == "monitoring"
+    assert pairs == []
 
 
 def test_wide_scan_cluster_wide_still_honors_allowlist(monkeypatch):
-    """Cluster-wide mode keeps the existing allowlist behavior — this
-    is the regression pin for the merge."""
+    """An allowlist uses namespaced calls and skips the cluster-wide list."""
     monkeypatch.setenv("K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST", "monitoring")
     reset_settings_cache()
 
@@ -1894,15 +2015,36 @@ def test_wide_scan_cluster_wide_still_honors_allowlist(monkeypatch):
     ]
 
     class _Core:
+        all_namespace_calls = 0
+
         def list_service_for_all_namespaces(self, **kw):
+            self.all_namespace_calls += 1
             return _SvcList(services)
 
         def list_namespaced_service(self, namespace, **kw):
-            return _SvcList([])
+            return _SvcList([svc for svc in services if svc.metadata.namespace == namespace])
 
-    monkeypatch.setattr(prometheus.client, "CoreV1Api", lambda: _Core())
+    core = _Core()
     pairs = prometheus._wide_scan_prometheus_matches(
-        _Core(), prometheus.get_settings(),
+        core, prometheus.get_settings(),
     )
-    # Allowlist drops the "other" ns service; only monitoring survives.
     assert [p[0] for p in pairs] == ["monitoring"]
+    assert core.all_namespace_calls == 0
+
+
+def test_wide_scan_allowlist_stops_after_forbidden(monkeypatch):
+    monkeypatch.setenv(
+        "K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST",
+        "monitoring,observability",
+    )
+    reset_settings_cache()
+    calls = []
+
+    class _Core:
+        def list_namespaced_service(self, namespace, **_kwargs):
+            calls.append(namespace)
+            raise ApiException(status=403, reason="forbidden")
+
+    with pytest.raises(ApiException, match="forbidden"):
+        prometheus._wide_scan_prometheus_matches(_Core(), prometheus.get_settings())
+    assert calls == ["monitoring"]

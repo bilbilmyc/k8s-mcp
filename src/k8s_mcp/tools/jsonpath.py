@@ -23,17 +23,16 @@ from __future__ import annotations
 
 import logging
 
-from kubernetes import dynamic
 from kubernetes.client.rest import ApiException
 
-from ..client import get_api_client
+from ..client import get_dynamic_client
 from .wait_tool import _api_version_for, _jsonpath
 
 logger = logging.getLogger(__name__)
 
 
 def _dyn():
-    return dynamic.DynamicClient(get_api_client())
+    return get_dynamic_client()
 
 
 def get_resource_jsonpath(

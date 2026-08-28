@@ -28,10 +28,9 @@ k8s-mcp doctor
 
 ```bash
 export KUBECONFIG="$HOME/.kube/config"
-export K8S_MCP_READ_ONLY=false
 ```
 
-未设置 `KUBECONFIG` 时，Kubernetes Python client 会尝试默认 kubeconfig 和 in-cluster 配置。
+认证优先级是：成对的 API Server + token → `K8S_MCP_KUBECONFIG` → in-cluster ServiceAccount → 标准 `KUBECONFIG`（支持多路径合并）或默认 `~/.kube/config`。使用默认路径时无需设置任何认证变量。
 
 ### 直连 API Server
 
@@ -50,9 +49,7 @@ export K8S_MCP_API_CA_CERT=/absolute/path/to/ca.crt
   "mcpServers": {
     "k8s": {
       "command": "k8s-mcp",
-      "args": ["serve"],
       "env": {
-        "K8S_MCP_READ_ONLY": "false",
         "KUBECONFIG": "/absolute/path/to/kubeconfig"
       }
     }
@@ -60,7 +57,7 @@ export K8S_MCP_API_CA_CERT=/absolute/path/to/ca.crt
 }
 ```
 
-Windows 请使用已安装 `k8s-mcp` 的 Python 环境中的命令绝对路径；客户端无法继承 shell 环境时，把必要配置放在 `env` 块中。
+无参数就是 stdio 默认入口；`serve` 是可选别名。Windows 请使用已安装 `k8s-mcp` 的 Python 环境中的命令绝对路径；客户端无法继承 shell 环境时，把必要配置放在 `env` 块中。若它能访问默认 kubeconfig，整个 `env` 块可省略。
 
 ## 需要时切换为只读
 
@@ -70,6 +67,8 @@ k8s-mcp doctor
 ```
 
 常规写入建议配置 `K8S_MCP_NAMESPACE_ALLOWLIST=staging`，随后先让 Agent 执行 `whoami`、`list_resources` 或 `cluster_health_snapshot`，确认身份与目标 namespace。RBAC 模板见[部署指南](./deployment.md)。
+
+也就是说，常见策略只需要一项配置：只读用 `K8S_MCP_READ_ONLY=true`；受限写入用 `K8S_MCP_NAMESPACE_ALLOWLIST=staging`。限流、超时、并发和 Kubernetes HTTP 连接池均已有默认值。
 
 ## 验证清单
 

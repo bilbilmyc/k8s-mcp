@@ -19,9 +19,25 @@ All notable changes to k8s-mcp are documented here. Versions follow
 
 ### Internal
 
-- ROADMAP Phase C closed out: C3 done (`_resolve_kubeconfig_path()` dedup in `auth.py`); C1 closed after audit — multi-pod log fan-out and the notifier's shared `requests.Session` already shipped, and migrating `_prom_get` from urllib to requests was evaluated and declined (no user-visible gain, mock rewrites only).
+- ROADMAP Phase C closed out: C3 closed via the 2.0.0 auth rework (mode B/fallback kubeconfig resolution rewritten upstream; the small single-path dedup helper was dropped in the merge as obsolete); C1 closed after audit — multi-pod log fan-out and the notifier's shared `requests.Session` already shipped, and migrating `_prom_get` from urllib to requests was evaluated and declined (no user-visible gain, mock rewrites only).
 - Repository hygiene: `docs/PLAN.md` moved to `docs/archive/PLAN.md` (links updated), duplicate changelog block removed from `docs/ROADMAP.md`, `tests/test_tool_inventory.py` docstring drift fixed (87 → 91, v0.7.0 → v1.0.0).
 - 725 tests passing.
+
+## [2.0.0] — 2026-07-31
+
+### Breaking changes
+
+- `top_pods` / `top_nodes` no longer install metrics-server as a read side effect. They retain the metrics-server → Prometheus read cascade and recommend the explicit `bootstrap_metrics_server` tool when both paths fail.
+- `K8S_MCP_PROMETHEUS_NAMESPACE_ALLOWLIST` is now a strict discovery boundary: an explicit `find_prometheus_service(namespace=...)` outside the allowlist is rejected without an API request.
+- Invalid log levels, comma-only allowlists, and `K8S_MCP_DEFAULT_TAIL_LINES` values outside 1–10000 now fail configuration validation instead of being accepted silently.
+
+### Changed — configuration and runtime performance
+
+- Kubernetes calls now share a thread-safe `ApiClient` and `DynamicClient`; direct API-server/token authentication is honored by Prometheus and metrics tools instead of falling back to the SDK global configuration.
+- The default 5s connect / 30s read timeout is injected into real SDK requests, and the reusable HTTP pool is sized automatically from `MAX_CONCURRENT_TOOLS`.
+- Prometheus namespace allowlists now issue namespaced Service lists instead of downloading every Service and filtering client-side. Negative discovery results expire after 30 seconds.
+- OpenAPI discovery supports both Kubernetes 29 and 36 client call shapes, prefers the one-request aggregate v2 schema, falls back to merged v3 documents, and single-flights concurrent cache misses.
+- Minimal client examples omit redundant `serve` and `READ_ONLY=false` settings. `doctor` now reports the detected auth source, transport defaults, and actionable warnings without exposing credentials.
 
 ## [1.0.0] — 2026-07-28
 
@@ -555,7 +571,7 @@ Net result: a safer production posture without changing any of the
 ## [0.1.1] — 2026-04-xx
 - Initial PyPI release notes.
 
-[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/0.4.3...HEAD
+[Unreleased]: https://github.com/bilbilmyc/k8s-mcp/compare/v2.0.0...HEAD
 [0.4.3]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.4.0...v0.4.1
@@ -578,3 +594,4 @@ Net result: a safer production posture without changing any of the
 [0.6.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.5.3...v0.6.0
 [0.6.1]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.6.0...v0.6.1
 [1.0.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v0.6.1...v1.0.0
+[2.0.0]: https://github.com/bilbilmyc/k8s-mcp/compare/v1.0.0...v2.0.0

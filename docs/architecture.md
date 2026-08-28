@@ -7,7 +7,7 @@ src/k8s_mcp/
 ├── server.py         # FastMCP 入口，注册所有工具
 ├── config.py         # Settings（pydantic-settings，K8S_MCP_* env）
 ├── auth.py           # 三档认证（apiserver+token / kubeconfig / in-cluster）
-├── client.py         # 缓存的 ApiClient 工厂
+├── client.py         # 线程安全缓存的 ApiClient / DynamicClient 工厂
 ├── formatters.py     # YAML / Table / Describe + Secret 脱敏
 ├── safety.py         # RateLimit + ToolTimeout + SafeApiError 脱敏
 └── tools/
@@ -81,10 +81,11 @@ v1 只走 stdio。理由：
 
 ### 进程内状态（重启会丢）
 
-MCP server 是单进程的，3 处 in-memory 缓存：
+MCP server 是单进程的，4 类 in-memory 状态：
 
-- **apiserver ApiClient** —— 跟 settings 的 auth 字段绑定。auth 字段变就重建。
-- **Prometheus 候选 Service 列表** —— 走 stale-on-error，失败重扫。
+- **apiserver ApiClient + DynamicClient** —— 跟 settings 的 auth / 并发字段绑定；共享连接池和 discovery cache，配置变化时重建。
+- **OpenAPI schema** —— 5 分钟 TTL、8 MiB 上限，并发 miss 只抓取一次。
+- **Prometheus 候选 Service** —— 成功缓存 5 分钟、失败缓存 30 秒，并发 miss 只扫描一次。
 - **Token bucket（rate limit）** —— 进程内，per-tool。重启即重置。
 
 LLM Agent（Cherry Studio / Claude Desktop）的 UI 重启**不会**重启 MCP server；

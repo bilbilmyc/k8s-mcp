@@ -1,6 +1,9 @@
 """Tests for Settings."""
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from k8s_mcp.config import Settings
 
 
@@ -14,16 +17,34 @@ def test_defaults():
     assert s.api_token is None
     assert s.max_concurrent_tools == 8
     assert s.notifier_allow_private_hosts is False
+    assert s.metrics_server_manifest_url is None
 
 
 def test_env_prefix(monkeypatch):
-    monkeypatch.setenv("K8S_MCP_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("K8S_MCP_LOG_LEVEL", "debug")
     monkeypatch.setenv("K8S_MCP_READ_ONLY", "true")
     monkeypatch.setenv("K8S_MCP_DEFAULT_TAIL_LINES", "500")
     s = Settings()
     assert s.log_level == "DEBUG"
     assert s.read_only is True
     assert s.default_tail_lines == 500
+
+
+def test_allowlist_is_deduplicated_in_stable_order(monkeypatch):
+    monkeypatch.setenv("K8S_MCP_NAMESPACE_ALLOWLIST", "app,default,app")
+    assert Settings().namespace_allowlist == ["app", "default"]
+
+
+def test_nonempty_but_value_less_allowlist_is_rejected(monkeypatch):
+    monkeypatch.setenv("K8S_MCP_NAMESPACE_ALLOWLIST", ",")
+    with pytest.raises(ValidationError, match="must contain at least one value"):
+        Settings()
+
+
+@pytest.mark.parametrize("tail_lines", [0, 10_001])
+def test_default_tail_lines_is_bounded(tail_lines):
+    with pytest.raises(ValidationError):
+        Settings(default_tail_lines=tail_lines)
 
 
 def test_ns_allowed_when_no_allowlist():

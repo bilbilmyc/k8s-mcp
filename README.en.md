@@ -36,13 +36,12 @@ k8s-mcp --help
 k8s-mcp doctor
 ```
 
-`doctor` neither connects to the cluster nor prints credentials. It only reports redacted runtime policy; `read_only` is `false` by default.
+`doctor` neither connects to the cluster nor prints credentials. It reports effective defaults, the detected auth source, transport bounds, and configuration warnings; `read_only` is `false` by default.
 
 ### 2. Provide Kubernetes credentials
 
 ```bash
 export KUBECONFIG="$HOME/.kube/config"   # optional when using the default path
-export K8S_MCP_READ_ONLY=false             # default; optional to set
 ```
 
 See [Quick start](./docs/quickstart.en.md) for kubeconfig, API-server token, and in-cluster authentication.
@@ -54,9 +53,7 @@ See [Quick start](./docs/quickstart.en.md) for kubeconfig, API-server token, and
   "mcpServers": {
     "k8s": {
       "command": "k8s-mcp",
-      "args": ["serve"],
       "env": {
-        "K8S_MCP_READ_ONLY": "false",
         "KUBECONFIG": "/absolute/path/to/kubeconfig"
       }
     }
@@ -64,7 +61,7 @@ See [Quick start](./docs/quickstart.en.md) for kubeconfig, API-server token, and
 }
 ```
 
-The historical no-argument launch remains compatible: `k8s-mcp` starts the stdio server by default. See [Quick start](./docs/quickstart.en.md) for client configuration, Windows paths, and troubleshooting.
+`k8s-mcp` starts the stdio server by default; `serve` remains an explicit alias. The `env` block can also be omitted when the client can access the default `~/.kube/config`. See [Quick start](./docs/quickstart.en.md) for client configuration, Windows paths, and troubleshooting.
 
 ### 4. Switch to read-only mode when needed
 

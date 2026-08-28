@@ -198,7 +198,7 @@ HMAC token 校验不构成任何额外防护（agent 自己就能伪造），徒
 
 - `top_pods` 优先走 Kubernetes 聚合层 API `/apis/metrics.k8s.io/...`
   （metrics-server），失败时**自动 fallback 到 Prometheus**（cAdvisor +
-  node-exporter）—— 见下面 [top_pods / top_nodes 级联](#top_pods--top_nodes-级联metrics-server--prometheus--bootstrap)。
+  node-exporter）—— 见下面 [top_pods / top_nodes 读取级联](#top_pods--top_nodes-读取级联--显式恢复)。
 - Prometheus 工具走 Prometheus 自己的 HTTP API（默认 `:9090`），能查
   Prometheus 已抓取的所有指标（cAdvisor、node-exporter、各应用的
   exporter / ServiceMonitor 都行）。
@@ -260,7 +260,7 @@ k8s-mcp 走"三层发现 + 两套桥接"：
 
 ---
 
-## `top_pods` / `top_nodes` —— 级联（metrics-server → Prometheus → bootstrap）
+## `top_pods` / `top_nodes` —— 读取级联 + 显式恢复
 
 签名：
 
@@ -279,7 +279,7 @@ top_nodes(
 ```
 
 `top_pods` / `top_nodes` 是 `kubectl top` 的等价工具，但在 metrics-server
-缺失时**不会傻乎乎地 404**——它走三档级联，让 `top` 几乎在所有集群上
+缺失时**不会直接 404**——它走两档只读级联，让 `top` 在常见集群上
 都能直接用：
 
 1. **metrics-server（最快路径）** —— 走 K8s 聚合层
@@ -295,36 +295,25 @@ top_nodes(
    现算。`label_selector` 在 Prometheus 路径上会被翻译成 pod-name 正则
    （多一次 apiserver list，但只一次）；找不到匹配的 pod 时退回到
    namespace-only filter 并标注。
-3. **`bootstrap_metrics_server`（仅当 1+2 都失败且有写权限时自动跑）** ——
-   当 path 1 404 且 path 2 也连不上 Prometheus 时，**如果**
-   `READ_ONLY=false` **且** `kube-system` 在 `NAMESPACE_ALLOWLIST` 里，
-   自动 apply 上游 `components.yaml` 到 `kube-system`、patch 上
-   `--kubelet-insecure-tls`（自建集群的 kubelet 自签证书场景）、等
-   Deployment ready，然后回到 path 1 重试。**整个过程 agent 看不见**：
-   agent 只看到一个 `top_pods()` 调用，最终返回一张表（或者一条
-   "bootstrap 失败，请检查 kube-system 权限" 的提示）。
+3. **显式恢复** —— 两条读取路径都失败时，错误会推荐
+   `bootstrap_metrics_server()`，但不会自动调用。普通指标查询不会隐式下载
+   manifest、写入 cluster-scoped RBAC 或额外等待 30 秒。
 
-**错误传播**：三档全失败时 `top_pods` / `top_nodes` 抛
+**错误传播**：两条读取路径都失败时 `top_pods` / `top_nodes` 抛
 `RuntimeError`，**字面**列出下一步可以做什么：
 
 ```
 top_pods: neither metrics-server nor Prometheus is reachable.
   - metrics-server: not installed (apiserver 404 on /apis/metrics.k8s.io)
   - prometheus: Prometheus is not auto-discoverable
-  - bootstrap_metrics_server: SKIPPED (kube-system is not in
-    K8S_MCP_NAMESPACE_ALLOWLIST).
-    Next steps (pick one):
-      a) Allow `kube-system` in K8S_MCP_NAMESPACE_ALLOWLIST and re-call
-      b) Manually install metrics-server:
-         kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
-      c) Install Prometheus (kube-prometheus-stack) and let the agent
-         discover it via `find_prometheus_service()`.
+  - bootstrap_metrics_server: NOT RUN automatically. Call it explicitly
+    after reviewing its cluster-scoped RBAC changes.
   - OR call prometheus_query(<PromQL>, prometheus_url=<URL>) directly
     once a Prometheus URL is known.
 ```
 
-这样 agent 不会卡在 "metrics-server 没装我该怎么办" 的循环里——`c)` 和
-最后那条 `prometheus_query(...)` 提示它直接绕过 `top_*` 拿数据。
+这样 agent 不会卡在 "metrics-server 没装我该怎么办" 的循环里；最后一条
+`prometheus_query(...)` 提示它直接绕过 `top_*` 拿数据。
 
 ### `bootstrap_metrics_server` —— 显式触发
 
@@ -338,17 +327,17 @@ bootstrap_metrics_server(
 ) -> str
 ```
 
-Agent 想在执行 `top_pods` 之前预先把 metrics-server 装好时显式调用；
-或者 `top_pods` 自动 bootstrap 失败后手动重试。**幂等**：检测到
+Agent 想在执行 `top_pods` 之前预先把 metrics-server 装好时显式调用。
+**幂等**：检测到
 `Deployment/metrics-server` 已存在直接返回 `status=AlreadyInstalled`
 不再 apply。
 
 离线 / 私有镜像：覆盖 `K8S_MCP_METRICS_SERVER_MANIFEST_URL` 指向自托管
-manifest（env 段 [dev / 离线](./env.md#dev--离线)）。
+manifest（见[环境变量参考](./env.md#可观测性与组件引导)）。
 
-**One-shot gate**：级联内的自动 bootstrap 是**单次**的——同一个进程内
-首次失败后再调用 `top_pods` 不会再次 retry，避免 agent 在循环里反复
-apply + probe 把 apiserver 打满。重启 MCP server 后重置。
+上游 manifest 包含 ClusterRole / ClusterRoleBinding。只要设置了
+`K8S_MCP_NAMESPACE_ALLOWLIST`，该工具就会拒绝安装；请使用独立、经审核的
+部署身份或在 MCP 之外应用 manifest。
 
 ### 何时不该用 `top_pods` / `top_nodes`
 

@@ -6,8 +6,8 @@
 
 | 环境 | MCP 配置 | Kubernetes 身份 |
 | --- | --- | --- |
-| 开发/日常运维 | `READ_ONLY=false`（默认） | 具备所需写权限的受限身份 |
-| staging 受限写入 | `READ_ONLY=false` + `NAMESPACE_ALLOWLIST=staging` | 仅 `staging` 的 RoleBinding |
+| 开发/日常运维 | 默认策略（无需设置 `READ_ONLY=false`） | 具备所需写权限的受限身份 |
+| staging 受限写入 | `NAMESPACE_ALLOWLIST=staging` | 仅 `staging` 的 RoleBinding |
 | 审计/诊断 | `READ_ONLY=true` | 只读 ServiceAccount 或个人只读 kubeconfig |
 
 ## 快速部署模板
@@ -56,6 +56,28 @@ k8s-mcp serve
 ```
 
 token 有时效，过期后需重新签发；不要把它写进客户端配置文件或代码仓库。
+
+### 方式三：in-cluster sidecar（Agent 容器内启动子进程）
+
+stdio server 必须由同一容器内的 MCP 客户端作为子进程启动。把 `k8s-mcp` 打进 Agent 镜像后，可以用下面的 Pod 片段在集群内运行完整的 Agent + MCP 组合——它是客户端在容器内的子进程，不是可独立访问的远程服务：
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: your-agent
+  namespace: ops
+spec:
+  serviceAccountName: k8s-mcp-reader
+  containers:
+    - name: agent
+      image: your-registry/agent-with-k8s-mcp:tag
+      env:
+        - name: K8S_MCP_READ_ONLY
+          value: "true"
+```
+
+客户端在该容器内用 `command: k8s-mcp` 启动子进程。若要独立远程部署，需先实现远程 MCP transport，并补齐认证、TLS、网络策略、审计和请求大小限制；本仓库当前只提供 stdio。
 
 ## 上线前检查
 

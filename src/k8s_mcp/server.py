@@ -25,13 +25,16 @@ import signal
 import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ContentBlock
 
 from . import __version__
-from .config import Settings, get_settings
+from .auth import inspect_auth
+from .client import transport_defaults
+from .config import Settings, get_settings, set_runtime_settings
 from .safety import (
     RateLimiter,
     SafeApiError,
@@ -265,7 +268,12 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     这是 k8s-mcp 的入口；通过 `_register_tools` 把所有 tools/*.py 下的
     register(mcp) 串起来，统一挂载到 FastMCP 实例上。
     """
-    settings = settings or get_settings()
+    if settings is None:
+        settings = get_settings()
+    else:
+        # Tool modules read the process-wide settings singleton. Keep their
+        # auth and write guards aligned with the MCP boundary snapshot.
+        set_runtime_settings(settings)
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -457,6 +465,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _doctor_payload(settings: Settings) -> dict[str, Any]:
     """Return operator-safe diagnostics without exposing credentials."""
+    auth_mode, auth_source, warnings = inspect_auth(settings)
+    env_file = Path(".env").resolve() if Path(".env").is_file() else None
+    if env_file is not None:
+        warnings.append(f"settings may be loaded from cwd env file: {env_file}")
+    if not settings.read_only and settings.namespace_allowlist is None:
+        warnings.append(
+            "writes and deletes are enabled for every namespace; set "
+            "K8S_MCP_NAMESPACE_ALLOWLIST for production use"
+        )
+    if settings.api_insecure:
+        warnings.append("K8S_MCP_API_INSECURE=true disables Kubernetes TLS verification")
     return {
         "version": __version__,
         "read_only": settings.read_only,
@@ -465,13 +484,13 @@ def _doctor_payload(settings: Settings) -> dict[str, Any]:
         "rate_limit_rpm": settings.rate_limit_rpm,
         "tool_timeout_s": settings.tool_timeout_s,
         "max_concurrent_tools": settings.max_concurrent_tools,
-        "auth_mode": (
-            "api_server_token" if settings.api_server and settings.api_token
-            else "kubeconfig" if settings.kubeconfig
-            else "auto_detect"
-        ),
+        "kubernetes_transport": transport_defaults(settings),
+        "auth_mode": auth_mode,
+        "auth_source": auth_source,
+        "env_file": str(env_file) if env_file is not None else None,
         "webhook_allowlist_configured": bool(settings.notifier_url_allowlist),
         "webhook_private_hosts_allowed": settings.notifier_allow_private_hosts,
+        "warnings": warnings,
     }
 
 

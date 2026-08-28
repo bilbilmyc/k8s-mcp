@@ -14,7 +14,7 @@ import logging
 from kubernetes import dynamic
 from kubernetes.client.rest import ApiException
 
-from ..client import get_api_client
+from ..client import get_api_client, get_dynamic_client
 from ..formatters import short_table
 from . import generic as generic_mod
 
@@ -28,7 +28,7 @@ _generic = generic_mod
 
 
 def _dyn_client() -> dynamic.DynamicClient:
-    return dynamic.DynamicClient(get_api_client())
+    return get_dynamic_client()
 
 
 def _fetch_owner(dc, owner_ref):

@@ -6,11 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from k8s_mcp.client import reset_client_cache
 from k8s_mcp.config import Settings, reset_settings_cache
 
 # env vars that need a clean slate between tests. Wipe by prefix so newly
 # added K8S_MCP_* settings can never leak from the operator's shell into
-# a test run (the old explicit-list approach already missed several).
+# a test run (an explicit list inevitably drifts).
 _K8S_MCP_ENV_PREFIX = "K8S_MCP_"
 
 
@@ -20,9 +21,11 @@ def _clean_env(monkeypatch):
     for k in [k for k in os.environ if k.startswith(_K8S_MCP_ENV_PREFIX)]:
         monkeypatch.delenv(k, raising=False)
     reset_settings_cache()
+    reset_client_cache()
 
     yield
     reset_settings_cache()
+    reset_client_cache()
 
 
 @pytest.fixture

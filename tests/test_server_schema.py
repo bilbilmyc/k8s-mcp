@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from k8s_mcp.config import Settings
+from k8s_mcp.config import Settings, get_settings
 from k8s_mcp.server import _K8sMCP, create_server
 
 
@@ -38,6 +38,17 @@ async def test_create_server_uses_k8s_subclass():
     """create_server() must return the _K8sMCP subclass, not raw FastMCP."""
     mcp = create_server()
     assert isinstance(mcp, _K8sMCP)
+
+
+def test_create_server_settings_are_shared_with_tool_modules():
+    settings = Settings(
+        read_only=True,
+        namespace_allowlist=["audit"],
+        api_server="https://cluster.example",
+        api_token="secret",
+    )
+    create_server(settings)
+    assert get_settings() is settings
 
 
 def test_structured_output_true_still_works():

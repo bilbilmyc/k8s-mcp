@@ -28,10 +28,9 @@ k8s-mcp doctor
 
 ```bash
 export KUBECONFIG="$HOME/.kube/config"
-export K8S_MCP_READ_ONLY=false
 ```
 
-Without `KUBECONFIG`, the Kubernetes Python client attempts the default kubeconfig and then in-cluster configuration.
+Authentication precedence is: paired API server + token → `K8S_MCP_KUBECONFIG` → in-cluster ServiceAccount → standard `KUBECONFIG` (including merged paths) or `~/.kube/config`. No auth variable is needed for the default path.
 
 ### Direct API-server credentials
 
@@ -50,9 +49,7 @@ Use `K8S_MCP_API_INSECURE=true` only in controlled environments; it disables TLS
   "mcpServers": {
     "k8s": {
       "command": "k8s-mcp",
-      "args": ["serve"],
       "env": {
-        "K8S_MCP_READ_ONLY": "false",
         "KUBECONFIG": "/absolute/path/to/kubeconfig"
       }
     }
@@ -60,7 +57,7 @@ Use `K8S_MCP_API_INSECURE=true` only in controlled environments; it disables TLS
 }
 ```
 
-On Windows, use the absolute executable path from the Python environment that installed `k8s-mcp`. If your client does not inherit shell variables, put required values in its `env` block.
+No argument is the default stdio entry point; `serve` is an optional alias. On Windows, use the absolute executable path from the Python environment that installed `k8s-mcp`. If your client does not inherit shell variables, put required values in its `env` block. Omit the entire block when it can access the default kubeconfig.
 
 ## Switch to read-only when needed
 
@@ -70,6 +67,8 @@ k8s-mcp doctor
 ```
 
 For ordinary writes, set `K8S_MCP_NAMESPACE_ALLOWLIST=staging`, then begin with `whoami`, `list_resources`, or `cluster_health_snapshot` to confirm the identity and target namespace. See [Deployment](./deployment.en.md) for RBAC templates.
+
+In other words, common policies need one setting: `K8S_MCP_READ_ONLY=true` for read-only work, or `K8S_MCP_NAMESPACE_ALLOWLIST=staging` for scoped writes. Rate limits, timeouts, concurrency, and the Kubernetes HTTP connection pool already have defaults.
 
 ## Verification checklist
 

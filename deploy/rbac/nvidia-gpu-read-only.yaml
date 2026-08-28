@@ -29,6 +29,11 @@ rules:
   - apiGroups: ["nvidia.com"]
     resources: ["clusterpolicies"]
     verbs: ["get", "list"]
+  # Optional: DRA (resource.k8s.io) discovery for gpu_dra_overview. The API
+  # group can be absent on clusters without DRA; harmless in that case.
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["deviceclasses", "resourceslices", "resourceclaims"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

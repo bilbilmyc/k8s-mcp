@@ -63,12 +63,31 @@ def _render_gpu_identity(identity: tuple[tuple[str, str], ...]) -> str:
 
 
 def _prometheus_unavailable(title: str, exc: Exception) -> str:
-    return (
+    body = (
         f"## {title}\n\n"
         f"Prometheus metric query unavailable: {exc}\n\n"
-        "Set `K8S_MCP_PROMETHEUS_URL`, pass `prometheus_url`, or call "
-        "`find_prometheus_service()` to locate a reachable Prometheus endpoint."
+        "Set `K8S_MCP_PROMETHEUS_URL`, pass `prometheus_url`"
     )
+    if _discovery_tool_registered():
+        return body + (
+            ", or call `find_prometheus_service()` to locate a reachable "
+            "Prometheus endpoint."
+        )
+    return body + (
+        ". `find_prometheus_service()` is not registered on this server "
+        "because the `observability` tool group is disabled "
+        "(K8S_MCP_ENABLED_GROUPS); set the URL explicitly or re-enable "
+        "the group."
+    )
+
+
+def _discovery_tool_registered() -> bool:
+    """`find_prometheus_service()` belongs to the observability group; the
+    hint must not promote a tool the operator trimmed away."""
+    from ..config import get_settings
+
+    enabled = get_settings().enabled_groups
+    return enabled is None or "observability" in enabled
 
 
 def gpu_metrics_catalog(

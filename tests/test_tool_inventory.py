@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-EXPECTED_TOOL_COUNT = 91
+EXPECTED_TOOL_COUNT = 93
 EXPECTED_TOOLS: frozenset[str] = frozenset({
     "ping",
     # autoscale
@@ -79,6 +79,8 @@ EXPECTED_TOOLS: frozenset[str] = frozenset({
     # NVIDIA GPU diagnostics (read-only)
     "gpu_cluster_overview",
     "gpu_diagnose",
+    "gpu_dra_overview",
+    "gpu_mig_overview",
     "gpu_node_inspect",
     "gpu_pending_workloads",
     "gpu_workload_inspect",

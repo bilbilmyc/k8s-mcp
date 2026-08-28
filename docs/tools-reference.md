@@ -1,4 +1,4 @@
-# 工具参考（91 个，按功能分类）
+# 工具参考（93 个，按功能分类）
 
 > 这是**完整目录**——每个工具一行签名，按"读 / 写 / 删"分组。
 > 详细使用说明（陷阱、流程、为什么这么设计）见 [tools.md](./tools.md)。
@@ -7,7 +7,7 @@
 
 ## 工具分组（`K8S_MCP_ENABLED_GROUPS`）
 
-默认注册全部 91 个工具。只需要部分能力时（GPU 专用、只读审计等部署），
+默认注册全部 93 个工具。只需要部分能力时（GPU 专用、只读审计等部署），
 用逗号分隔的组名裁剪 Agent 看到的工具面（大小写不敏感，未知组名会拒绝启动）：
 
 | 组 | 覆盖的 tools/ 模块 | 典型部署 |
@@ -63,6 +63,8 @@
 - `gpu_workload_inspect(name, namespace="default", kind="Pod")` — Pod / Deployment / Job 的 GPU limits、节点放置和调度器裁决
 - `gpu_pending_workloads(namespace=None, limit=50)` — 带 `nvidia.com/*` limits 的 Pending Pod 及其 `Unschedulable` 原因
 - `gpu_diagnose(operator_namespace="gpu-operator")` — GPU 节点、ClusterPolicy、GPU Operator Pod 与 Pending GPU workload 的一键只读诊断
+- `gpu_mig_overview()` — MIG 只读盘点：`nvidia.com/mig-*` 切片资源、`nvidia.com/mig.*` 标签、ClusterPolicy `migManager.strategy`、每节点切片容量/可分配、持有切片的 Pod、超额与 Pending 的 MIG 请求
+- `gpu_dra_overview()` — DRA（resource.k8s.io v1 → v1beta1 自动回退）只读发现：DeviceClasses、每驱动 ResourceSlice 设备清单、ResourceClaims 的分配/预留状态；仅发现不修改
 - `gpu_metrics_catalog(metric_prefix="DCGM_", limit=100, prometheus_url=None)` — 从 Prometheus 发现真实存在的 DCGM / GPU 指标及其 series 数
 - `gpu_utilization_overview(utilization_metric="DCGM_FI_DEV_GPU_UTIL", memory_used_metric="DCGM_FI_DEV_FB_USED", memory_total_metric="DCGM_FI_DEV_FB_TOTAL", prometheus_url=None)` — 每 GPU 最新利用率与显存原始指标概览
 - `gpu_workload_utilization(pod_name, namespace="default", metric_name="DCGM_FI_DEV_GPU_UTIL", prometheus_url=None)` — 按 `namespace` / `pod` 标签读取一个 Pod 的 GPU 指标样本

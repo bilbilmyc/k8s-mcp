@@ -20,6 +20,13 @@ _GPU_OPERATOR_GROUP = "nvidia.com"
 _GPU_OPERATOR_VERSION = "v1"
 _GPU_OPERATOR_PLURAL = "clusterpolicies"
 _DEFAULT_OPERATOR_NAMESPACE = "gpu-operator"
+_MIG_RESOURCE_PREFIX = "nvidia.com/mig"
+_MIG_LABEL_PREFIX = "nvidia.com/mig."
+# DRA (Dynamic Resource Allocation) — GA as resource.k8s.io/v1 in Kubernetes
+# 1.34, beta as v1beta1 in 1.32/1.33. Detection tries GA first and falls back
+# so the same tool works across in-flight cluster upgrades.
+_DRA_GROUP = "resource.k8s.io"
+_DRA_VERSION_CANDIDATES = ("v1", "v1beta1")
 
 
 def _core_v1():
@@ -79,6 +86,34 @@ def _gpu_resources(resources: Any) -> dict[str, str]:
         for key, amount in _resource_map(resources).items()
         if key.startswith(_GPU_PREFIX)
     }
+
+
+def _mig_resources(resources: Any) -> dict[str, str]:
+    """MIG slice resources (`nvidia.com/mig-<profile>`), not whole GPUs."""
+    return {
+        key: amount
+        for key, amount in _resource_map(resources).items()
+        if key.startswith(_MIG_RESOURCE_PREFIX)
+    }
+
+
+def _mig_labels(labels: Any) -> dict[str, str]:
+    """NVIDIA MIG feature-discovery labels (`nvidia.com/mig.*`)."""
+    return {
+        str(key): str(value)
+        for key, value in (labels or {}).items()
+        if str(key).startswith(_MIG_LABEL_PREFIX)
+    }
+
+
+def _node_mig_signature(node: Any) -> bool:
+    """True when a Node exposes MIG slice resources or announces MIG capability."""
+    capacity, allocatable = _node_gpu_resources(node)
+    return bool(
+        _mig_resources(capacity)
+        or _mig_resources(allocatable)
+        or _mig_labels(_labels(node))
+    )
 
 
 def _quantity(value: str) -> float:
@@ -231,6 +266,34 @@ def _operator_policy_summary() -> str:
         state = status.get("state") or status.get("status") or "Unknown"
         rendered.append(f"{metadata.get('name', 'cluster-policy')}={state}")
     return ", ".join(rendered)
+
+
+def _cluster_policy_mig_strategy() -> str:
+    """Read `spec.migManager.strategy` from the ClusterPolicy, best-effort.
+
+    Missing CRD / RBAC is a normal non-Operator cluster and rendered as text,
+    never raised — the same contract as `_operator_policy_summary`.
+    """
+    try:
+        result = _custom_objects().list_cluster_custom_object(
+            group=_GPU_OPERATOR_GROUP,
+            version=_GPU_OPERATOR_VERSION,
+            plural=_GPU_OPERATOR_PLURAL,
+        )
+    except ApiException as exc:
+        if exc.status in (403, 404):
+            return "not available"
+        return f"unavailable ({exc.status})"
+    except AttributeError:
+        return "not available"
+
+    policies = result.get("items", []) if isinstance(result, dict) else []
+    strategies = sorted({
+        str(((policy.get("spec") or {}).get("migManager") or {}).get("strategy") or "")
+        for policy in policies
+        if isinstance(policy, dict)
+    } - {""})
+    return ", ".join(strategies) if strategies else "unset"
 
 
 def _operator_pod_rows(core: Any, namespace: str) -> tuple[list[dict[str, str]], str | None]:
@@ -579,9 +642,265 @@ def gpu_diagnose(operator_namespace: str = _DEFAULT_OPERATOR_NAMESPACE) -> str:
     return "\n".join(lines)
 
 
+def gpu_mig_overview() -> str:
+    """🧩 INSPECT NVIDIA MIG — cluster-wide Multi-Instance GPU inventory and demand.
+
+    Read-only discovery of MIG state: slice resources (`nvidia.com/mig-*`),
+    MIG feature-discovery labels, the GPU Operator `migManager.strategy` when
+    a ClusterPolicy exists, per-node slice capacity, which Pods consume which
+    profiles, and Pending Pods whose requested profile no node provides.
+
+    With `mig.strategy=single` the device plugin exposes slices as plain
+    `nvidia.com/gpu`, so per-slice identity is not visible through the
+    Kubernetes API; the strategy line is the hint to interpret those numbers.
+
+    DRA-claimed accelerators (ResourceSlice/ResourceClaim) are covered by
+    `gpu_dra_overview` instead.
+    """
+    core = _core_v1()
+    try:
+        nodes = _items(core.list_node())
+    except ApiException as exc:
+        raise RuntimeError(f"failed to list Nodes: {exc.status} {exc.reason}") from exc
+
+    mig_nodes = [node for node in nodes if _node_mig_signature(node)]
+    label_strategies = sorted({
+        _labels(node).get("nvidia.com/mig.strategy", "")
+        for node in mig_nodes
+        if _labels(node).get("nvidia.com/mig.strategy")
+    })
+
+    lines = ["## NVIDIA MIG overview"]
+    lines.append(f"Nodes with MIG resources/labels: {len(mig_nodes)} / {len(nodes)}")
+    lines.append(f"MIG strategy — ClusterPolicy: {_cluster_policy_mig_strategy()}"
+                 + (f" | node labels: {', '.join(label_strategies)}" if label_strategies else ""))
+
+    if not mig_nodes:
+        lines.append(
+            "\nMIG is not in use: no `nvidia.com/mig-*` resources and no `nvidia.com/mig.*` "
+            "labels were found. Enable MIG via the GPU Operator migManager (or nvidia-mig-parted) "
+            "before workloads can request slice profiles."
+        )
+        return "\n".join(lines)
+
+    capacity: dict[str, float] = defaultdict(float)
+    allocatable: dict[str, float] = defaultdict(float)
+    rows = []
+    for node in mig_nodes:
+        node_capacity, node_allocatable = _node_gpu_resources(node)
+        node_capacity, node_allocatable = _mig_resources(node_capacity), _mig_resources(node_allocatable)
+        _sum_resources(capacity, node_capacity)
+        _sum_resources(allocatable, node_allocatable)
+        rows.append(
+            {
+                "NODE": _name(node),
+                "READY": _node_ready(node),
+                "STRATEGY": _labels(node).get("nvidia.com/mig.strategy", "-"),
+                "MIG_CAPACITY": _render_resources(node_capacity),
+                "MIG_ALLOCATABLE": _render_resources(node_allocatable),
+            }
+        )
+    lines.append("\n### MIG nodes")
+    lines.append(short_table(rows, ["NODE", "READY", "STRATEGY", "MIG_CAPACITY", "MIG_ALLOCATABLE"]))
+
+    findings: list[tuple[str, str]] = []
+    try:
+        gpu_pods = [pod for pod in _list_gpu_pods(_list_pods(core)) if _pod_phase(pod) not in {"Succeeded", "Failed"}]
+    except ApiException as exc:
+        findings.append(("INFO", f"MIG demand check unavailable: {exc.status} {exc.reason or 'API error'}."))
+        gpu_pods = []
+
+    consumers = [pod for pod in gpu_pods if _mig_resources(_pod_gpu_limits(pod))]
+    requested: dict[str, float] = defaultdict(float)
+    for pod in consumers:
+        _sum_resources(requested, _mig_resources(_pod_gpu_limits(pod)))
+    lines.append("\n### MIG slice demand")
+    lines.append(f"Pods holding MIG slices: {len(consumers)}")
+    lines.append(f"Requested MIG limits: {_render_resources({k: _format_quantity(v) for k, v in requested.items()})}")
+
+    deficits = {
+        profile: _format_quantity(amount - allocatable.get(profile, 0.0))
+        for profile, amount in requested.items()
+        if amount > allocatable.get(profile, 0.0)
+    }
+    if deficits:
+        rendered = ", ".join(f"{profile} over by {amount}" for profile, amount in sorted(deficits.items()))
+        findings.append(("WARN", f"Requested MIG slices exceed cluster allocatable: {rendered}."))
+    else:
+        findings.append(("OK", "Requested MIG slices fit within cluster allocatable capacity."))
+
+    pending = [
+        pod for pod in gpu_pods
+        if _pod_phase(pod) == "Pending" and _mig_resources(_pod_gpu_limits(pod))
+    ]
+    if pending:
+        names = ", ".join(_namespace(pod) + "/" + _name(pod) for pod in pending[:5])
+        findings.append(("WARN", f"{len(pending)} Pending Pod(s) request MIG slices: {names}. "
+                                "A Pending Pod whose profile no node advertises can never schedule."))
+    lines.append("\n### Findings")
+    lines.extend(f"- **{level}** — {message}" for level, message in findings)
+    return "\n".join(lines)
+
+
+def _dra_list(custom: Any, version: str, plural: str, *, namespaced: bool = False) -> Any:
+    if namespaced:
+        return custom.list_custom_object_for_all_namespaces(
+            group=_DRA_GROUP, version=version, plural=plural,
+        )
+    return custom.list_cluster_custom_object(
+        group=_DRA_GROUP, version=version, plural=plural,
+    )
+
+
+def _detect_dra_version(custom: Any) -> tuple[str | None, str]:
+    """Probe resource.k8s.io, preferring the GA group-version. Returns
+    (version | None, human-readable status) without raising on absence."""
+    last_error: ApiException | None = None
+    for version in _DRA_VERSION_CANDIDATES:
+        try:
+            _dra_list(custom, version, "deviceclasses")
+        except ApiException as exc:
+            last_error = exc
+            continue
+        except AttributeError:
+            return None, "not available (CustomObjects API unavailable)"
+        return version, "available"
+    if last_error is not None and last_error.status == 403:
+        return None, ("not available (RBAC denied; grant get/list on resource.k8s.io "
+                      "deviceclasses, resourceslices, resourceclaims)")
+    if last_error is not None and last_error.status == 404:
+        return None, ("not available (resource.k8s.io API group absent — DRA disabled "
+                      "or Kubernetes < 1.32)")
+    status = last_error.status if last_error is not None else "?"
+    reason = last_error.reason if last_error is not None else "API error"
+    return None, f"unavailable ({status} {reason or 'API error'})"
+
+
+def gpu_dra_overview() -> str:
+    """🧩 INSPECT DRA RESOURCES — read-only Dynamic Resource Allocation discovery for accelerators.
+
+    Reports the `resource.k8s.io` state relevant to GPU workloads:
+    DeviceClasses (with their drivers), per-driver ResourceSlice device
+    inventory, and ResourceClaims with allocation / reservation status.
+    Discovery only — the tool never mutates claims, slices, or CRDs, and
+    falls back from the GA `v1` API to `v1beta1` on older clusters.
+
+    Classic extended resources (`nvidia.com/gpu`, `nvidia.com/mig-*`) handed
+    out by the device plugin are covered by `gpu_cluster_overview` and
+    `gpu_mig_overview` instead.
+    """
+    custom = _custom_objects()
+    version, status = _detect_dra_version(custom)
+    lines = ["## Dynamic Resource Allocation (DRA) overview"]
+
+    if version is None:
+        lines.append(f"DRA API: {status}")
+        lines.append(
+            "\nDRA is where vendors advertise accelerators as ResourceSlices and "
+            "workloads consume them via ResourceClaims. While absent, GPUs are "
+            "allocated through the classic device-plugin extended resources shown "
+            "by gpu_cluster_overview / gpu_mig_overview."
+        )
+        return "\n".join(lines)
+
+    findings: list[tuple[str, str]] = []
+    lines.append(f"DRA API version in use: {version}")
+
+    class_rows = []
+    for cls_ in _items(_dra_list(custom, version, "deviceclasses")):
+        spec = _value(cls_, "spec", {}) or {}
+        drivers = ", ".join(sorted({
+            str(driver.get("name"))
+            for driver in (spec.get("drivers") or [])
+            if isinstance(driver, dict) and driver.get("name")
+        })) or "-"
+        class_rows.append({"DEVICECLASS": _name(cls_), "DRIVERS": drivers})
+    lines.append("\n### DeviceClasses")
+    lines.append(short_table(class_rows, ["DEVICECLASS", "DRIVERS"]) if class_rows else "None found.")
+
+    per_driver: dict[str, dict[str, Any]] = {}
+    for slice_ in _items(_dra_list(custom, version, "resourceslices")):
+        spec = _value(slice_, "spec", {}) or {}
+        driver = str(spec.get("driver") or "<unknown>")
+        agg = per_driver.setdefault(driver, {"slices": 0, "devices": 0, "pools": set(), "nodes": set()})
+        agg["slices"] += 1
+        agg["devices"] += len(spec.get("devices") or [])
+        pool = spec.get("pool") or {}
+        if pool.get("name"):
+            agg["pools"].add(str(pool["name"]))
+        if spec.get("nodeName"):
+            agg["nodes"].add(str(spec["nodeName"]))
+    lines.append("\n### ResourceSlices (advertised devices)")
+    if per_driver:
+        slice_rows = [
+            {
+                "DRIVER": driver,
+                "SLICES": str(agg["slices"]),
+                "DEVICES": str(agg["devices"]),
+                "POOLS": str(len(agg["pools"])),
+                "NODES": str(len(agg["nodes"])) if agg["nodes"] else "-",
+            }
+            for driver, agg in sorted(per_driver.items())
+        ]
+        lines.append(short_table(slice_rows, ["DRIVER", "SLICES", "DEVICES", "POOLS", "NODES"]))
+    else:
+        lines.append("None found.")
+        findings.append(("WARN", "DRA API exists but no driver has published ResourceSlices; "
+                                 "DRA claims cannot be satisfied without a vendor driver."))
+
+    claims = _items(_dra_list(custom, version, "resourceclaims", namespaced=True))
+    claim_rows = []
+    waiting = 0
+    for claim in sorted(claims, key=lambda c: (_namespace(c), _name(c))):
+        claim_status = _value(claim, "status", {}) or {}
+        allocation = claim_status.get("allocation")
+        results = ((allocation or {}).get("devices") or {}).get("results") or []
+        drivers = ", ".join(sorted({
+            str(result.get("driver"))
+            for result in results
+            if isinstance(result, dict) and result.get("driver")
+        })) or "-"
+        consumers = [
+            str(entry.get("requestor") or entry.get("name") or entry.get("uid") or "<consumer>")
+            for entry in (claim_status.get("reservedFor") or [])
+            if isinstance(entry, dict)
+        ]
+        reserved = ", ".join(consumers[:2]) + (f" (+{len(consumers) - 2})" if len(consumers) > 2 else "")
+        if not allocation and consumers:
+            waiting += 1
+        claim_rows.append(
+            {
+                "NAMESPACE": _namespace(claim),
+                "CLAIM": _name(claim),
+                "ALLOCATED": "yes" if allocation else "no",
+                "DEVICES": str(len(results)) if allocation else "-",
+                "DRIVERS": drivers,
+                "RESERVED_BY": reserved or "-",
+            }
+        )
+    lines.append("\n### ResourceClaims")
+    lines.append(short_table(claim_rows, ["NAMESPACE", "CLAIM", "ALLOCATED", "DEVICES", "DRIVERS", "RESERVED_BY"]) if claim_rows else "None found.")
+
+    if claims:
+        if waiting:
+            findings.append(("WARN", f"{waiting} ResourceClaim(s) are reserved by Pods but not yet allocated; "
+                                     "check the DRA driver and ResourceSlice availability."))
+        else:
+            findings.append(("OK", "All ResourceClaims are allocated."))
+        findings.append(("INFO", f"Claims found: {len(claims)}; call gpu_workload_inspect for the consuming Pods' placement."))
+    elif per_driver:
+        findings.append(("OK", "Slices are advertised but no workload claims exist yet."))
+
+    lines.append("\n### Findings")
+    lines.extend(f"- **{level}** — {message}" for level, message in findings)
+    return "\n".join(lines)
+
+
 def register(mcp) -> None:
     mcp.tool()(gpu_cluster_overview)
     mcp.tool()(gpu_node_inspect)
     mcp.tool()(gpu_workload_inspect)
     mcp.tool()(gpu_pending_workloads)
     mcp.tool()(gpu_diagnose)
+    mcp.tool()(gpu_mig_overview)
+    mcp.tool()(gpu_dra_overview)

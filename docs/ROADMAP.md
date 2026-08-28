@@ -305,6 +305,24 @@ server 配 in-cluster Pod」这份站不住的部署文档；清掉挂账的 Pha
   - 本文件重复的「变更记录」块去重（旧版块中间多了一份拷贝）
   - `docs/PLAN.md` → `docs/archive/PLAN.md`，引用链接同步
 
+---
+
+## v2.0.x — GPU MIG / DRA 发现（2026-08-28）
+
+**主题**：落地 `docs/gpu.md` 路线表中「MIG 与 DRA 发现 🧭 规划中」一行，
+工具总数 91 → 93；基线为合并上游 2.0.0（client 复用重构）之后。
+
+- [x] **`gpu_mig_overview`** — MIG 只读盘点：`nvidia.com/mig-*` 切片、
+  `nvidia.com/mig.*` 标签、ClusterPolicy `migManager.strategy`（best-effort）、
+  每节点切片容量、持有切片的 Pod、超额与「请求的 profile 无节点可提供」告警
+- [x] **`gpu_dra_overview`** — DRA 只读发现：DeviceClasses、每驱动
+  ResourceSlice 设备清单、ResourceClaims 分配/预留状态；GA `v1` 优先、
+  自动回退 `v1beta1`；API 缺失/403 一律作为诊断结论输出而非报错
+- [x] `deploy/rbac/nvidia-gpu-read-only.yaml` 增加 `resource.k8s.io`
+  只读权限；`gpu_metrics_*` 失败提示不再推荐被分组裁剪掉的工具
+- [x] 测试 +3（MIG 盘点/缺省、DRA 正常/缺 API 组/403）及分组提示适配，
+  工具清单与中英文档计数同步 93
+
 **变更记录**
 - 2026-07-05 初稿：从 plan 转成 checkbox 列表
 - 2026-07-05 B2 完成：bulk_* → list variant，修复 2 处重复检查 bug，所有 23 个 bulk 测试通过
@@ -313,3 +331,4 @@ server 配 in-cluster Pod」这份站不住的部署文档；清掉挂账的 Pha
 - 2026-07-07 v0.5.2 完成: 单步删除（删 HMAC token subsystem）+ Prometheus NodePort/LoadBalancer URL 修正，630 tests passing
 - 2026-07-07 v0.5.3 完成: `top_pods` / `top_nodes` 三档级联 + `bootstrap_metrics_server` 显式工具，643 tests passing
 - 2026-08-28 v1.0.x 完成: H1 工具分组开关 + H2 部署文档修正 + H3 Phase C 收账（C1 关闭/C3 完成）+ H4 仓库卫生，725 tests passing
+- 2026-08-28 v2.0.x 完成: 合并上游 2.0.0（client 复用重构）后新增 gpu_mig_overview / gpu_dra_overview，91 → 93 工具，766 tests passing

@@ -101,6 +101,41 @@ class _CustomObjects:
         return self.result
 
 
+class _DraObjects:
+    """Fake CustomObjectsApi for resource.k8s.io discovery tests."""
+
+    def __init__(
+        self,
+        *,
+        version: str = "v1",
+        deviceclasses=None,
+        resourceslices=None,
+        claims=None,
+        error=None,
+    ):
+        self.version = version
+        self.tables = {
+            "deviceclasses": deviceclasses or [],
+            "resourceslices": resourceslices or [],
+            "resourceclaims": claims or [],
+        }
+        self.error = error
+
+    def _guard(self, group: str, version: str):
+        if self.error:
+            raise self.error
+        if group != "resource.k8s.io" or version != self.version:
+            raise ApiException(status=404, reason="Not Found")
+
+    def list_cluster_custom_object(self, group, version, plural, **kwargs):
+        self._guard(group, version)
+        return {"items": self.tables[plural]}
+
+    def list_custom_object_for_all_namespaces(self, group, version, plural, **kwargs):
+        self._guard(group, version)
+        return {"items": self.tables[plural]}
+
+
 def test_pod_gpu_limits_uses_app_sum_and_init_max():
     pod = SimpleNamespace(
         spec=SimpleNamespace(
@@ -229,3 +264,96 @@ def test_gpu_diagnose_handles_missing_operator_namespace(monkeypatch):
 
     assert "No NVIDIA GPU Nodes were discovered" in report
     assert "namespace 'gpu-operator' not found" in report
+
+
+def test_gpu_mig_overview_reports_strategy_slices_and_deficit(monkeypatch):
+    mig_node = _node(
+        "mig-1",
+        capacity={"nvidia.com/mig-1g.10gb": "4", "nvidia.com/mig-2g.20gb": "2"},
+        allocatable={"nvidia.com/mig-1g.10gb": "4", "nvidia.com/mig-2g.20gb": "2"},
+        labels={"nvidia.com/mig.strategy": "mixed", "nvidia.com/gpu.product": "NVIDIA-A100"},
+    )
+    consumer = _pod("slicer", limits={"nvidia.com/mig-1g.10gb": "4"})
+    waiting = _pod(
+        "too-big",
+        phase="Pending",
+        node=None,
+        limits={"nvidia.com/mig-2g.20gb": "3"},
+        conditions=[SimpleNamespace(type="PodScheduled", status="False", reason="Unschedulable",
+                                    message="Insufficient nvidia.com/mig-2g.20gb")],
+    )
+    monkeypatch.setattr(gpu, "_core_v1", lambda: _Core(nodes=[mig_node, _node("cpu-1")], pods=[consumer, waiting]))
+    monkeypatch.setattr(gpu, "_custom_objects", lambda: _CustomObjects(
+        {"items": [{"metadata": {"name": "cluster-policy"}, "spec": {"migManager": {"strategy": "mixed"}}}]}
+    ))
+
+    report = gpu.gpu_mig_overview()
+
+    assert "Nodes with MIG resources/labels: 1 / 2" in report
+    assert "migManager" in report or "mixed" in report
+    assert "nvidia.com/mig-1g.10gb=4" in report
+    assert "Pods holding MIG slices: 2" in report
+    assert "exceed cluster allocatable" in report
+    assert "1 Pending Pod(s) request MIG slices: ml/too-big" in report
+
+
+def test_gpu_mig_overview_reports_absence_of_mig(monkeypatch):
+    plain = _node("gpu-1", allocatable={"nvidia.com/gpu": "8"},
+                  labels={"nvidia.com/gpu.product": "NVIDIA-L4"})
+    monkeypatch.setattr(gpu, "_core_v1", lambda: _Core(nodes=[plain]))
+    monkeypatch.setattr(gpu, "_custom_objects", lambda: _CustomObjects())
+
+    report = gpu.gpu_mig_overview()
+
+    assert "MIG is not in use" in report
+    assert "Nodes with MIG resources/labels: 0 / 1" in report
+
+
+def test_gpu_dra_overview_lists_slices_claims_and_waiting_claims(monkeypatch):
+    dra = _DraObjects(
+        version="v1",
+        deviceclasses=[{"metadata": {"name": "gpu.nvidia.com"},
+                        "spec": {"drivers": [{"name": "gpu.nvidia.com"}]}}],
+        resourceslices=[
+            {"spec": {"driver": "gpu.nvidia.com", "nodeName": "gpu-1",
+                      "pool": {"name": "pool-1"}, "devices": [{"basic": {}}, {"basic": {}}]}},
+            {"spec": {"driver": "gpu.nvidia.com", "nodeName": "gpu-2",
+                      "pool": {"name": "pool-2"}, "devices": [{"basic": {}}]}},
+        ],
+        claims=[
+            {"metadata": {"name": "bound", "namespace": "ml"},
+             "status": {"allocation": {"devices": {"results": [
+                 {"driver": "gpu.nvidia.com", "device": "gpu-0", "pool": {"name": "pool-1"}},
+             ]}},
+                 "reservedFor": [{"requestor": "ml/trainer"}]}},
+            {"metadata": {"name": "waiting", "namespace": "ml"},
+             "status": {"reservedFor": [{"requestor": "ml/infer"}]}},
+        ],
+    )
+    monkeypatch.setattr(gpu, "_custom_objects", lambda: dra)
+
+    report = gpu.gpu_dra_overview()
+
+    assert "DRA API version in use: v1" in report
+    assert "gpu.nvidia.com" in report
+    assert "SLICES" in report and "DEVICES" in report
+    assert "waiting" in report
+    assert "reserved by Pods but not yet allocated" in report
+
+
+def test_gpu_dra_overview_reports_absent_api_group(monkeypatch):
+    monkeypatch.setattr(gpu, "_custom_objects", lambda: _DraObjects(version="v9"))
+
+    report = gpu.gpu_dra_overview()
+
+    assert "resource.k8s.io API group absent" in report
+    assert "gpu_cluster_overview" in report
+
+
+def test_gpu_dra_overview_reports_rbac_denial(monkeypatch):
+    monkeypatch.setattr(gpu, "_custom_objects", lambda: _DraObjects(error=ApiException(status=403, reason="Forbidden")))
+
+    report = gpu.gpu_dra_overview()
+
+    assert "RBAC denied" in report
+    assert "deviceclasses, resourceslices, resourceclaims" in report

@@ -2,7 +2,7 @@
 
 [English](./gpu.en.md) · [文档首页](./README.md) · [RBAC 模板](../deploy/rbac/nvidia-gpu-read-only.yaml) · [Prometheus 配置](./env.md)
 
-`k8s-mcp` 当前提供 9 个**只读** NVIDIA GPU 工具，覆盖 Kubernetes 资源/调度诊断和 Prometheus/DCGM 实时指标发现。资源工具动态识别实际暴露的 `nvidia.com/*` 扩展资源，不假设固定 GPU 型号、MIG profile 或 GPU Operator 版本；指标工具则先发现 Prometheus 中真实存在的 DCGM 指标，再允许按需指定自定义指标名。
+`k8s-mcp` 当前提供 11 个**只读** NVIDIA GPU 工具，覆盖 Kubernetes 资源/调度诊断和 Prometheus/DCGM 实时指标发现。资源工具动态识别实际暴露的 `nvidia.com/*` 扩展资源，不假设固定 GPU 型号、MIG profile 或 GPU Operator 版本；指标工具则先发现 Prometheus 中真实存在的 DCGM 指标，再允许按需指定自定义指标名。
 
 > [!IMPORTANT]
 > 所有 `gpu_*` 工具始终只读：不会安装、升级或修改 NVIDIA GPU Operator，也不会修改节点标签、污点、MIG 配置、time-slicing 或工作负载。即使 `K8S_MCP_READ_ONLY=false`，也不会自动开放高影响 GPU 管理操作。
@@ -34,7 +34,7 @@ K8S_MCP_PROMETHEUS_BEARER_TOKEN=<token>
 kubectl apply -f deploy/rbac/nvidia-gpu-read-only.yaml
 ```
 
-模板仅提供对 Nodes、Pods、Deployments、Jobs 与可选 `clusterpolicies.nvidia.com` 的 `get/list` 权限；不授予写入、删除、Pod exec 或 Secret 访问。指标工具直接查询 Prometheus HTTP API，因此使用其既有访问控制，而不要求扩大 Kubernetes RBAC。
+模板仅提供对 Nodes、Pods、Deployments、Jobs、可选 `clusterpolicies.nvidia.com` 与可选 `resource.k8s.io`（DRA 发现）的 `get/list` 权限；不授予写入、删除、Pod exec 或 Secret 访问。指标工具直接查询 Prometheus HTTP API，因此使用其既有访问控制，而不要求扩大 Kubernetes RBAC。
 
 ## 工具与推荐流程
 
@@ -53,6 +53,8 @@ gpu_diagnose(operator_namespace="gpu-operator")
 - `gpu_workload_inspect`：Pod 的实际 GPU limits、节点与调度器裁决；Deployment / Job 的 template limits 与匹配 Pod。
 - `gpu_pending_workloads`：仅列出带 `nvidia.com/*` limits 的 Pending Pod，保留调度器原因。
 - `gpu_diagnose`：组合检查 GPU 节点、ClusterPolicy、GPU Operator 组件 Pod 与 Pending GPU 工作负载。
+- `gpu_mig_overview`：MIG 只读盘点——`nvidia.com/mig-*` 切片资源、`nvidia.com/mig.strategy` 标签、ClusterPolicy `migManager.strategy`、每节点切片容量、持有切片的 Pod，以及"请求的 profile 没有节点能提供"这类超额/ Pending 告警。
+- `gpu_dra_overview`：DRA（`resource.k8s.io`，GA `v1` 优先、自动回退 `v1beta1`）只读发现——DeviceClasses、每驱动 ResourceSlice 设备清单、ResourceClaims 的分配/预留状态；API 缺失或 RBAC 不足时作为诊断结论输出。
 
 GPU 扩展资源应声明在容器 `limits` 中。工具读取 Kubernetes 实际返回的 limits，不猜测 CUDA、镜像或驱动版本。
 
@@ -134,7 +136,7 @@ flowchart TD
 | GPU 基础诊断 | ✅ 已完成 | 节点、工作负载、Pending 调度、GPU Operator 状态综合诊断 | Kubernetes API 只读 |
 | Prometheus / DCGM 瞬时观测 | ✅ 已完成 | 指标发现、每 GPU 最新利用率、Pod 归属指标 | PromQL instant query，只读 |
 | 时间序列与容量分析 | 🚧 部分完成 | 已提供 `gpu_utilization_history`；下一步实现 `gpu_capacity_analyze`、`gpu_idle_resources` | 有界 PromQL range query + Kubernetes 资源只读关联 |
-| MIG 与 DRA 发现 | 🧭 规划中 | MIG strategy/profile/资源汇总；ResourceClaim、DeviceClass、ResourceSlice 可用性与绑定状态 | 仅发现与建议，不修改 CRD 或节点配置 |
+| MIG 与 DRA 发现 | ✅ 已完成 | `gpu_mig_overview`（MIG strategy/profile/资源汇总）与 `gpu_dra_overview`（ResourceClaim、DeviceClass、ResourceSlice 可用性与绑定状态，v1 → v1beta1 自动回退） | 仅发现与建议，不修改 CRD 或节点配置 |
 | GPU 管理操作 | 🔒 默认不实现 | GPU Operator 生命周期、MIG/time-slicing 重配置、DRA 写入 | 若未来提供，必须使用独立于 `K8S_MCP_READ_ONLY` 的专用开关、allowlist、dry-run 计划和显式确认 |
 
 下一阶段优先把历史利用率与 Kubernetes allocatable / Pod limits 关联，解决“请求量是否与真实利用率匹配、容量是否被碎片化”两个问题。任何高风险 GPU 管理能力都不会仅由 `K8S_MCP_READ_ONLY=false` 自动启用。

@@ -2,7 +2,7 @@
 
 [中文](./gpu.md) · [Documentation](./README.en.md) · [RBAC template](../deploy/rbac/nvidia-gpu-read-only.yaml) · [Prometheus configuration](./env.en.md)
 
-`k8s-mcp` now provides nine **read-only** NVIDIA GPU tools for Kubernetes resource/scheduling diagnostics and live Prometheus/DCGM metric discovery. Resource tools discover the `nvidia.com/*` extended resources that are actually exposed instead of assuming a GPU SKU, MIG profile, or GPU Operator version. Metric tools first discover the DCGM metrics that exist in the target Prometheus, then allow custom metric names when required.
+`k8s-mcp` now provides eleven **read-only** NVIDIA GPU tools for Kubernetes resource/scheduling diagnostics and live Prometheus/DCGM metric discovery. Resource tools discover the `nvidia.com/*` extended resources that are actually exposed instead of assuming a GPU SKU, MIG profile, or GPU Operator version. Metric tools first discover the DCGM metrics that exist in the target Prometheus, then allow custom metric names when required.
 
 > [!IMPORTANT]
 > Every `gpu_*` tool is always read-only. None installs, upgrades, or changes NVIDIA GPU Operator, Node labels, taints, MIG configuration, time-slicing, or workloads. `K8S_MCP_READ_ONLY=false` does **not** implicitly enable high-impact GPU administration.
@@ -34,7 +34,7 @@ Apply [`nvidia-gpu-read-only.yaml`](../deploy/rbac/nvidia-gpu-read-only.yaml) fo
 kubectl apply -f deploy/rbac/nvidia-gpu-read-only.yaml
 ```
 
-The template grants only `get/list` on Nodes, Pods, Deployments, Jobs, and the optional `clusterpolicies.nvidia.com` resource—no writes, deletes, Pod exec, or Secret access. Metric tools call the Prometheus HTTP API and therefore use its existing access controls; they do not require broader Kubernetes RBAC.
+The template grants only `get/list` on Nodes, Pods, Deployments, Jobs, the optional `clusterpolicies.nvidia.com` resource, and the optional `resource.k8s.io` group (DRA discovery)—no writes, deletes, Pod exec, or Secret access. Metric tools call the Prometheus HTTP API and therefore use its existing access controls; they do not require broader Kubernetes RBAC.
 
 ## Tools and recommended workflow
 
@@ -53,6 +53,8 @@ gpu_diagnose(operator_namespace="gpu-operator")
 - `gpu_workload_inspect`: live Pod limits, placement, and scheduler verdict; or Deployment/Job template limits and matching Pods.
 - `gpu_pending_workloads`: only Pending Pods with `nvidia.com/*` limits, including the scheduler reason.
 - `gpu_diagnose`: combined check of GPU Nodes, ClusterPolicy, GPU Operator component Pods, and Pending GPU workloads.
+- `gpu_mig_overview`: read-only MIG inventory — `nvidia.com/mig-*` slice resources, `nvidia.com/mig.strategy` labels, ClusterPolicy `migManager.strategy`, per-Node slice capacity, slice-consuming Pods, and WARN findings for over-allocation or Pending Pods whose profile no Node advertises.
+- `gpu_dra_overview`: read-only DRA discovery (`resource.k8s.io`, GA `v1` with automatic `v1beta1` fallback) — DeviceClasses, per-driver ResourceSlice device inventory, and ResourceClaim allocation/reservation state; an absent API group or missing RBAC is reported as a finding.
 
 GPU extended resources should be declared in container `limits`. These tools display the limits Kubernetes actually returns; they do not guess CUDA, image, or driver versions.
 
@@ -134,7 +136,7 @@ This release provides live **instant** metrics and bounded history summaries of 
 | GPU diagnostics foundation | ✅ Complete | Node, workload, Pending scheduling, and GPU Operator state diagnostics | Read-only Kubernetes API access |
 | Prometheus / DCGM instant observability | ✅ Complete | Metric discovery, latest per-GPU utilization, and Pod-attributed samples | Read-only PromQL instant queries |
 | Time series and capacity analysis | 🚧 Partially complete | `gpu_utilization_history` is available; `gpu_capacity_analyze` and `gpu_idle_resources` are next | Bounded PromQL range queries correlated with read-only Kubernetes resources |
-| MIG and DRA discovery | 🧭 Planned | MIG strategy/profile/resource summaries; ResourceClaim, DeviceClass, and ResourceSlice availability and binding state | Discovery and recommendations only; no CRD or Node configuration mutations |
+| MIG and DRA discovery | ✅ Complete | `gpu_mig_overview` (MIG strategy/profile/resource summaries) and `gpu_dra_overview` (ResourceClaim, DeviceClass, and ResourceSlice availability and binding state, with automatic v1 → v1beta1 fallback) | Discovery and recommendations only; no CRD or Node configuration mutations |
 | GPU management actions | 🔒 Not enabled by default | GPU Operator lifecycle, MIG/time-slicing reconfiguration, and DRA writes | If ever added, require a dedicated switch independent of `K8S_MCP_READ_ONLY`, allowlists, a dry-run plan, and explicit confirmation |
 
 The next phase correlates utilization history with Kubernetes allocatable resources and Pod limits to determine whether requested capacity matches observed utilization and whether capacity is fragmented. High-impact GPU management will never be enabled merely by `K8S_MCP_READ_ONLY=false`.

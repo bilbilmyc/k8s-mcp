@@ -13,7 +13,7 @@ from k8s_mcp.config import Settings, get_settings, reset_settings_cache
 from k8s_mcp.server import _doctor_payload, create_server
 from k8s_mcp.tool_groups import ALL_TOOL_GROUPS, TOOL_GROUP_MODULES
 
-# The 9 read-only NVIDIA GPU tools registered by the `gpu` group.
+# The 11 read-only NVIDIA GPU tools registered by the `gpu` group.
 _GPU_TOOLS = frozenset({
     "gpu_cluster_overview",
     "gpu_diagnose",
@@ -24,10 +24,12 @@ _GPU_TOOLS = frozenset({
     "gpu_utilization_overview",
     "gpu_workload_utilization",
     "gpu_utilization_history",
+    "gpu_mig_overview",
+    "gpu_dra_overview",
 })
 
-# Full inventory (89 group tools + ping), mirrors tests/test_tool_inventory.py.
-_FULL_INVENTORY_COUNT = 91
+# Full inventory (92 group tools + ping), mirrors tests/test_tool_inventory.py.
+_FULL_INVENTORY_COUNT = 93
 
 
 def _server_tools() -> frozenset[str]:
@@ -116,3 +118,22 @@ def test_settings_accepts_list_input():
 def test_doctor_payload_reports_enabled_groups():
     assert _doctor_payload(Settings())["enabled_groups"] == "all"
     assert _doctor_payload(Settings(enabled_groups=["gpu"]))["enabled_groups"] == ["gpu"]
+
+
+def test_prometheus_unavailable_hint_adapts_to_groups(monkeypatch):
+    """The failure hint must not promote find_prometheus_service() when the
+    observability group (its group) is disabled."""
+    from k8s_mcp.tools import nvidia_metrics
+
+    # Default: all groups → hint promotes the discovery tool.
+    assert "find_prometheus_service()" in nvidia_metrics._prometheus_unavailable("T", RuntimeError("down"))
+
+    # observability disabled → hint explains the trim instead.
+    monkeypatch.setenv("K8S_MCP_ENABLED_GROUPS", "gpu")
+    reset_settings_cache()
+    try:
+        hint = nvidia_metrics._prometheus_unavailable("T", RuntimeError("down"))
+        assert "find_prometheus_service()" not in hint.split("Set `K8S_MCP_PROMETHEUS_URL`")[0]
+        assert "observability" in hint and "not registered" in hint
+    finally:
+        reset_settings_cache()
